@@ -26,8 +26,7 @@ pub trait Registry: Send + Sync {
     async fn insert(&self, record: &DispatchRecord) -> Result<()>;
     async fn update_status(&self, slug: &str, status: Status) -> Result<()>;
     async fn update_checks(&self, slug: &str, checks: &HealthChecks) -> Result<()>;
-    async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64)
-        -> Result<()>;
+    async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
     async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
     async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()>;
@@ -137,10 +136,8 @@ impl SqliteRegistry {
             cost_usd: row.get("cost_usd"),
             num_turns: row.get::<Option<i32>, _>("num_turns").map(|v| v as u32),
             duration_ms: row.get::<Option<i64>, _>("duration_ms").map(|v| v as u64),
-            dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?
-                .with_timezone(&Utc),
-            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?
-                .with_timezone(&Utc),
+            dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
     }
 }
@@ -221,13 +218,7 @@ impl Registry for SqliteRegistry {
         Ok(())
     }
 
-    async fn update_cost(
-        &self,
-        slug: &str,
-        cost: f64,
-        turns: u32,
-        duration_ms: u64,
-    ) -> Result<()> {
+    async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE dispatches SET cost_usd = ?1, num_turns = ?2, duration_ms = ?3, updated_at = ?4 WHERE slug = ?5",
