@@ -28,7 +28,7 @@ To bypass (not recommended): `git commit --no-verify`
 
 ### pre-push
 
-Runs format check, clippy, and tests before push. Matches CI checks exactly.
+Runs format check, clippy, and tests before push. This is intended to mirror CI quality gates.
 
 To bypass (not recommended): `git push --no-verify`
 

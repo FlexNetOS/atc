@@ -98,8 +98,14 @@ impl SqliteRegistry {
     }
 
     /// In-memory instance for unit tests.
+    /// Uses a shared-cache URI so all pool connections share the same database.
+    /// Each call gets a unique name to avoid cross-test interference.
     pub async fn in_memory() -> Result<Self> {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let url = format!("sqlite:file:atc_test_{id}?mode=memory&cache=shared");
+        let pool = sqlx::SqlitePool::connect(&url).await?;
 
         // WAL mode is not supported for in-memory databases; skip verification
         sqlx::query("PRAGMA journal_mode=WAL")
@@ -141,8 +147,16 @@ impl SqliteRegistry {
                 threads_resolved: row.get::<i32, _>("check_threads_resolved") != 0,
             },
             cost_usd: row.get("cost_usd"),
-            num_turns: row.get::<Option<i32>, _>("num_turns").map(|v| v as u32),
-            duration_ms: row.get::<Option<i64>, _>("duration_ms").map(|v| v as u64),
+            num_turns: row
+                .get::<Option<i32>, _>("num_turns")
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("invalid num_turns value in database"))?,
+            duration_ms: row
+                .get::<Option<i64>, _>("duration_ms")
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("invalid duration_ms value in database"))?,
             dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
@@ -305,7 +319,16 @@ impl Registry for SqliteRegistry {
                 log_file = ?2,
                 status = 'running',
                 dispatched_at = ?3,
-                updated_at = ?4
+                updated_at = ?4,
+                check_agent_exited_clean = 0,
+                check_branch_pushed = 0,
+                check_pr_created = 0,
+                check_ci_passed = 0,
+                check_reviews_approved = 0,
+                check_threads_resolved = 0,
+                cost_usd = NULL,
+                num_turns = NULL,
+                duration_ms = NULL
             WHERE slug = ?5"#,
         )
         .bind(new_session)

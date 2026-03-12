@@ -24,7 +24,7 @@ help:
 	@echo "Installation:"
 	@echo "  make install       - Install atc to ~/.cargo/bin"
 	@echo "  make uninstall     - Remove atc from ~/.cargo/bin"
-	@echo "  make install-hooks - Install pre-push git hooks"
+	@echo "  make install-hooks - Install pre-commit and pre-push hooks"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  make doc        - Generate documentation"
