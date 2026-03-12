@@ -9,6 +9,7 @@ version.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+# Only used for ValueEnum derive on Mode enum (re-exported to atc-cli for CLI parsing)
 clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

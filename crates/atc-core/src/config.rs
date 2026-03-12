@@ -115,7 +115,9 @@ fn default_max_concurrency() -> usize {
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self { max_concurrency: 3 }
+        Self {
+            max_concurrency: default_max_concurrency(),
+        }
     }
 }
 
