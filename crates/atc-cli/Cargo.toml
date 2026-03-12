@@ -1,0 +1,22 @@
+[package]
+name = "atc-cli"
+description = "ATC — Air Traffic Control agent orchestrator"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+name = "atc_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "atc"
+path = "src/main.rs"
+
+[dependencies]
+atc-core = { path = "../atc-core" }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde_json.workspace = true

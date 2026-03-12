@@ -1,0 +1,50 @@
+use anyhow::Result;
+use atc_core::executor::AgentExecutor;
+use atc_core::registry::Registry;
+use std::sync::Arc;
+
+pub use args::{Args, Commands};
+
+mod args {
+    use clap::{Parser, Subcommand};
+
+    #[derive(Parser)]
+    #[command(name = "atc", about = "Air Traffic Control — agent orchestrator")]
+    pub struct Args {
+        #[arg(long, global = true)]
+        pub config: Option<std::path::PathBuf>,
+
+        #[command(subcommand)]
+        pub command: Commands,
+    }
+
+    #[derive(Subcommand)]
+    pub enum Commands {
+        /// Dispatch an agent to work on a task
+        Dispatch {
+            /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task)
+            #[arg(value_name = "MODE")]
+            mode: Option<String>,
+            /// Task slug (e.g. tasks/gitkb-42)
+            slug: String,
+        },
+    }
+}
+
+/// Library entry point for command execution. Used by `harmony-atc-cli` to compose
+/// commands via the library rather than re-implementing them.
+pub async fn run(
+    args: &Args,
+    _registry: Arc<dyn Registry>,
+    _executor: Arc<dyn AgentExecutor>,
+) -> Result<()> {
+    match &args.command {
+        Commands::Dispatch { mode, slug } => {
+            eprintln!(
+                "dispatch not yet implemented: mode={:?} slug={}",
+                mode, slug
+            );
+            anyhow::bail!("dispatch not yet implemented");
+        }
+    }
+}
