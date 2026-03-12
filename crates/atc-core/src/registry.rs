@@ -83,9 +83,14 @@ impl SqliteRegistry {
         let url = format!("sqlite:{}?mode=rwc", path.display());
         let pool = sqlx::SqlitePool::connect(&url).await?;
 
-        sqlx::query("PRAGMA journal_mode=WAL")
-            .execute(&pool)
+        let mode: (String,) = sqlx::query_as("PRAGMA journal_mode=WAL")
+            .fetch_one(&pool)
             .await?;
+        anyhow::ensure!(
+            mode.0 == "wal",
+            "failed to enable WAL mode, got: {}",
+            mode.0
+        );
         sqlx::query(CREATE_TABLE_SQL).execute(&pool).await?;
         sqlx::query(CREATE_INDEX_SQL).execute(&pool).await?;
 
@@ -96,6 +101,7 @@ impl SqliteRegistry {
     pub async fn in_memory() -> Result<Self> {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
 
+        // WAL mode is not supported for in-memory databases; skip verification
         sqlx::query("PRAGMA journal_mode=WAL")
             .execute(&pool)
             .await?;
@@ -123,7 +129,8 @@ impl SqliteRegistry {
             log_file: PathBuf::from(log_file_str),
             status: status_str.parse()?,
             mode: mode_str.parse()?,
-            retries: row.get::<i32, _>("retries") as u32,
+            retries: u32::try_from(row.get::<i32, _>("retries"))
+                .map_err(|_| anyhow::anyhow!("invalid retries value in database"))?,
             pr_url: row.get("pr_url"),
             checks: HealthChecks {
                 agent_exited_clean: row.get::<i32, _>("check_agent_exited_clean") != 0,
@@ -183,12 +190,17 @@ impl Registry for SqliteRegistry {
 
     async fn update_status(&self, slug: &str, status: Status) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE dispatches SET status = ?1, updated_at = ?2 WHERE slug = ?3")
-            .bind(status.as_str())
-            .bind(&now)
-            .bind(slug)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE dispatches SET status = ?1, updated_at = ?2 WHERE slug = ?3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(slug)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for slug: {slug}"
+        );
         Ok(())
     }
 
@@ -215,6 +227,7 @@ impl Registry for SqliteRegistry {
         .bind(slug)
         .execute(&self.pool)
         .await?;
+        // update_checks is best-effort (record may not exist during tests)
         Ok(())
     }
 
@@ -230,6 +243,7 @@ impl Registry for SqliteRegistry {
         .bind(slug)
         .execute(&self.pool)
         .await?;
+        // update_cost is best-effort (may be called after record is removed)
         Ok(())
     }
 
@@ -262,12 +276,17 @@ impl Registry for SqliteRegistry {
 
     async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query("UPDATE dispatches SET pr_url = ?1, updated_at = ?2 WHERE slug = ?3")
-            .bind(url)
-            .bind(&now)
-            .bind(slug)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE dispatches SET pr_url = ?1, updated_at = ?2 WHERE slug = ?3")
+                .bind(url)
+                .bind(&now)
+                .bind(slug)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for slug: {slug}"
+        );
         Ok(())
     }
 
@@ -279,7 +298,7 @@ impl Registry for SqliteRegistry {
         new_dispatched_at: DateTime<Utc>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE dispatches SET
                 retries = retries + 1,
                 session = ?1,
@@ -296,6 +315,10 @@ impl Registry for SqliteRegistry {
         .bind(slug)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for slug: {slug}"
+        );
         Ok(())
     }
 }

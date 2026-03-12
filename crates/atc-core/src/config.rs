@@ -27,13 +27,17 @@ impl AtcConfig {
             return Ok(toml::from_str(&contents)?);
         }
 
-        // 2. ATC_CONFIG env var
+        // 2. ATC_CONFIG env var (error if set but missing, matching --config behavior)
         if let Ok(env_path) = std::env::var("ATC_CONFIG") {
-            let path = PathBuf::from(env_path);
-            if path.exists() {
-                let contents = std::fs::read_to_string(&path)?;
-                return Ok(toml::from_str(&contents)?);
-            }
+            let path = PathBuf::from(&env_path);
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "ATC_CONFIG={} is set but file cannot be read: {}",
+                    env_path,
+                    e
+                )
+            })?;
+            return Ok(toml::from_str(&contents)?);
         }
 
         // 3. ./atc.toml
@@ -43,9 +47,14 @@ impl AtcConfig {
             return Ok(toml::from_str(&contents)?);
         }
 
-        // 4. ~/.config/atc/config.toml
-        let home = std::env::var("HOME").unwrap_or_default();
-        let xdg_path = PathBuf::from(home).join(".config/atc/config.toml");
+        // 4. XDG config path ($XDG_CONFIG_HOME/atc/config.toml, fallback ~/.config)
+        let xdg_path = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                PathBuf::from(home).join(".config")
+            })
+            .join("atc/config.toml");
         if xdg_path.exists() {
             let contents = std::fs::read_to_string(&xdg_path)?;
             return Ok(toml::from_str(&contents)?);
@@ -112,8 +121,10 @@ impl Default for BatchConfig {
 
 fn expand_tilde(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
+    if s == "~" {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".to_string()))
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         PathBuf::from(home).join(rest)
     } else {
         p.to_path_buf()

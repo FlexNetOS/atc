@@ -6,6 +6,7 @@ use std::sync::Arc;
 pub use args::{Args, Commands};
 
 mod args {
+    use atc_core::types::Mode;
     use clap::{Parser, Subcommand};
 
     #[derive(Parser)]
@@ -23,8 +24,8 @@ mod args {
         /// Dispatch an agent to work on a task
         Dispatch {
             /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task)
-            #[arg(value_name = "MODE")]
-            mode: Option<String>,
+            #[arg(value_name = "MODE", value_parser = clap::value_parser!(Mode))]
+            mode: Option<Mode>,
             /// Task slug (e.g. tasks/gitkb-42)
             slug: String,
         },

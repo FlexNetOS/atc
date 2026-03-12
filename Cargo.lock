@@ -102,6 +102,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "clap",
  "futures",
  "serde",
  "serde_json",

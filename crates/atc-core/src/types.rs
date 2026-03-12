@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DispatchRecord {
     pub slug: String,
     pub branch: String,
@@ -21,7 +22,7 @@ pub struct DispatchRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthChecks {
     pub agent_exited_clean: bool,
     pub branch_pushed: bool,
@@ -74,8 +75,9 @@ impl std::fmt::Display for Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
 pub enum Mode {
     Implement,
     Research,

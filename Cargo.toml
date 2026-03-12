@@ -40,7 +40,7 @@ tempfile = "3"
 
 [profile.release]
 lto = "thin"
-codegen-units = 16
+codegen-units = 1
 opt-level = "s"
 panic = "abort"
 strip = true
