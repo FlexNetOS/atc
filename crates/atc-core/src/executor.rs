@@ -154,7 +154,6 @@ impl ClaudeExecutor {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        use tokio::io::{AsyncBufReadExt, BufReader};
         let log_file_handle = tokio::fs::File::create(&opts.log_file).await?;
         let log_writer = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(
             log_file_handle,
@@ -163,49 +162,11 @@ impl ClaudeExecutor {
         let mut tasks = Vec::new();
 
         if let Some(stdout) = stdout {
-            let writer = log_writer.clone();
-            tasks.push(tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                let mut reader = BufReader::new(stdout);
-                let mut line = Vec::new();
-                loop {
-                    line.clear();
-                    let n = reader.read_until(b'\n', &mut line).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    let mut w = writer.lock().await;
-                    if let Err(e) = w.write_all(&line).await {
-                        eprintln!("warning: failed to write to log: {}", e);
-                    }
-                    if let Err(e) = w.flush().await {
-                        eprintln!("warning: failed to flush log: {}", e);
-                    }
-                }
-            }));
+            tasks.push(spawn_stream_to_log(stdout, log_writer.clone()));
         }
 
         if let Some(stderr) = stderr {
-            let writer = log_writer.clone();
-            tasks.push(tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                let mut reader = BufReader::new(stderr);
-                let mut line = Vec::new();
-                loop {
-                    line.clear();
-                    let n = reader.read_until(b'\n', &mut line).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    let mut w = writer.lock().await;
-                    if let Err(e) = w.write_all(&line).await {
-                        eprintln!("warning: failed to write to log: {}", e);
-                    }
-                    if let Err(e) = w.flush().await {
-                        eprintln!("warning: failed to flush log: {}", e);
-                    }
-                }
-            }));
+            tasks.push(spawn_stream_to_log(stderr, log_writer.clone()));
         }
 
         // Wait for all stream tasks and the child process
@@ -262,29 +223,36 @@ impl ClaudeExecutor {
 
         let mut bash_parts = Vec::new();
 
-        // Export env vars
+        // Export env vars (keys are validated to prevent shell injection)
         for (k, v) in &opts.env {
+            validate_env_key(k)?;
             bash_parts.push(format!("export {}='{}'", k, shell_escape(v)));
         }
 
         // cd to worktree
         bash_parts.push(format!("cd '{}'", shell_escape(&worktree_str)));
 
-        // Fetch task doc first, fail early if git-kb show fails
-        let task_doc_var = format!(
-            "TASK_DOC=$(GITKB_ROOT='{}' git-kb show '{}') || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
+        // Fetch task doc to a temp file to avoid shell expansion of content.
+        // Writing to a file (rather than a shell variable + echo) prevents
+        // command injection via $(), backticks, or other expansion in the
+        // task document body.
+        let task_doc_path = log_dir.join(format!("{}.taskdoc", opts.session_name));
+        let task_doc_path_str = task_doc_path.to_string_lossy();
+        bash_parts.push(format!(
+            "GITKB_ROOT='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
             shell_escape(kb_root),
             shell_escape(&opts.slug),
-        );
-        bash_parts.push(task_doc_var);
+            shell_escape(&task_doc_path_str),
+        ));
 
-        // Build the claude pipeline — pipe saved task doc to claude
+        // Build the claude pipeline — pipe task doc file to claude
         let mut claude_cmd = format!(
-            "echo \"$TASK_DOC\" | '{}' -p '{}' \
+            "cat '{}' | '{}' -p '{}' \
              --append-system-prompt-file '{}' \
              --dangerously-skip-permissions \
              --output-format stream-json --verbose \
              --max-turns {} --max-budget-usd {}",
+            shell_escape(&task_doc_path_str),
             shell_escape(&claude_bin_str),
             shell_escape(&user_prompt),
             shell_escape(&prompt_path_str),
@@ -306,6 +274,7 @@ impl ClaudeExecutor {
         // Cleanup temp files
         bash_parts.push("EXIT_CODE=$?".to_string());
         bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)));
+        bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)));
         if let Some(ref sp) = sandbox_path {
             bash_parts.push(format!("rm -f '{}'", shell_escape(&sp.to_string_lossy())));
         }
@@ -347,6 +316,54 @@ impl ClaudeExecutor {
             inline_exit_code: None,
         })
     }
+}
+
+/// Spawn a tokio task that reads lines from `reader` and writes them to the
+/// shared `writer`, flushing after each line for real-time observability.
+fn spawn_stream_to_log<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    writer: std::sync::Arc<tokio::sync::Mutex<tokio::io::BufWriter<tokio::fs::File>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            let mut w = writer.lock().await;
+            if let Err(e) = w.write_all(&line).await {
+                eprintln!("warning: failed to write to log: {}", e);
+            }
+            if let Err(e) = w.flush().await {
+                eprintln!("warning: failed to flush log: {}", e);
+            }
+        }
+    })
+}
+
+/// Validate that an environment variable key is safe for shell `export`.
+/// Accepts only `[A-Za-z_][A-Za-z0-9_]*` — the POSIX portable name set.
+/// Rejects keys that could enable shell injection (e.g., `x; rm -rf /`).
+fn validate_env_key(key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !key.is_empty(),
+        "environment variable key must not be empty"
+    );
+    let mut chars = key.chars();
+    let first = chars.next().unwrap();
+    anyhow::ensure!(
+        first.is_ascii_alphabetic() || first == '_',
+        "environment variable key must start with [A-Za-z_], got: {key:?}"
+    );
+    anyhow::ensure!(
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "environment variable key must contain only [A-Za-z0-9_], got: {key:?}"
+    );
+    Ok(())
 }
 
 /// Simple shell escaping: escape single quotes within single-quoted strings.
@@ -405,8 +422,44 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_escape_special_chars_safe_in_single_quotes() {
+        // These characters are all safe inside single-quoted bash strings
+        // (single quotes prevent all expansion). Verify they pass through unchanged.
+        assert_eq!(shell_escape("$(rm -rf /)"), "$(rm -rf /)");
+        assert_eq!(shell_escape("`whoami`"), "`whoami`");
+        assert_eq!(shell_escape("$HOME"), "$HOME");
+        assert_eq!(shell_escape("back\\slash"), "back\\slash");
+        assert_eq!(shell_escape("new\nline"), "new\nline");
+        assert_eq!(shell_escape("tab\there"), "tab\there");
+        assert_eq!(shell_escape("semi;colon"), "semi;colon");
+        assert_eq!(shell_escape("pipe|cmd"), "pipe|cmd");
+        assert_eq!(shell_escape("amp&bg"), "amp&bg");
+    }
+
+    #[test]
     #[should_panic(expected = "NUL byte")]
     fn test_shell_escape_rejects_nul() {
         shell_escape("hello\0world");
+    }
+
+    #[test]
+    fn test_validate_env_key_valid() {
+        assert!(validate_env_key("HOME").is_ok());
+        assert!(validate_env_key("GITKB_ROOT").is_ok());
+        assert!(validate_env_key("_private").is_ok());
+        assert!(validate_env_key("A").is_ok());
+        assert!(validate_env_key("_").is_ok());
+        assert!(validate_env_key("VAR_123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_key_rejects_injection() {
+        assert!(validate_env_key("").is_err());
+        assert!(validate_env_key("x; rm -rf /").is_err());
+        assert!(validate_env_key("FOO=bar").is_err());
+        assert!(validate_env_key("1STARTS_WITH_DIGIT").is_err());
+        assert!(validate_env_key("has space").is_err());
+        assert!(validate_env_key("has-dash").is_err());
+        assert!(validate_env_key("$(cmd)").is_err());
     }
 }
