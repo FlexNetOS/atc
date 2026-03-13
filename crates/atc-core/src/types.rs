@@ -100,6 +100,24 @@ impl Mode {
             Mode::CreateTask => "create-task",
         }
     }
+
+    /// TOML config key for this mode (matches CLI mode names, hyphenated).
+    pub fn config_key(&self) -> &'static str {
+        self.as_str()
+    }
+
+    /// Built-in default template for this mode (compiled into the binary).
+    pub fn default_template(&self) -> &'static str {
+        match self {
+            Mode::Implement => crate::templates::IMPLEMENT,
+            Mode::Research => crate::templates::RESEARCH,
+            Mode::KbUpdate => crate::templates::KB_UPDATE,
+            Mode::ReviewFix => crate::templates::REVIEW_FIX,
+            Mode::PrComments => crate::templates::PR_COMMENTS,
+            Mode::Refine => crate::templates::REFINE,
+            Mode::CreateTask => crate::templates::CREATE_TASK,
+        }
+    }
 }
 
 impl std::str::FromStr for Mode {

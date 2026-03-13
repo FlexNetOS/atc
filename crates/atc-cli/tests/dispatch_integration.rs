@@ -205,6 +205,7 @@ async fn test_dispatch_inline_inserts_registry_record() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-42",
+        None,
         true,
     )
     .await;
@@ -240,6 +241,7 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-99",
+        None,
         true,
     )
     .await;
@@ -275,6 +277,7 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-fail",
+        None,
         true,
     )
     .await;
@@ -348,6 +351,7 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         executor.as_ref(),
         None,
         "tasks/gitkb-auto-mode",
+        None,
         true,
     )
     .await;
@@ -390,6 +394,7 @@ async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-dup",
+        None,
         true,
     )
     .await;
@@ -402,6 +407,7 @@ async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-dup",
+        None,
         true,
     )
     .await;
@@ -431,6 +437,7 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-exec-fail",
+        None,
         true,
     )
     .await;

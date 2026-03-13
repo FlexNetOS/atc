@@ -31,9 +31,24 @@ mod args {
             /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task)
             #[arg(value_name = "MODE", value_parser = clap::value_parser!(Mode))]
             mode: Option<Mode>,
+            /// Additional directive appended to the system prompt
+            #[arg(long)]
+            directive: Option<String>,
             /// Run inline (synchronous, no tmux). Auto-enabled when ATC_CI=true.
             #[arg(long)]
             inline: bool,
+        },
+        /// Render and print the system prompt for a mode (useful for debugging)
+        Prompt {
+            /// Mode to render
+            #[arg(value_parser = clap::value_parser!(Mode))]
+            mode: Mode,
+            /// Task slug for {{slug}} interpolation (default: "tasks/example")
+            #[arg(long, default_value = "tasks/example")]
+            slug: String,
+            /// Additional directive to append
+            #[arg(long)]
+            directive: Option<String>,
         },
     }
 }
@@ -47,7 +62,12 @@ pub async fn run(
     executor: Arc<dyn AgentExecutor>,
 ) -> Result<()> {
     match &args.command {
-        Commands::Dispatch { mode, slug, inline } => {
+        Commands::Dispatch {
+            mode,
+            slug,
+            directive,
+            inline,
+        } => {
             let is_inline = *inline
                 || std::env::var("ATC_CI")
                     .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
@@ -58,9 +78,24 @@ pub async fn run(
                 executor.as_ref(),
                 mode.clone(),
                 slug,
+                directive.as_deref(),
                 is_inline,
             )
             .await
+        }
+        Commands::Prompt {
+            mode,
+            slug,
+            directive,
+        } => {
+            let prompt = atc_core::templates::render_prompt(
+                mode,
+                slug,
+                config,
+                directive.as_deref().unwrap_or(""),
+            )?;
+            println!("{prompt}");
+            Ok(())
         }
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level ATC configuration. Loaded from TOML file.
@@ -15,6 +16,9 @@ pub struct AtcConfig {
     pub dispatch: DispatchConfig,
     #[serde(default)]
     pub batch: BatchConfig,
+    /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
+    #[serde(default)]
+    pub modes: HashMap<String, ModeConfig>,
 }
 
 impl AtcConfig {
@@ -257,6 +261,15 @@ impl Default for BatchConfig {
             max_concurrency: default_max_concurrency(),
         }
     }
+}
+
+/// Per-mode template override configuration.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct ModeConfig {
+    /// Path to a template file on disk. Supports `~` expansion.
+    pub template_path: Option<String>,
+    /// Inline template string. Ignored if `template_path` is also set.
+    pub template_inline: Option<String>,
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
