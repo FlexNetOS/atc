@@ -7,8 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Guards PATH manipulation so integration tests don't race.
-static PATH_MUTEX: std::sync::LazyLock<Mutex<()>> =
-    std::sync::LazyLock::new(|| Mutex::new(()));
+static PATH_MUTEX: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// A stub executor that records the opts it was called with and returns success.
 struct StubExecutor {

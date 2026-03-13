@@ -348,8 +348,7 @@ max_budget_usd = 10.0
 
     #[test]
     fn test_load_missing_explicit_path_errors() {
-        let err =
-            AtcConfig::load(Some(Path::new("/tmp/nonexistent-atc-config.toml"))).unwrap_err();
+        let err = AtcConfig::load(Some(Path::new("/tmp/nonexistent-atc-config.toml"))).unwrap_err();
         assert!(
             err.to_string().contains("No such file")
                 || err.to_string().contains("not found")

@@ -94,11 +94,7 @@ async fn unassign_task(slug: &str, kb_root: &Path) {
 
     match status {
         Ok(s) if !s.success() => {
-            eprintln!(
-                "warning: git kb unassign {} exited {:?}",
-                slug,
-                s.code()
-            );
+            eprintln!("warning: git kb unassign {} exited {:?}", slug, s.code());
         }
         Err(e) => {
             eprintln!("warning: git kb unassign {} failed: {}", slug, e);
@@ -274,7 +270,10 @@ mod tests {
     fn test_derive_branch() {
         assert_eq!(derive_branch("tasks/gitkb-42"), "tasks-gitkb-42");
         assert_eq!(derive_branch("tasks/gitkb-264"), "tasks-gitkb-264");
-        assert_eq!(derive_branch("tasks/deep/nested/slug"), "tasks-deep-nested-slug");
+        assert_eq!(
+            derive_branch("tasks/deep/nested/slug"),
+            "tasks-deep-nested-slug"
+        );
         assert_eq!(derive_branch("simple"), "simple");
     }
 

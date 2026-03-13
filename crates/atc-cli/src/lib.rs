@@ -49,7 +49,15 @@ pub async fn run(
     match &args.command {
         Commands::Dispatch { mode, slug, inline } => {
             let is_inline = *inline || std::env::var("ATC_CI").is_ok();
-            dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), mode.clone(), slug, is_inline).await
+            dispatch::dispatch(
+                config,
+                registry.as_ref(),
+                executor.as_ref(),
+                mode.clone(),
+                slug,
+                is_inline,
+            )
+            .await
         }
     }
 }

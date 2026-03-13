@@ -14,9 +14,9 @@ pub struct AgentOpts {
     pub worktree_path: PathBuf,
     pub prompt: String, // rendered system prompt for the mode
     pub mode: Mode,
-    pub log_file: PathBuf, // stream-json output destination
+    pub log_file: PathBuf,            // stream-json output destination
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
-    pub session_name: String, // tmux session name (derived from slug)
+    pub session_name: String,         // tmux session name (derived from slug)
     pub sandbox: bool, // false = pass --settings with sandbox.enabled=false to claude
     pub inline: bool,  // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
@@ -24,7 +24,7 @@ pub struct AgentOpts {
 }
 
 pub struct AgentHandle {
-    pub session: String,             // tmux session name or pid string
+    pub session: String,               // tmux session name or pid string
     pub inline_exit_code: Option<i32>, // set immediately when inline = true
 }
 
@@ -81,10 +81,7 @@ impl ClaudeExecutor {
             // Warn but proceed if stdout is empty (unusual but not fatal per spec)
         }
         if task_doc.stdout.is_empty() {
-            eprintln!(
-                "warning: git kb show {} returned empty output",
-                opts.slug
-            );
+            eprintln!("warning: git kb show {} returned empty output", opts.slug);
         }
 
         // 2. Create log file parent dirs
@@ -228,7 +225,10 @@ impl ClaudeExecutor {
         );
 
         if let Some(ref sp) = sandbox_path {
-            claude_cmd.push_str(&format!(" --settings '{}'", shell_escape(&sp.to_string_lossy())));
+            claude_cmd.push_str(&format!(
+                " --settings '{}'",
+                shell_escape(&sp.to_string_lossy())
+            ));
         }
 
         claude_cmd.push_str(&format!(" 2>&1 | tee '{}'", shell_escape(&log_file_str)));
