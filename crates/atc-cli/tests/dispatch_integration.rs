@@ -539,7 +539,9 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
     assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
 
     let prompt = executor.prompt.lock().await;
-    let prompt = prompt.as_ref().expect("executor should have recorded a prompt");
+    let prompt = prompt
+        .as_ref()
+        .expect("executor should have recorded a prompt");
     assert!(
         prompt.contains("focus on error handling"),
         "directive should survive into rendered prompt, got: {prompt}"

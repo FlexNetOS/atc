@@ -280,7 +280,9 @@ mod tests {
         );
         cfg.config_dir = Some(dir.path().to_path_buf());
 
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap();
         assert_eq!(result, "Relative template for tasks/t.");
     }
 
