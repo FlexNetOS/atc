@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level ATC configuration. Loaded from TOML file.
@@ -15,6 +16,9 @@ pub struct AtcConfig {
     pub dispatch: DispatchConfig,
     #[serde(default)]
     pub batch: BatchConfig,
+    /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
+    #[serde(default)]
+    pub modes: HashMap<String, ModeConfig>,
 }
 
 impl AtcConfig {
@@ -32,6 +36,15 @@ impl AtcConfig {
             cfg.dispatch.max_budget_usd > 0.0 && cfg.dispatch.max_budget_usd.is_finite(),
             "dispatch.max_budget_usd must be a positive finite number"
         );
+        // Validate mode keys against known Mode variants
+        for key in cfg.modes.keys() {
+            key.parse::<crate::types::Mode>().map_err(|_| {
+                anyhow::anyhow!(
+                    "unknown mode '{}' in [modes.{}]; valid modes: implement, research, kb-update, review-fix, pr-comments, refine, create-task",
+                    key, key,
+                )
+            })?;
+        }
         Ok(cfg)
     }
 
@@ -257,6 +270,16 @@ impl Default for BatchConfig {
             max_concurrency: default_max_concurrency(),
         }
     }
+}
+
+/// Per-mode template override configuration.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModeConfig {
+    /// Path to a template file on disk. Supports `~` expansion.
+    pub template_path: Option<String>,
+    /// Inline template string. Ignored if `template_path` is also set.
+    pub template_inline: Option<String>,
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
@@ -570,6 +593,95 @@ max_budget_usd = 10.0
             err.to_string().contains("unknown field"),
             "expected deny_unknown_fields error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_parse_modes_from_toml() {
+        let toml = r#"
+[modes.implement]
+template_path = "/etc/atc/implement.md"
+
+[modes.research]
+template_inline = "Research prompt for {{slug}}"
+
+[modes.review-fix]
+template_path = "~/templates/review.md"
+template_inline = "fallback (ignored)"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.modes.len(), 3);
+
+        let implement = cfg.modes.get("implement").unwrap();
+        assert_eq!(
+            implement.template_path.as_deref(),
+            Some("/etc/atc/implement.md")
+        );
+        assert!(implement.template_inline.is_none());
+
+        let research = cfg.modes.get("research").unwrap();
+        assert!(research.template_path.is_none());
+        assert_eq!(
+            research.template_inline.as_deref(),
+            Some("Research prompt for {{slug}}")
+        );
+
+        let review_fix = cfg.modes.get("review-fix").unwrap();
+        assert!(review_fix.template_path.is_some());
+        assert!(review_fix.template_inline.is_some());
+    }
+
+    #[test]
+    fn test_mode_config_rejects_unknown_fields() {
+        let toml = r#"
+[modes.implement]
+template_paht = "typo"
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected deny_unknown_fields error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_unknown_mode_name_rejected() {
+        let toml = r#"
+[modes.implment]
+template_inline = "typo in mode name"
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown mode 'implment'"),
+            "expected unknown mode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_mode_names_accepted() {
+        let toml = r#"
+[modes.implement]
+template_inline = "a"
+
+[modes.research]
+template_inline = "b"
+
+[modes.kb-update]
+template_inline = "c"
+
+[modes.review-fix]
+template_inline = "d"
+
+[modes.pr-comments]
+template_inline = "e"
+
+[modes.refine]
+template_inline = "f"
+
+[modes.create-task]
+template_inline = "g"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.modes.len(), 7);
     }
 
     #[test]

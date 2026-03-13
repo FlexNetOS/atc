@@ -1,8 +1,9 @@
 use anyhow::Result;
-use atc_core::config::{AtcConfig, DispatchConfig};
+use atc_core::config::{AtcConfig, DispatchConfig, ModeConfig};
 use atc_core::executor::{AgentExecutor, AgentHandle, AgentOpts};
 use atc_core::registry::{Registry, SqliteRegistry};
 use atc_core::types::{Mode, Status};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -25,6 +26,36 @@ impl AgentExecutor for StubExecutor {
         Ok(AgentHandle {
             session: opts.session_name.clone(),
             inline_exit_code: Some(self.exit_code),
+        })
+    }
+}
+
+/// A stub executor that records the prompt it was called with and returns success.
+struct RecordingExecutor {
+    prompt: Mutex<Option<String>>,
+}
+
+impl RecordingExecutor {
+    fn new() -> Self {
+        Self {
+            prompt: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentExecutor for RecordingExecutor {
+    async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        *self.prompt.lock().await = Some(opts.prompt.clone());
+
+        if let Some(parent) = opts.log_file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&opts.log_file, b"").ok();
+
+        Ok(AgentHandle {
+            session: opts.session_name.clone(),
+            inline_exit_code: Some(0),
         })
     }
 }
@@ -125,6 +156,29 @@ exit 1
     make_executable(&script);
 }
 
+/// Build a modes map with template_inline for all modes used in tests.
+fn test_modes() -> HashMap<String, ModeConfig> {
+    let mut modes = HashMap::new();
+    for key in [
+        "implement",
+        "research",
+        "review-fix",
+        "kb-update",
+        "pr-comments",
+        "refine",
+        "create-task",
+    ] {
+        modes.insert(
+            key.to_string(),
+            ModeConfig {
+                template_path: None,
+                template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
+            },
+        );
+    }
+    modes
+}
+
 fn make_config(
     tmp: &std::path::Path,
     worktree_base: &std::path::Path,
@@ -142,6 +196,7 @@ fn make_config(
             max_turns: 10_000,
             max_budget_usd: 25.0,
         },
+        modes: test_modes(),
         ..Default::default()
     }
 }
@@ -205,6 +260,7 @@ async fn test_dispatch_inline_inserts_registry_record() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-42",
+        None,
         true,
     )
     .await;
@@ -240,6 +296,7 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-99",
+        None,
         true,
     )
     .await;
@@ -275,6 +332,7 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-fail",
+        None,
         true,
     )
     .await;
@@ -348,6 +406,7 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         executor.as_ref(),
         None,
         "tasks/gitkb-auto-mode",
+        None,
         true,
     )
     .await;
@@ -390,6 +449,7 @@ async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-dup",
+        None,
         true,
     )
     .await;
@@ -402,6 +462,7 @@ async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-dup",
+        None,
         true,
     )
     .await;
@@ -431,6 +492,7 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
         executor.as_ref(),
         Some(Mode::Implement),
         "tasks/gitkb-exec-fail",
+        None,
         true,
     )
     .await;
@@ -449,5 +511,39 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
     assert!(
         record.is_none(),
         "no registry record after executor failure"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_directive_survives_into_rendered_prompt() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingExecutor::new());
+
+    let result = atc_cli::dispatch::dispatch(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        Some(Mode::Implement),
+        "tasks/gitkb-directive",
+        Some("focus on error handling"),
+        true,
+    )
+    .await;
+
+    assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
+
+    let prompt = executor.prompt.lock().await;
+    let prompt = prompt
+        .as_ref()
+        .expect("executor should have recorded a prompt");
+    assert!(
+        prompt.contains("focus on error handling"),
+        "directive should survive into rendered prompt, got: {prompt}"
     );
 }

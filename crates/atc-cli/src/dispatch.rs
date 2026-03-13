@@ -166,6 +166,7 @@ pub async fn dispatch(
     executor: &dyn AgentExecutor,
     cli_mode: Option<Mode>,
     slug: &str,
+    directive: Option<&str>,
     inline: bool,
 ) -> Result<()> {
     let dispatch_cfg = &config.dispatch;
@@ -228,8 +229,9 @@ pub async fn dispatch(
     tokio::fs::create_dir_all(&log_dir).await?;
     let log_file = log_dir.join(format!("{}.jsonl", session_name));
 
-    // Render system prompt (placeholder — gitkb-268 provides template rendering)
-    let prompt = String::new();
+    // Render system prompt from mode template + config overrides
+    let prompt =
+        atc_core::templates::render_prompt(&mode, slug, config, directive.unwrap_or("")).await?;
 
     // 6. Build agent opts and spawn
     let opts = AgentOpts {
