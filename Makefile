@@ -2,7 +2,7 @@
 # ============
 # Common commands for Rust development
 
-.PHONY: all help build release test check clippy fmt fmt-check clean watch watch-test doc doc-open install uninstall install-hooks ci
+.PHONY: all help build release test test-bats check clippy fmt fmt-check clean watch watch-test doc doc-open install uninstall install-hooks ci
 
 # Default: alias 'all' to 'build'
 all: build
@@ -14,7 +14,8 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make build      - Build all crates"
-	@echo "  make test       - Run tests"
+	@echo "  make test       - Run Rust tests"
+	@echo "  make test-bats  - Run BATS integration tests"
 	@echo "  make check      - Run cargo check"
 	@echo "  make clippy     - Run clippy lints"
 	@echo "  make fmt        - Format code"
@@ -48,9 +49,14 @@ build:
 release:
 	cargo build --workspace --release
 
-# Run tests
+# Run tests (Rust unit + integration)
 test:
 	cargo test --workspace
+
+# Run BATS integration tests (requires bats: brew install bats-core)
+test-bats: build
+	@command -v bats >/dev/null 2>&1 || { echo "bats not found. Install with: brew install bats-core"; exit 1; }
+	bats tests/bats/
 
 # Run cargo check
 check:
