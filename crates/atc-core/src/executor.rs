@@ -77,8 +77,13 @@ impl ClaudeExecutor {
             .output()
             .await?;
 
-        if !task_doc.status.success() && !task_doc.stdout.is_empty() {
-            // Warn but proceed if stdout is empty (unusual but not fatal per spec)
+        if !task_doc.status.success() {
+            anyhow::bail!(
+                "git kb show {} failed (exit {:?}): {}",
+                opts.slug,
+                task_doc.status.code(),
+                String::from_utf8_lossy(&task_doc.stderr)
+            );
         }
         if task_doc.stdout.is_empty() {
             eprintln!("warning: git kb show {} returned empty output", opts.slug);
@@ -128,9 +133,12 @@ impl ClaudeExecutor {
             cmd.env(k, v);
         }
 
-        // 7. Pipe task doc to stdin
+        // 7. Pipe task doc to stdin, merge stderr into stdout (2>&1 equivalent)
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
+        // Both stdout and stderr are piped separately, then interleaved into
+        // the log file line-by-line to preserve temporal ordering, matching
+        // the `2>&1 | tee` behavior of spawn_tmux.
         cmd.stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn()?;
@@ -142,18 +150,64 @@ impl ClaudeExecutor {
             drop(stdin);
         }
 
-        // 8. Tee stdout+stderr to log file
-        let output = child.wait_with_output().await?;
+        // 8. Stream stdout and stderr to log file with interleaving preserved
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
 
-        // Write combined output to log file
-        let mut log_content = output.stdout.clone();
-        if !output.stderr.is_empty() {
-            log_content.extend_from_slice(&output.stderr);
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let log_file_handle = tokio::fs::File::create(&opts.log_file).await?;
+        let log_writer = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(
+            log_file_handle,
+        )));
+
+        let mut tasks = Vec::new();
+
+        if let Some(stdout) = stdout {
+            let writer = log_writer.clone();
+            tasks.push(tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut reader = BufReader::new(stdout);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    let n = reader.read_until(b'\n', &mut line).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    let mut w = writer.lock().await;
+                    let _ = w.write_all(&line).await;
+                    let _ = w.flush().await;
+                }
+            }));
         }
-        tokio::fs::write(&opts.log_file, &log_content).await?;
+
+        if let Some(stderr) = stderr {
+            let writer = log_writer.clone();
+            tasks.push(tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut reader = BufReader::new(stderr);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    let n = reader.read_until(b'\n', &mut line).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    let mut w = writer.lock().await;
+                    let _ = w.write_all(&line).await;
+                    let _ = w.flush().await;
+                }
+            }));
+        }
+
+        // Wait for all stream tasks and the child process
+        for t in tasks {
+            let _ = t.await;
+        }
+        let status = child.wait().await?;
 
         // 9. Extract exit code
-        let exit_code = output.status.code().unwrap_or(-1);
+        let exit_code = status.code().unwrap_or(-1);
 
         // Temp files cleaned up on drop
 

@@ -48,7 +48,11 @@ pub async fn run(
 ) -> Result<()> {
     match &args.command {
         Commands::Dispatch { mode, slug, inline } => {
-            let is_inline = *inline || std::env::var("ATC_CI").is_ok();
+            let is_inline = *inline
+                || matches!(
+                    std::env::var("ATC_CI").as_deref(),
+                    Ok("1") | Ok("true") | Ok("yes")
+                );
             dispatch::dispatch(
                 config,
                 registry.as_ref(),

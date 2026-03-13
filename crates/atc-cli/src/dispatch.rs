@@ -7,14 +7,15 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Derive branch name from slug: replace `/` with `-`.
+/// Derive branch name from slug: replace `/` with `--` to avoid collisions.
+/// Single `-` is not bijective (`tasks/foo-bar` and `tasks-foo/bar` would collide).
 pub fn derive_branch(slug: &str) -> String {
-    slug.replace('/', "-")
+    slug.replace('/', "--")
 }
 
 /// Build session name: `<slug-sanitized>@<mode>@<unix-ts>`.
 pub fn build_session_name(slug: &str, mode: &Mode) -> String {
-    let slug_sanitized = slug.replace('/', "-");
+    let slug_sanitized = slug.replace('/', "--");
     let ts = Utc::now().timestamp();
     format!("{}@{}@{}", slug_sanitized, mode.as_str(), ts)
 }
@@ -224,7 +225,25 @@ pub async fn dispatch(
         max_budget_usd: dispatch_cfg.max_budget_usd,
     };
 
-    let handle = executor.spawn(&opts).await?;
+    let handle = match executor.spawn(&opts).await {
+        Ok(h) => h,
+        Err(e) => {
+            unassign_task(slug, kb_root).await;
+            // Best-effort worktree cleanup; ignore errors
+            let _ = tokio::process::Command::new("meta")
+                .args([
+                    "git",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree_path.to_string_lossy(),
+                ])
+                .current_dir(&meta_workspace_root)
+                .status()
+                .await;
+            return Err(e);
+        }
+    };
 
     // 7. Insert registry record
     let now = Utc::now();
@@ -268,11 +287,11 @@ mod tests {
 
     #[test]
     fn test_derive_branch() {
-        assert_eq!(derive_branch("tasks/gitkb-42"), "tasks-gitkb-42");
-        assert_eq!(derive_branch("tasks/gitkb-264"), "tasks-gitkb-264");
+        assert_eq!(derive_branch("tasks/gitkb-42"), "tasks--gitkb-42");
+        assert_eq!(derive_branch("tasks/gitkb-264"), "tasks--gitkb-264");
         assert_eq!(
             derive_branch("tasks/deep/nested/slug"),
-            "tasks-deep-nested-slug"
+            "tasks--deep--nested--slug"
         );
         assert_eq!(derive_branch("simple"), "simple");
     }
@@ -283,7 +302,7 @@ mod tests {
         // Format: <slug-sanitized>@<mode>@<unix-ts>
         let parts: Vec<&str> = name.split('@').collect();
         assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "tasks-gitkb-42");
+        assert_eq!(parts[0], "tasks--gitkb-42");
         assert_eq!(parts[1], "implement");
         // Third part should be a valid unix timestamp
         let ts: i64 = parts[2].parse().expect("timestamp should be a number");
@@ -293,9 +312,9 @@ mod tests {
     #[test]
     fn test_build_session_name_different_modes() {
         let name = build_session_name("tasks/gitkb-264", &Mode::Research);
-        assert!(name.starts_with("tasks-gitkb-264@research@"));
+        assert!(name.starts_with("tasks--gitkb-264@research@"));
 
         let name = build_session_name("tasks/gitkb-264", &Mode::ReviewFix);
-        assert!(name.starts_with("tasks-gitkb-264@review-fix@"));
+        assert!(name.starts_with("tasks--gitkb-264@review-fix@"));
     }
 }
