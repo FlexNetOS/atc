@@ -313,6 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn test_derive_branch_edge_cases() {
+        // Empty slug
+        assert_eq!(derive_branch(""), "");
+        // Trailing slash
+        assert_eq!(derive_branch("tasks/"), "tasks--");
+        // Leading slash
+        assert_eq!(derive_branch("/tasks"), "--tasks");
+        // Multiple consecutive slashes
+        assert_eq!(derive_branch("a//b"), "a----b");
+        // No slashes
+        assert_eq!(derive_branch("no-slashes-here"), "no-slashes-here");
+    }
+
+    #[test]
     fn test_build_session_name_format() {
         let name = build_session_name("tasks/gitkb-42", &Mode::Implement);
         // Format: <slug-sanitized>@<mode>@<unix-ts>

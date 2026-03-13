@@ -350,7 +350,12 @@ impl ClaudeExecutor {
 }
 
 /// Simple shell escaping: escape single quotes within single-quoted strings.
+/// Rejects NUL bytes which would silently truncate bash strings.
 fn shell_escape(s: &str) -> String {
+    assert!(
+        !s.contains('\0'),
+        "NUL byte in shell argument is not allowed"
+    );
     s.replace('\'', "'\\''")
 }
 
@@ -397,5 +402,11 @@ mod tests {
         assert_eq!(shell_escape("hello"), "hello");
         assert_eq!(shell_escape("it's"), "it'\\''s");
         assert_eq!(shell_escape("a'b'c"), "a'\\''b'\\''c");
+    }
+
+    #[test]
+    #[should_panic(expected = "NUL byte")]
+    fn test_shell_escape_rejects_nul() {
+        shell_escape("hello\0world");
     }
 }

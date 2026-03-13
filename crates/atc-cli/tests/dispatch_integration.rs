@@ -231,3 +231,144 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
     let record = registry.get("tasks/gitkb-99").await.unwrap();
     assert!(record.is_none(), "no registry record after CAS failure");
 }
+
+#[tokio::test]
+async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    let worktree_base = tmp.path().join("worktrees");
+    std::fs::create_dir_all(&worktree_base).unwrap();
+
+    write_stub_git_script(&bin_dir);
+    write_stub_meta_script(&bin_dir, &worktree_base);
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
+
+    let config = make_config(tmp.path(), &worktree_base, &bin_dir);
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 1 });
+
+    let result = atc_cli::dispatch::dispatch(
+        &config,
+        registry.as_ref(),
+        executor.as_ref(),
+        Some(Mode::Implement),
+        "tasks/gitkb-fail",
+        true,
+    )
+    .await;
+
+    std::env::set_var("PATH", &original_path);
+
+    assert!(
+        result.is_ok(),
+        "dispatch should succeed even with non-zero exit: {:?}",
+        result.err()
+    );
+
+    let record = registry.get("tasks/gitkb-fail").await.unwrap();
+    assert!(record.is_some(), "registry record should exist");
+    let record = record.unwrap();
+    assert_eq!(
+        record.status,
+        Status::Failed,
+        "non-zero exit code should produce Failed status"
+    );
+    assert_eq!(record.slug, "tasks/gitkb-fail");
+}
+
+/// Create a stub `git-kb` that returns JSON with directives for mode resolution.
+fn write_stub_git_show_json(dir: &std::path::Path) {
+    let script = dir.join("git-kb");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+if [ "$1" = "assign" ]; then
+    exit 0
+elif [ "$1" = "unassign" ]; then
+    exit 0
+elif [ "$1" = "show" ]; then
+    if [ "$2" = "--json" ]; then
+        echo '{"slug":"'"$3"'","title":"Test","directives":["research"]}'
+        exit 0
+    fi
+    echo "---"
+    echo "slug: $3"
+    echo "title: Test task"
+    echo "type: task"
+    echo "status: active"
+    echo "directives: [research]"
+    echo "---"
+    echo ""
+    echo "Test task body."
+    exit 0
+fi
+exit 1
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_resolves_mode_from_frontmatter() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    let worktree_base = tmp.path().join("worktrees");
+    std::fs::create_dir_all(&worktree_base).unwrap();
+
+    write_stub_git_show_json(&bin_dir);
+    write_stub_meta_script(&bin_dir, &worktree_base);
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
+
+    let config = make_config(tmp.path(), &worktree_base, &bin_dir);
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    // Pass None for mode — should resolve from frontmatter directives
+    let result = atc_cli::dispatch::dispatch(
+        &config,
+        registry.as_ref(),
+        executor.as_ref(),
+        None,
+        "tasks/gitkb-auto-mode",
+        true,
+    )
+    .await;
+
+    std::env::set_var("PATH", &original_path);
+
+    assert!(
+        result.is_ok(),
+        "dispatch with mode from frontmatter failed: {:?}",
+        result.err()
+    );
+
+    let record = registry.get("tasks/gitkb-auto-mode").await.unwrap();
+    assert!(record.is_some(), "registry record should exist");
+    let record = record.unwrap();
+    assert_eq!(
+        record.mode,
+        Mode::Research,
+        "mode should be resolved from frontmatter directives"
+    );
+    assert!(
+        record.session.contains("@research@"),
+        "session name should contain resolved mode"
+    );
+}
