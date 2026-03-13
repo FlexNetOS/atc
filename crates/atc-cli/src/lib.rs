@@ -31,7 +31,7 @@ mod args {
             /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task)
             #[arg(value_name = "MODE", value_parser = clap::value_parser!(Mode))]
             mode: Option<Mode>,
-            /// Additional directive appended to the system prompt
+            /// Additional directive passed into prompt rendering
             #[arg(long)]
             directive: Option<String>,
             /// Run inline (synchronous, no tmux). Auto-enabled when ATC_CI=true.
@@ -46,7 +46,7 @@ mod args {
             /// Task slug for {{slug}} interpolation (default: "tasks/example")
             #[arg(long, default_value = "tasks/example")]
             slug: String,
-            /// Additional directive to append
+            /// Additional directive passed into prompt rendering
             #[arg(long)]
             directive: Option<String>,
         },

@@ -45,7 +45,16 @@ async fn resolve_base_template(mode: &Mode, config: &AtcConfig) -> Result<String
                     "both template_path and template_inline set; using template_path"
                 );
             }
-            let expanded = expand_tilde(Path::new(path_str));
+            let raw = expand_tilde(Path::new(path_str));
+            let expanded = if raw.is_relative() {
+                if let Some(ref dir) = config.config_dir {
+                    dir.join(&raw)
+                } else {
+                    raw
+                }
+            } else {
+                raw
+            };
             let content = tokio::fs::read_to_string(&expanded)
                 .await
                 .with_context(|| {
@@ -251,6 +260,28 @@ mod tests {
             err.to_string().contains("no template configured for mode"),
             "unexpected error: {err}"
         );
+    }
+
+    // -- Relative template_path resolved against config_dir --
+
+    #[tokio::test]
+    async fn test_relative_template_path_resolved_against_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("templates");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("impl.txt"), "Relative template for {{slug}}.").unwrap();
+
+        let mut cfg = config_with_mode(
+            "implement",
+            ModeConfig {
+                template_path: Some("templates/impl.txt".to_string()),
+                template_inline: None,
+            },
+        );
+        cfg.config_dir = Some(dir.path().to_path_buf());
+
+        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap();
+        assert_eq!(result, "Relative template for tasks/t.");
     }
 
     // -- All 7 modes resolve when configured --

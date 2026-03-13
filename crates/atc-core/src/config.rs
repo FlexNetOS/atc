@@ -36,6 +36,15 @@ impl AtcConfig {
             cfg.dispatch.max_budget_usd > 0.0 && cfg.dispatch.max_budget_usd.is_finite(),
             "dispatch.max_budget_usd must be a positive finite number"
         );
+        // Validate mode keys against known Mode variants
+        for key in cfg.modes.keys() {
+            key.parse::<crate::types::Mode>().map_err(|_| {
+                anyhow::anyhow!(
+                    "unknown mode '{}' in [modes.{}]; valid modes: implement, research, kb-update, review-fix, pr-comments, refine, create-task",
+                    key, key,
+                )
+            })?;
+        }
         Ok(cfg)
     }
 
@@ -632,6 +641,47 @@ template_paht = "typo"
             err.to_string().contains("unknown field"),
             "expected deny_unknown_fields error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_unknown_mode_name_rejected() {
+        let toml = r#"
+[modes.implment]
+template_inline = "typo in mode name"
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown mode 'implment'"),
+            "expected unknown mode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_mode_names_accepted() {
+        let toml = r#"
+[modes.implement]
+template_inline = "a"
+
+[modes.research]
+template_inline = "b"
+
+[modes.kb-update]
+template_inline = "c"
+
+[modes.review-fix]
+template_inline = "d"
+
+[modes.pr-comments]
+template_inline = "e"
+
+[modes.refine]
+template_inline = "f"
+
+[modes.create-task]
+template_inline = "g"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.modes.len(), 7);
     }
 
     #[test]

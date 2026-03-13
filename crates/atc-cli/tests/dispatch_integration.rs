@@ -30,6 +30,36 @@ impl AgentExecutor for StubExecutor {
     }
 }
 
+/// A stub executor that records the prompt it was called with and returns success.
+struct RecordingExecutor {
+    prompt: Mutex<Option<String>>,
+}
+
+impl RecordingExecutor {
+    fn new() -> Self {
+        Self {
+            prompt: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentExecutor for RecordingExecutor {
+    async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        *self.prompt.lock().await = Some(opts.prompt.clone());
+
+        if let Some(parent) = opts.log_file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&opts.log_file, b"").ok();
+
+        Ok(AgentHandle {
+            session: opts.session_name.clone(),
+            inline_exit_code: Some(0),
+        })
+    }
+}
+
 /// A stub executor that always returns an error.
 struct FailingExecutor;
 
@@ -481,5 +511,37 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
     assert!(
         record.is_none(),
         "no registry record after executor failure"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_directive_survives_into_rendered_prompt() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingExecutor::new());
+
+    let result = atc_cli::dispatch::dispatch(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        Some(Mode::Implement),
+        "tasks/gitkb-directive",
+        Some("focus on error handling"),
+        true,
+    )
+    .await;
+
+    assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
+
+    let prompt = executor.prompt.lock().await;
+    let prompt = prompt.as_ref().expect("executor should have recorded a prompt");
+    assert!(
+        prompt.contains("focus on error handling"),
+        "directive should survive into rendered prompt, got: {prompt}"
     );
 }
