@@ -18,7 +18,12 @@ pub const CREATE_TASK: &str = include_str!("templates/create_task.txt");
 /// 1. Resolve base template (config override → inline override → built-in default)
 /// 2. Replace `{{slug}}` and `{{directive}}` tokens
 /// 3. Append directive tail block when directive is non-empty
-pub fn render_prompt(mode: &Mode, slug: &str, config: &AtcConfig, directive: &str) -> Result<String> {
+pub fn render_prompt(
+    mode: &Mode,
+    slug: &str,
+    config: &AtcConfig,
+    directive: &str,
+) -> Result<String> {
     let base = resolve_base_template(mode, config)?;
     let rendered = base
         .replace("{{slug}}", slug)
@@ -203,8 +208,7 @@ mod tests {
     #[test]
     fn test_directive_appended_when_nonempty() {
         let cfg = default_config();
-        let result =
-            render_prompt(&Mode::Implement, "tasks/t", &cfg, "focus on tests").unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "focus on tests").unwrap();
         assert!(result.contains("---\nAdditional directive: focus on tests"));
     }
 
