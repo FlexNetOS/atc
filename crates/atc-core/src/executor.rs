@@ -55,9 +55,9 @@ impl ClaudeExecutor {
 
     /// Write sandbox-disable settings JSON to a file, returning the path.
     /// When sandbox=false, we pass this to claude --settings to disable OS sandbox.
-    fn write_sandbox_settings(path: &std::path::Path) -> Result<()> {
+    async fn write_sandbox_settings(path: &std::path::Path) -> Result<()> {
         let settings = r#"{"sandbox":{"enabled":false}}"#;
-        std::fs::write(path, settings)?;
+        tokio::fs::write(path, settings).await?;
         Ok(())
     }
 
@@ -96,12 +96,12 @@ impl ClaudeExecutor {
 
         // 3. Write system prompt to temp file
         let prompt_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(prompt_file.path(), &opts.prompt)?;
+        tokio::fs::write(prompt_file.path(), &opts.prompt).await?;
 
         // 4. Optionally write sandbox settings
         let sandbox_file = if !opts.sandbox {
             let f = tempfile::NamedTempFile::new()?;
-            Self::write_sandbox_settings(f.path())?;
+            Self::write_sandbox_settings(f.path()).await?;
             Some(f)
         } else {
             None
@@ -231,15 +231,15 @@ impl ClaudeExecutor {
             .log_file
             .parent()
             .unwrap_or_else(|| std::path::Path::new("/tmp"));
-        std::fs::create_dir_all(log_dir)?;
+        tokio::fs::create_dir_all(log_dir).await?;
 
         let prompt_path = log_dir.join(format!("{}.prompt.md", opts.session_name));
-        std::fs::write(&prompt_path, &opts.prompt)?;
+        tokio::fs::write(&prompt_path, &opts.prompt).await?;
 
         // 2. Optionally write sandbox settings
         let sandbox_path = if !opts.sandbox {
             let p = log_dir.join(format!("{}.sandbox.json", opts.session_name));
-            Self::write_sandbox_settings(&p)?;
+            Self::write_sandbox_settings(&p).await?;
             Some(p)
         } else {
             None

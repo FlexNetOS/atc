@@ -19,8 +19,7 @@ sqlx.workspace = true
 toml.workspace = true
 tokio.workspace = true
 futures.workspace = true
-
-tempfile = "3"
+tempfile.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

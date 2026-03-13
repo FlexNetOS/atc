@@ -75,11 +75,15 @@ async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()>
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "task {} is already claimed; use `atc status` to check\n{}",
-            slug,
-            stderr.trim()
-        );
+        let msg = if stderr.contains("already assigned") || stderr.contains("already claimed") {
+            format!(
+                "task {} is already claimed; use `atc status` to check",
+                slug
+            )
+        } else {
+            format!("failed to claim task {}", slug)
+        };
+        anyhow::bail!("{}\n{}", msg, stderr.trim());
     }
 
     Ok(())
@@ -174,7 +178,9 @@ pub async fn dispatch(
     // 3. Create worktree (with unassign-on-failure)
     let kb_basename = meta_workspace_root
         .file_name()
-        .expect("meta_workspace_root must not be /")
+        .ok_or_else(|| {
+            anyhow::anyhow!("meta_workspace_root has no basename (is it the filesystem root?)")
+        })?
         .to_string_lossy()
         .into_owned();
 

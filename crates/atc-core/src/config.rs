@@ -107,6 +107,7 @@ impl RegistryConfig {
 
 /// `[dispatch]` section
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DispatchConfig {
     /// Repo alias passed to `meta git worktree create --repo`. Required.
     pub repo: Option<String>,
@@ -213,13 +214,20 @@ impl DispatchConfig {
             base.join(&raw)
         };
 
-        std::fs::canonicalize(&absolute).map_err(|e| {
+        let canonical = std::fs::canonicalize(&absolute).map_err(|e| {
             anyhow::anyhow!(
                 "cannot resolve meta_workspace_root '{}': {}",
                 absolute.display(),
                 e
             )
-        })
+        })?;
+
+        anyhow::ensure!(
+            canonical.file_name().is_some(),
+            "meta_workspace_root must not be the filesystem root"
+        );
+
+        Ok(canonical)
     }
 }
 
@@ -544,6 +552,29 @@ max_budget_usd = 10.0
         let cfg = DispatchConfig::default();
         let resolved = cfg.resolved_meta_workspace_root(Some(dir.path())).unwrap();
         assert_eq!(resolved, std::fs::canonicalize(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn test_legacy_no_sandbox_rejected() {
+        let toml = "[dispatch]\nno_sandbox = true";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected deny_unknown_fields error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_meta_workspace_root_rejects_root() {
+        let cfg = DispatchConfig {
+            meta_workspace_root: Some(PathBuf::from("/")),
+            ..Default::default()
+        };
+        let err = cfg.resolved_meta_workspace_root(None).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be the filesystem root"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
