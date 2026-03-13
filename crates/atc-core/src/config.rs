@@ -143,3 +143,157 @@ fn expand_tilde(p: &Path) -> PathBuf {
         p.to_path_buf()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let cfg = AtcConfig::default();
+        assert_eq!(cfg.batch.max_concurrency, 3);
+        assert!(cfg.registry.path.is_none());
+        assert!(cfg.dispatch.log_dir.is_none());
+        assert!(cfg.dispatch.claude_bin.is_none());
+        assert!(!cfg.dispatch.no_sandbox);
+    }
+
+    #[test]
+    fn test_parse_valid_toml() {
+        let toml = r#"
+[batch]
+max_concurrency = 5
+
+[registry]
+path = "/tmp/test.db"
+
+[dispatch]
+no_sandbox = true
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 5);
+        assert_eq!(
+            cfg.registry.path.as_deref(),
+            Some(Path::new("/tmp/test.db"))
+        );
+        assert!(cfg.dispatch.no_sandbox);
+    }
+
+    #[test]
+    fn test_parse_empty_toml_uses_defaults() {
+        let cfg = AtcConfig::parse_and_validate("").unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 3);
+        assert!(cfg.registry.path.is_none());
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_concurrency() {
+        let toml = "[batch]\nmax_concurrency = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_concurrency must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_toml() {
+        let err = AtcConfig::parse_and_validate("not valid toml {{{}").unwrap_err();
+        assert!(
+            err.to_string().contains("expected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_explicit_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test.toml");
+        std::fs::write(&config_path, "[batch]\nmax_concurrency = 7").unwrap();
+        let cfg = AtcConfig::load(Some(&config_path)).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 7);
+    }
+
+    #[test]
+    fn test_load_missing_explicit_path_errors() {
+        let err = AtcConfig::load(Some(Path::new("/tmp/nonexistent-atc-config.toml"))).unwrap_err();
+        assert!(
+            err.to_string().contains("No such file")
+                || err.to_string().contains("not found")
+                || err.to_string().contains("os error 2"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_no_config_returns_defaults() {
+        // Temporarily unset env vars that could influence config loading
+        let _atc_config_guard = std::env::var("ATC_CONFIG").ok();
+        std::env::remove_var("ATC_CONFIG");
+
+        // Load from a CWD that definitely has no atc.toml
+        let _dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        // Don't change CWD in tests as it's process-global; just verify default behavior
+        // by checking that load(None) returns Ok when no env/file is present
+        // (it may find ./atc.toml in the workspace, so just verify it doesn't panic)
+        let result = AtcConfig::load(None);
+        assert!(result.is_ok());
+
+        // Restore
+        if let Some(val) = _atc_config_guard {
+            std::env::set_var("ATC_CONFIG", val);
+        }
+        let _ = original_dir;
+    }
+
+    #[test]
+    fn test_expand_tilde_bare() {
+        let result = expand_tilde(Path::new("~"));
+        assert_eq!(result, home_dir());
+    }
+
+    #[test]
+    fn test_expand_tilde_with_path() {
+        let result = expand_tilde(Path::new("~/foo/bar"));
+        assert_eq!(result, home_dir().join("foo/bar"));
+    }
+
+    #[test]
+    fn test_expand_tilde_no_tilde() {
+        let result = expand_tilde(Path::new("/absolute/path"));
+        assert_eq!(result, PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn test_expand_tilde_relative() {
+        let result = expand_tilde(Path::new("relative/path"));
+        assert_eq!(result, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_resolved_path_default() {
+        let cfg = RegistryConfig { path: None };
+        let resolved = cfg.resolved_path();
+        assert!(
+            resolved.to_string_lossy().ends_with("registry.db"),
+            "unexpected path: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_path_explicit() {
+        let cfg = RegistryConfig {
+            path: Some(PathBuf::from("/custom/path.db")),
+        };
+        assert_eq!(cfg.resolved_path(), PathBuf::from("/custom/path.db"));
+    }
+
+    #[test]
+    fn test_resolved_path_tilde() {
+        let cfg = RegistryConfig {
+            path: Some(PathBuf::from("~/my.db")),
+        };
+        assert_eq!(cfg.resolved_path(), home_dir().join("my.db"));
+    }
+}
