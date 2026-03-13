@@ -76,7 +76,7 @@ impl SqliteRegistry {
     /// Applies DDL on first open. Enables WAL mode on every open.
     pub async fn open(path: &std::path::Path) -> Result<Self> {
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
 
@@ -184,7 +184,7 @@ impl Registry for SqliteRegistry {
         .bind(record.log_file.to_string_lossy().as_ref())
         .bind(record.status.as_str())
         .bind(record.mode.as_str())
-        .bind(record.retries as i32)
+        .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
         .bind(&record.pr_url)
         .bind(record.checks.agent_exited_clean as i32)
         .bind(record.checks.branch_pushed as i32)
@@ -193,8 +193,20 @@ impl Registry for SqliteRegistry {
         .bind(record.checks.reviews_approved as i32)
         .bind(record.checks.threads_resolved as i32)
         .bind(record.cost_usd)
-        .bind(record.num_turns.map(|v| v as i32))
-        .bind(record.duration_ms.map(|v| v as i64))
+        .bind(
+            record
+                .num_turns
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("num_turns overflows i32"))?,
+        )
+        .bind(
+            record
+                .duration_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
+        )
         .bind(record.dispatched_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -251,8 +263,8 @@ impl Registry for SqliteRegistry {
             "UPDATE dispatches SET cost_usd = ?1, num_turns = ?2, duration_ms = ?3, updated_at = ?4 WHERE slug = ?5",
         )
         .bind(cost)
-        .bind(turns as i32)
-        .bind(duration_ms as i64)
+        .bind(i32::try_from(turns).map_err(|_| anyhow::anyhow!("turns overflows i32"))?)
+        .bind(i64::try_from(duration_ms).map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?)
         .bind(&now)
         .bind(slug)
         .execute(&self.pool)
