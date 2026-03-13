@@ -273,7 +273,9 @@ mod tests {
                 template_inline: Some("   \n\t  ".to_string()),
             },
         );
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap_err();
+        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("no template configured for mode"),
             "unexpected error: {err}"
