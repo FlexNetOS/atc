@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 /// Top-level ATC configuration. Loaded from TOML file.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct AtcConfig {
+    /// Directory containing the config file that was loaded.
+    /// Used to resolve relative paths in DispatchConfig.
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
+
     #[serde(default)]
     pub registry: RegistryConfig,
     #[serde(default)]
@@ -34,7 +39,9 @@ impl AtcConfig {
         if let Some(path) = config_path {
             let path = expand_tilde(path);
             let contents = std::fs::read_to_string(&path)?;
-            return Self::parse_and_validate(&contents);
+            let mut cfg = Self::parse_and_validate(&contents)?;
+            cfg.config_dir = path.parent().map(|p| p.to_path_buf());
+            return Ok(cfg);
         }
 
         // 2. ATC_CONFIG env var (error if set but missing, matching --config behavior)
@@ -47,14 +54,18 @@ impl AtcConfig {
                     e
                 )
             })?;
-            return Self::parse_and_validate(&contents);
+            let mut cfg = Self::parse_and_validate(&contents)?;
+            cfg.config_dir = path.parent().map(|p| p.to_path_buf());
+            return Ok(cfg);
         }
 
         // 3. ./atc.toml
         let local_path = PathBuf::from("./atc.toml");
         if local_path.exists() {
             let contents = std::fs::read_to_string(&local_path)?;
-            return Self::parse_and_validate(&contents);
+            let mut cfg = Self::parse_and_validate(&contents)?;
+            cfg.config_dir = std::env::current_dir().ok();
+            return Ok(cfg);
         }
 
         // 4. XDG config path ($XDG_CONFIG_HOME/atc/config.toml, fallback ~/.config)
@@ -64,7 +75,9 @@ impl AtcConfig {
             .join("atc/config.toml");
         if xdg_path.exists() {
             let contents = std::fs::read_to_string(&xdg_path)?;
-            return Self::parse_and_validate(&contents);
+            let mut cfg = Self::parse_and_validate(&contents)?;
+            cfg.config_dir = xdg_path.parent().map(|p| p.to_path_buf());
+            return Ok(cfg);
         }
 
         Ok(Self::default())
@@ -93,16 +106,55 @@ impl RegistryConfig {
 }
 
 /// `[dispatch]` section
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DispatchConfig {
+    /// Repo alias passed to `meta git worktree create --repo`. Required.
+    pub repo: Option<String>,
+    /// Base directory for all worktrees (META_WORKTREES env var).
+    /// Default: "/tmp/worktrees". Supports ~ expansion.
+    pub worktree_base: Option<PathBuf>,
+    /// Directory containing the `.meta.yaml` that governs the sub-workspace.
+    /// Used as `cwd` when invoking `meta git worktree create`.
+    /// Default: "." → resolved relative to the ATC config file's parent dir.
+    /// Supports ~ expansion.
+    pub meta_workspace_root: Option<PathBuf>,
     /// Directory where stream-json log files are written.
     /// Default: ~/.local/share/atc/logs/
     pub log_dir: Option<PathBuf>,
     /// Path to the `claude` binary. Default: "claude" (found via $PATH).
     pub claude_bin: Option<PathBuf>,
-    /// Pass --no-sandbox to claude. Default: false.
+    /// false = write sandbox settings JSON and pass --settings to claude.
+    /// Default: false (sandbox disabled, matches dispatch.sh).
     #[serde(default)]
-    pub no_sandbox: bool,
+    pub sandbox: bool,
+    /// --max-turns flag for claude. Default: 10000.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
+    /// --max-budget-usd flag for claude. Default: 25.0.
+    #[serde(default = "default_max_budget_usd")]
+    pub max_budget_usd: f64,
+}
+
+fn default_max_turns() -> u32 {
+    10_000
+}
+fn default_max_budget_usd() -> f64 {
+    25.0
+}
+
+impl Default for DispatchConfig {
+    fn default() -> Self {
+        Self {
+            repo: None,
+            worktree_base: None,
+            meta_workspace_root: None,
+            log_dir: None,
+            claude_bin: None,
+            sandbox: false,
+            max_turns: default_max_turns(),
+            max_budget_usd: default_max_budget_usd(),
+        }
+    }
 }
 
 impl DispatchConfig {
@@ -123,6 +175,51 @@ impl DispatchConfig {
             .as_ref()
             .map(|p| expand_tilde(p))
             .unwrap_or_else(|| PathBuf::from("claude"))
+    }
+
+    /// Resolve effective worktree base directory.
+    /// Default: "/tmp/worktrees". Supports ~ expansion.
+    pub fn resolved_worktree_base(&self) -> PathBuf {
+        self.worktree_base
+            .as_ref()
+            .map(|p| expand_tilde(p))
+            .unwrap_or_else(|| PathBuf::from("/tmp/worktrees"))
+    }
+
+    /// Resolve the repo alias. Returns an error if not configured.
+    pub fn resolved_repo(&self) -> anyhow::Result<&str> {
+        self.repo
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("dispatch.repo is required in atc.toml"))
+    }
+
+    /// Resolve meta_workspace_root to an absolute, canonicalized path.
+    /// If relative or ".", resolves relative to `config_dir`.
+    /// If `config_dir` is None, resolves relative to CWD.
+    pub fn resolved_meta_workspace_root(
+        &self,
+        config_dir: Option<&Path>,
+    ) -> anyhow::Result<PathBuf> {
+        let raw = self
+            .meta_workspace_root
+            .as_ref()
+            .map(|p| expand_tilde(p))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let absolute = if raw.is_absolute() {
+            raw
+        } else {
+            let base = config_dir.unwrap_or_else(|| Path::new("."));
+            base.join(&raw)
+        };
+
+        std::fs::canonicalize(&absolute).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot resolve meta_workspace_root '{}': {}",
+                absolute.display(),
+                e
+            )
+        })
     }
 }
 
@@ -154,7 +251,7 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
-fn expand_tilde(p: &Path) -> PathBuf {
+pub fn expand_tilde(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if s == "~" {
         home_dir()
@@ -176,7 +273,12 @@ mod tests {
         assert!(cfg.registry.path.is_none());
         assert!(cfg.dispatch.log_dir.is_none());
         assert!(cfg.dispatch.claude_bin.is_none());
-        assert!(!cfg.dispatch.no_sandbox);
+        assert!(!cfg.dispatch.sandbox);
+        assert!(cfg.dispatch.repo.is_none());
+        assert!(cfg.dispatch.worktree_base.is_none());
+        assert!(cfg.dispatch.meta_workspace_root.is_none());
+        assert_eq!(cfg.dispatch.max_turns, 10_000);
+        assert_eq!(cfg.dispatch.max_budget_usd, 25.0);
     }
 
     #[test]
@@ -189,7 +291,10 @@ max_concurrency = 5
 path = "/tmp/test.db"
 
 [dispatch]
-no_sandbox = true
+repo = "core"
+sandbox = true
+max_turns = 5000
+max_budget_usd = 10.0
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 5);
@@ -197,7 +302,10 @@ no_sandbox = true
             cfg.registry.path.as_deref(),
             Some(Path::new("/tmp/test.db"))
         );
-        assert!(cfg.dispatch.no_sandbox);
+        assert!(cfg.dispatch.sandbox);
+        assert_eq!(cfg.dispatch.repo.as_deref(), Some("core"));
+        assert_eq!(cfg.dispatch.max_turns, 5000);
+        assert_eq!(cfg.dispatch.max_budget_usd, 10.0);
     }
 
     #[test]
@@ -205,6 +313,8 @@ no_sandbox = true
         let cfg = AtcConfig::parse_and_validate("").unwrap();
         assert_eq!(cfg.batch.max_concurrency, 3);
         assert!(cfg.registry.path.is_none());
+        assert_eq!(cfg.dispatch.max_turns, 10_000);
+        assert_eq!(cfg.dispatch.max_budget_usd, 25.0);
     }
 
     #[test]
@@ -233,11 +343,13 @@ no_sandbox = true
         std::fs::write(&config_path, "[batch]\nmax_concurrency = 7").unwrap();
         let cfg = AtcConfig::load(Some(&config_path)).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 7);
+        assert_eq!(cfg.config_dir.as_deref(), Some(dir.path()));
     }
 
     #[test]
     fn test_load_missing_explicit_path_errors() {
-        let err = AtcConfig::load(Some(Path::new("/tmp/nonexistent-atc-config.toml"))).unwrap_err();
+        let err =
+            AtcConfig::load(Some(Path::new("/tmp/nonexistent-atc-config.toml"))).unwrap_err();
         assert!(
             err.to_string().contains("No such file")
                 || err.to_string().contains("not found")
@@ -248,24 +360,15 @@ no_sandbox = true
 
     #[test]
     fn test_load_no_config_returns_defaults() {
-        // Temporarily unset env vars that could influence config loading
         let _atc_config_guard = std::env::var("ATC_CONFIG").ok();
         std::env::remove_var("ATC_CONFIG");
 
-        // Load from a CWD that definitely has no atc.toml
-        let _dir = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        // Don't change CWD in tests as it's process-global; just verify default behavior
-        // by checking that load(None) returns Ok when no env/file is present
-        // (it may find ./atc.toml in the workspace, so just verify it doesn't panic)
         let result = AtcConfig::load(None);
         assert!(result.is_ok());
 
-        // Restore
         if let Some(val) = _atc_config_guard {
             std::env::set_var("ATC_CONFIG", val);
         }
-        let _ = original_dir;
     }
 
     #[test]
@@ -373,5 +476,102 @@ no_sandbox = true
             ..Default::default()
         };
         assert_eq!(cfg.resolved_claude_bin(), home_dir().join("bin/claude"));
+    }
+
+    #[test]
+    fn test_resolved_worktree_base_default() {
+        let cfg = DispatchConfig::default();
+        assert_eq!(
+            cfg.resolved_worktree_base(),
+            PathBuf::from("/tmp/worktrees")
+        );
+    }
+
+    #[test]
+    fn test_resolved_worktree_base_explicit() {
+        let cfg = DispatchConfig {
+            worktree_base: Some(PathBuf::from("/custom/worktrees")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_worktree_base(),
+            PathBuf::from("/custom/worktrees")
+        );
+    }
+
+    #[test]
+    fn test_resolved_repo_missing() {
+        let cfg = DispatchConfig::default();
+        let err = cfg.resolved_repo().unwrap_err();
+        assert!(err.to_string().contains("dispatch.repo is required"));
+    }
+
+    #[test]
+    fn test_resolved_repo_present() {
+        let cfg = DispatchConfig {
+            repo: Some("core".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_repo().unwrap(), "core");
+    }
+
+    #[test]
+    fn test_resolved_meta_workspace_root_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = DispatchConfig {
+            meta_workspace_root: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_meta_workspace_root(None).unwrap();
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
+    fn test_resolved_meta_workspace_root_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let cfg = DispatchConfig {
+            meta_workspace_root: Some(PathBuf::from("sub")),
+            ..Default::default()
+        };
+        let resolved = cfg.resolved_meta_workspace_root(Some(dir.path())).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&sub).unwrap());
+    }
+
+    #[test]
+    fn test_resolved_meta_workspace_root_default_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = DispatchConfig::default();
+        let resolved = cfg.resolved_meta_workspace_root(Some(dir.path())).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn test_dispatch_config_full_toml() {
+        let toml = r#"
+[dispatch]
+repo = "core"
+worktree_base = "/tmp/wt"
+meta_workspace_root = "/some/path"
+log_dir = "/tmp/logs"
+claude_bin = "/usr/bin/claude"
+sandbox = true
+max_turns = 500
+max_budget_usd = 5.0
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.dispatch.repo.as_deref(), Some("core"));
+        assert_eq!(
+            cfg.dispatch.worktree_base.as_deref(),
+            Some(Path::new("/tmp/wt"))
+        );
+        assert_eq!(
+            cfg.dispatch.meta_workspace_root.as_deref(),
+            Some(Path::new("/some/path"))
+        );
+        assert!(cfg.dispatch.sandbox);
+        assert_eq!(cfg.dispatch.max_turns, 500);
+        assert_eq!(cfg.dispatch.max_budget_usd, 5.0);
     }
 }

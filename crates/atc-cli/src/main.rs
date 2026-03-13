@@ -12,7 +12,9 @@ async fn main() -> anyhow::Result<()> {
     let config = AtcConfig::load(cli.config.as_deref())?;
     let db_path = config.registry.resolved_path();
     let registry = Arc::new(SqliteRegistry::open(&db_path).await?);
-    let executor = Arc::new(ClaudeExecutor::default());
+    let executor = Arc::new(ClaudeExecutor {
+        claude_bin: config.dispatch.resolved_claude_bin(),
+    });
 
-    atc_cli::run(&cli, registry, executor).await
+    atc_cli::run(&cli, &config, registry, executor).await
 }
