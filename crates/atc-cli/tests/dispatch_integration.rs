@@ -29,6 +29,23 @@ impl AgentExecutor for StubExecutor {
     }
 }
 
+/// A stub executor that always returns an error.
+struct FailingExecutor;
+
+#[async_trait::async_trait]
+impl AgentExecutor for FailingExecutor {
+    async fn spawn(&self, _opts: &AgentOpts) -> Result<AgentHandle> {
+        anyhow::bail!("executor spawn failed: simulated error")
+    }
+}
+
+/// Make a file executable (unix only).
+#[cfg(unix)]
+fn make_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Create a stub `git-kb` script that succeeds on `assign` and returns a task doc on `show`.
 fn write_stub_git_script(dir: &std::path::Path) {
     let script = dir.join("git-kb");
@@ -56,10 +73,7 @@ exit 1
     )
     .unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    make_executable(&script);
 }
 
 /// Create a stub `git-kb` script where `assign` fails (already claimed).
@@ -77,10 +91,7 @@ exit 1
     )
     .unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    make_executable(&script);
 }
 
 /// Create a stub `meta` script that simulates worktree creation by creating the directory.
@@ -111,10 +122,7 @@ exit 1
     )
     .unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    make_executable(&script);
 }
 
 fn make_config(
@@ -135,6 +143,48 @@ fn make_config(
             max_budget_usd: 25.0,
         },
         ..Default::default()
+    }
+}
+
+/// Common test fixture: tempdir, bin_dir, worktree_base, PATH override, and config.
+/// Returns (tmp, original_path, config, bin_dir, worktree_base).
+struct TestFixture {
+    tmp: tempfile::TempDir,
+    original_path: String,
+    config: AtcConfig,
+}
+
+impl TestFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let worktree_base = tmp.path().join("worktrees");
+        std::fs::create_dir_all(&worktree_base).unwrap();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
+
+        let config = make_config(tmp.path(), &worktree_base, &bin_dir);
+        Self {
+            tmp,
+            original_path,
+            config,
+        }
+    }
+
+    fn bin_dir(&self) -> std::path::PathBuf {
+        self.tmp.path().join("bin")
+    }
+
+    fn worktree_base(&self) -> std::path::PathBuf {
+        self.tmp.path().join("worktrees")
+    }
+}
+
+impl Drop for TestFixture {
+    fn drop(&mut self) {
+        std::env::set_var("PATH", &self.original_path);
     }
 }
 
@@ -313,10 +363,7 @@ exit 1
     )
     .unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    make_executable(&script);
 }
 
 #[tokio::test]
@@ -370,5 +417,85 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
     assert!(
         record.session.contains("@research@"),
         "session name should contain resolved mode"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    // First dispatch should succeed
+    let result = atc_cli::dispatch::dispatch(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        Some(Mode::Implement),
+        "tasks/gitkb-dup",
+        true,
+    )
+    .await;
+    assert!(result.is_ok(), "first dispatch failed: {:?}", result.err());
+
+    // Second dispatch of same slug should fail on UNIQUE constraint
+    let result = atc_cli::dispatch::dispatch(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        Some(Mode::Implement),
+        "tasks/gitkb-dup",
+        true,
+    )
+    .await;
+    assert!(result.is_err(), "duplicate dispatch should fail");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("UNIQUE constraint failed"),
+        "expected UNIQUE constraint error, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_executor_failure_triggers_cleanup() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(FailingExecutor);
+
+    let result = atc_cli::dispatch::dispatch(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        Some(Mode::Implement),
+        "tasks/gitkb-exec-fail",
+        true,
+    )
+    .await;
+
+    // Should propagate the executor error
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("simulated error"),
+        "unexpected error: {}",
+        err_msg
+    );
+
+    // No registry record should exist (dispatch didn't complete)
+    let record = registry.get("tasks/gitkb-exec-fail").await.unwrap();
+    assert!(
+        record.is_none(),
+        "no registry record after executor failure"
     );
 }

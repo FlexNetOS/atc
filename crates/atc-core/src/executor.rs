@@ -419,6 +419,7 @@ mod tests {
         assert_eq!(shell_escape("hello"), "hello");
         assert_eq!(shell_escape("it's"), "it'\\''s");
         assert_eq!(shell_escape("a'b'c"), "a'\\''b'\\''c");
+        assert_eq!(shell_escape(""), "");
     }
 
     #[test]

@@ -24,6 +24,14 @@ impl AtcConfig {
             cfg.batch.max_concurrency > 0,
             "batch.max_concurrency must be >= 1"
         );
+        anyhow::ensure!(
+            cfg.dispatch.max_turns > 0,
+            "dispatch.max_turns must be >= 1"
+        );
+        anyhow::ensure!(
+            cfg.dispatch.max_budget_usd > 0.0 && cfg.dispatch.max_budget_usd.is_finite(),
+            "dispatch.max_budget_usd must be a positive finite number"
+        );
         Ok(cfg)
     }
 
@@ -603,5 +611,37 @@ max_budget_usd = 5.0
         assert!(cfg.dispatch.sandbox);
         assert_eq!(cfg.dispatch.max_turns, 500);
         assert_eq!(cfg.dispatch.max_budget_usd, 5.0);
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_max_turns() {
+        let toml = "[dispatch]\nmax_turns = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_turns must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_negative_budget() {
+        let toml = "[dispatch]\nmax_budget_usd = -5.0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_budget() {
+        let toml = "[dispatch]\nmax_budget_usd = 0.0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -19,9 +19,8 @@ pub fn derive_branch(slug: &str) -> String {
 
 /// Build session name: `<slug-sanitized>@<mode>@<unix-ts>`.
 pub fn build_session_name(slug: &str, mode: &Mode) -> String {
-    let slug_sanitized = slug.replace('/', "--");
     let ts = Utc::now().timestamp();
-    format!("{}@{}@{}", slug_sanitized, mode.as_str(), ts)
+    format!("{}@{}@{}", derive_branch(slug), mode.as_str(), ts)
 }
 
 /// Resolve mode from CLI arg or from task frontmatter `directives` field.
