@@ -27,8 +27,8 @@ async fn resolve_mode(cli_mode: Option<Mode>, slug: &str, kb_root: &Path) -> Res
     }
 
     // Fall back to reading directives from task frontmatter
-    let output = tokio::process::Command::new("git")
-        .args(["kb", "show", "--json", slug])
+    let output = tokio::process::Command::new("git-kb")
+        .args(["show", "--json", slug])
         .env("GITKB_ROOT", kb_root)
         .output()
         .await?;
@@ -67,8 +67,8 @@ async fn resolve_mode(cli_mode: Option<Mode>, slug: &str, kb_root: &Path) -> Res
 
 /// CAS-claim a task via `git kb assign`.
 async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()> {
-    let output = tokio::process::Command::new("git")
-        .args(["kb", "assign", slug, session_name])
+    let output = tokio::process::Command::new("git-kb")
+        .args(["assign", slug, session_name])
         .env("GITKB_ROOT", kb_root)
         .output()
         .await?;
@@ -91,8 +91,8 @@ async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()>
 
 /// Release a CAS claim on failure. Errors are logged but not propagated.
 async fn unassign_task(slug: &str, kb_root: &Path) {
-    let status = tokio::process::Command::new("git")
-        .args(["kb", "unassign", slug])
+    let status = tokio::process::Command::new("git-kb")
+        .args(["unassign", slug])
         .env("GITKB_ROOT", kb_root)
         .status()
         .await;

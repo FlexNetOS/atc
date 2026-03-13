@@ -71,8 +71,8 @@ impl ClaudeExecutor {
             .get("GITKB_ROOT")
             .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
 
-        let task_doc = Command::new("git")
-            .args(["kb", "show", &opts.slug])
+        let task_doc = Command::new("git-kb")
+            .args(["show", &opts.slug])
             .env("GITKB_ROOT", kb_root)
             .output()
             .await?;
@@ -264,7 +264,7 @@ impl ClaudeExecutor {
 
         // Build the claude pipeline
         let mut claude_cmd = format!(
-            "GITKB_ROOT='{}' git kb show '{}' | '{}' -p '{}' \
+            "GITKB_ROOT='{}' git-kb show '{}' | '{}' -p '{}' \
              --append-system-prompt-file '{}' \
              --dangerously-skip-permissions \
              --output-format stream-json --verbose \

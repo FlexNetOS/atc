@@ -29,19 +29,19 @@ impl AgentExecutor for StubExecutor {
     }
 }
 
-/// Create a stub `git` script that succeeds on `kb assign` and returns a task doc on `kb show`.
+/// Create a stub `git-kb` script that succeeds on `assign` and returns a task doc on `show`.
 fn write_stub_git_script(dir: &std::path::Path) {
-    let script = dir.join("git");
+    let script = dir.join("git-kb");
     std::fs::write(
         &script,
         r#"#!/bin/bash
-if [ "$1" = "kb" ] && [ "$2" = "assign" ]; then
+if [ "$1" = "assign" ]; then
     exit 0
-elif [ "$1" = "kb" ] && [ "$2" = "unassign" ]; then
+elif [ "$1" = "unassign" ]; then
     exit 0
-elif [ "$1" = "kb" ] && [ "$2" = "show" ]; then
+elif [ "$1" = "show" ]; then
     echo "---"
-    echo "slug: $4"
+    echo "slug: $3"
     echo "title: Test task"
     echo "type: task"
     echo "status: active"
@@ -51,7 +51,7 @@ elif [ "$1" = "kb" ] && [ "$2" = "show" ]; then
     echo "Test task body."
     exit 0
 fi
-exec /usr/bin/git "$@"
+exit 1
 "#,
     )
     .unwrap();
@@ -62,17 +62,17 @@ exec /usr/bin/git "$@"
     }
 }
 
-/// Create a stub `git` script where `kb assign` fails (already claimed).
+/// Create a stub `git-kb` script where `assign` fails (already claimed).
 fn write_stub_git_assign_fails(dir: &std::path::Path) {
-    let script = dir.join("git");
+    let script = dir.join("git-kb");
     std::fs::write(
         &script,
         r#"#!/bin/bash
-if [ "$1" = "kb" ] && [ "$2" = "assign" ]; then
+if [ "$1" = "assign" ]; then
     echo "error: task already assigned" >&2
     exit 1
 fi
-exec /usr/bin/git "$@"
+exit 1
 "#,
     )
     .unwrap();
