@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tracing::{info, warn};
 
 #[async_trait]
 pub trait AgentExecutor: Send + Sync {
@@ -62,6 +63,7 @@ impl ClaudeExecutor {
     }
 
     /// CI mode: run claude synchronously, capture exit code.
+    #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
     async fn spawn_inline(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         use tokio::process::Command;
 
@@ -86,7 +88,7 @@ impl ClaudeExecutor {
             );
         }
         if task_doc.stdout.is_empty() {
-            eprintln!("warning: git kb show {} returned empty output", opts.slug);
+            warn!(slug = %opts.slug, "git kb show returned empty output");
         }
 
         // 2. Create log file parent dirs
@@ -141,6 +143,7 @@ impl ClaudeExecutor {
         // the `2>&1 | tee` behavior of spawn_tmux.
         cmd.stderr(std::process::Stdio::piped());
 
+        info!(slug = %opts.slug, "spawning claude (inline)");
         let mut child = cmd.spawn()?;
 
         // Write task doc to stdin
@@ -177,6 +180,7 @@ impl ClaudeExecutor {
 
         // 9. Extract exit code
         let exit_code = status.code().unwrap_or(-1);
+        info!(slug = %opts.slug, exit_code, "inline spawn completed");
 
         // Temp files cleaned up on drop
 
@@ -187,6 +191,7 @@ impl ClaudeExecutor {
     }
 
     /// Local mode: create a named tmux session, return immediately.
+    #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
     async fn spawn_tmux(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         use tokio::process::Command;
 
@@ -283,6 +288,7 @@ impl ClaudeExecutor {
         let bash_body = bash_parts.join(" ; ");
 
         // 4. Create tmux session
+        info!(session = %opts.session_name, "creating tmux session");
         let output = Command::new("tmux")
             .args([
                 "new-session",
@@ -311,6 +317,7 @@ impl ClaudeExecutor {
             );
         }
 
+        info!(session = %opts.session_name, "tmux session created");
         Ok(AgentHandle {
             session: opts.session_name.clone(),
             inline_exit_code: None,
@@ -336,10 +343,10 @@ fn spawn_stream_to_log<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             }
             let mut w = writer.lock().await;
             if let Err(e) = w.write_all(&line).await {
-                eprintln!("warning: failed to write to log: {}", e);
+                warn!(error = %e, "failed to write to log");
             }
             if let Err(e) = w.flush().await {
-                eprintln!("warning: failed to flush log: {}", e);
+                warn!(error = %e, "failed to flush log");
             }
         }
     })

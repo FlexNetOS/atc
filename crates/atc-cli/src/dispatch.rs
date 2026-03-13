@@ -6,6 +6,7 @@ use atc_core::types::{DispatchRecord, HealthChecks, Mode, Status};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::{debug, info, warn};
 
 /// Derive branch name from slug: replace `/` with `--`.
 ///
@@ -24,11 +25,14 @@ pub fn build_session_name(slug: &str, mode: &Mode) -> String {
 }
 
 /// Resolve mode from CLI arg or from task frontmatter `directives` field.
+#[tracing::instrument(skip(kb_root), fields(slug))]
 async fn resolve_mode(cli_mode: Option<Mode>, slug: &str, kb_root: &Path) -> Result<Mode> {
     if let Some(m) = cli_mode {
+        debug!(mode = %m.as_str(), "mode provided via CLI arg");
         return Ok(m);
     }
 
+    debug!("no CLI mode; reading directives from task frontmatter");
     // Fall back to reading directives from task frontmatter
     let output = tokio::process::Command::new("git-kb")
         .args(["show", "--json", slug])
@@ -69,6 +73,7 @@ async fn resolve_mode(cli_mode: Option<Mode>, slug: &str, kb_root: &Path) -> Res
 }
 
 /// CAS-claim a task via `git kb assign`.
+#[tracing::instrument(skip(kb_root))]
 async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()> {
     let output = tokio::process::Command::new("git-kb")
         .args(["assign", slug, session_name])
@@ -93,6 +98,7 @@ async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()>
 }
 
 /// Release a CAS claim on failure. Errors are logged but not propagated.
+#[tracing::instrument(skip(kb_root))]
 async fn unassign_task(slug: &str, kb_root: &Path) {
     let status = tokio::process::Command::new("git-kb")
         .args(["unassign", slug])
@@ -102,16 +108,19 @@ async fn unassign_task(slug: &str, kb_root: &Path) {
 
     match status {
         Ok(s) if !s.success() => {
-            eprintln!("warning: git kb unassign {} exited {:?}", slug, s.code());
+            warn!(slug, exit_code = ?s.code(), "git kb unassign exited with error");
         }
         Err(e) => {
-            eprintln!("warning: git kb unassign {} failed: {}", slug, e);
+            warn!(slug, error = %e, "git kb unassign failed");
         }
-        _ => {}
+        _ => {
+            debug!(slug, "unassign succeeded");
+        }
     }
 }
 
 /// Create a worktree via `meta git worktree create`.
+#[tracing::instrument(skip(meta_workspace_root, kb_root))]
 async fn create_worktree(
     worktree_base: &Path,
     kb_basename: &str,
@@ -150,6 +159,7 @@ async fn create_worktree(
 }
 
 /// Execute the full dispatch flow.
+#[tracing::instrument(skip(config, registry, executor))]
 pub async fn dispatch(
     config: &AtcConfig,
     registry: &dyn Registry,
@@ -169,7 +179,9 @@ pub async fn dispatch(
     let log_dir = dispatch_cfg.resolved_log_dir();
 
     // 1. Resolve mode
+    debug!(slug, "resolving mode");
     let mode = resolve_mode(cli_mode, slug, kb_root).await?;
+    info!(slug, mode = %mode.as_str(), "mode resolved");
 
     // Derive branch and session name
     let branch = derive_branch(slug);
@@ -282,14 +294,17 @@ pub async fn dispatch(
     registry.insert(&record).await?;
 
     if let Some(exit_code) = handle.inline_exit_code {
-        eprintln!(
-            "dispatch complete: slug={} session={} exit_code={}",
-            slug, handle.session, exit_code
+        info!(
+            slug,
+            session = %handle.session,
+            exit_code,
+            "dispatch complete (inline)"
         );
     } else {
-        eprintln!(
-            "dispatch started: slug={} session={} (tmux)",
-            slug, handle.session
+        info!(
+            slug,
+            session = %handle.session,
+            "dispatch started (tmux)"
         );
     }
 
