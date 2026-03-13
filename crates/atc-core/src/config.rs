@@ -105,6 +105,27 @@ pub struct DispatchConfig {
     pub no_sandbox: bool,
 }
 
+impl DispatchConfig {
+    /// Resolve effective log directory: config value or default under ATC_ROOT.
+    pub fn resolved_log_dir(&self) -> PathBuf {
+        if let Some(ref p) = self.log_dir {
+            return expand_tilde(p);
+        }
+        let root = std::env::var("ATC_ROOT")
+            .map(|p| expand_tilde(Path::new(&p)))
+            .unwrap_or_else(|_| home_dir().join(".local/share/atc"));
+        root.join("logs")
+    }
+
+    /// Resolve effective claude binary path: config value or "claude".
+    pub fn resolved_claude_bin(&self) -> PathBuf {
+        self.claude_bin
+            .as_ref()
+            .map(|p| expand_tilde(p))
+            .unwrap_or_else(|| PathBuf::from("claude"))
+    }
+}
+
 /// `[batch]` section
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BatchConfig {
@@ -295,5 +316,62 @@ no_sandbox = true
             path: Some(PathBuf::from("~/my.db")),
         };
         assert_eq!(cfg.resolved_path(), home_dir().join("my.db"));
+    }
+
+    // --- DispatchConfig tests ---
+
+    #[test]
+    fn test_resolved_log_dir_default() {
+        let cfg = DispatchConfig::default();
+        let resolved = cfg.resolved_log_dir();
+        assert!(
+            resolved.to_string_lossy().ends_with("logs"),
+            "unexpected path: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_log_dir_explicit() {
+        let cfg = DispatchConfig {
+            log_dir: Some(PathBuf::from("/custom/logs")),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_log_dir(), PathBuf::from("/custom/logs"));
+    }
+
+    #[test]
+    fn test_resolved_log_dir_tilde() {
+        let cfg = DispatchConfig {
+            log_dir: Some(PathBuf::from("~/atc-logs")),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_log_dir(), home_dir().join("atc-logs"));
+    }
+
+    #[test]
+    fn test_resolved_claude_bin_default() {
+        let cfg = DispatchConfig::default();
+        assert_eq!(cfg.resolved_claude_bin(), PathBuf::from("claude"));
+    }
+
+    #[test]
+    fn test_resolved_claude_bin_explicit() {
+        let cfg = DispatchConfig {
+            claude_bin: Some(PathBuf::from("/usr/local/bin/claude")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_claude_bin(),
+            PathBuf::from("/usr/local/bin/claude")
+        );
+    }
+
+    #[test]
+    fn test_resolved_claude_bin_tilde() {
+        let cfg = DispatchConfig {
+            claude_bin: Some(PathBuf::from("~/bin/claude")),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_claude_bin(), home_dir().join("bin/claude"));
     }
 }

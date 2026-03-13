@@ -387,8 +387,9 @@ impl Registry for SqliteRegistry {
 mod tests {
     use super::*;
     use crate::types::{DispatchRecord, HealthChecks, Mode, Status};
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn sample_record(slug: &str) -> DispatchRecord {
         DispatchRecord {
@@ -815,5 +816,122 @@ mod tests {
         assert_eq!(fetched.cost_usd, None);
         assert_eq!(fetched.num_turns, None);
         assert_eq!(fetched.duration_ms, None);
+    }
+
+    // --- Timestamp advancement tests ---
+
+    #[tokio::test]
+    async fn test_updated_at_advances_on_mutation() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        registry
+            .insert(&sample_record("tasks/gitkb-42"))
+            .await
+            .unwrap();
+        let before = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+
+        // Small sleep to ensure clock advances
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        registry
+            .update_status("tasks/gitkb-42", Status::Done)
+            .await
+            .unwrap();
+        let after = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+
+        assert!(
+            after.updated_at > before.updated_at,
+            "updated_at should advance: before={}, after={}",
+            before.updated_at,
+            after.updated_at
+        );
+    }
+
+    // --- List ordering tests ---
+
+    #[tokio::test]
+    async fn test_list_ordered_by_dispatched_at_desc() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        // Insert records with known ordering: older first
+        let mut older = sample_record("tasks/older");
+        older.dispatched_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut newer = sample_record("tasks/newer");
+        newer.dispatched_at = DateTime::parse_from_rfc3339("2025-06-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // Insert older first, newer second
+        registry.insert(&older).await.unwrap();
+        registry.insert(&newer).await.unwrap();
+
+        let all = registry.list(StatusFilter::all()).await.unwrap();
+        assert_eq!(all.len(), 2);
+        // DESC order: newer should be first
+        assert_eq!(all[0].slug, "tasks/newer");
+        assert_eq!(all[1].slug, "tasks/older");
+    }
+
+    // --- Serde JSON round-trip tests ---
+
+    #[tokio::test]
+    async fn test_dispatch_record_serde_json_round_trip() {
+        let mut record = sample_record("tasks/gitkb-42");
+        record.pr_url = Some("https://github.com/org/repo/pull/1".to_string());
+        record.cost_usd = Some(2.50);
+        record.num_turns = Some(10);
+        record.duration_ms = Some(60_000);
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: DispatchRecord = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.slug, record.slug);
+        assert_eq!(deserialized.status, record.status);
+        assert_eq!(deserialized.mode, record.mode);
+        assert_eq!(deserialized.pr_url, record.pr_url);
+        assert_eq!(deserialized.cost_usd, record.cost_usd);
+        assert_eq!(deserialized.num_turns, record.num_turns);
+        assert_eq!(deserialized.duration_ms, record.duration_ms);
+        assert_eq!(deserialized.checks, record.checks);
+    }
+
+    #[test]
+    fn test_status_serde_kebab_case() {
+        let json = serde_json::to_string(&Status::NeedsReview).unwrap();
+        assert_eq!(json, "\"needs-review\"");
+        let deserialized: Status = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, Status::NeedsReview);
+    }
+
+    #[test]
+    fn test_mode_serde_kebab_case() {
+        let json = serde_json::to_string(&Mode::KbUpdate).unwrap();
+        assert_eq!(json, "\"kb-update\"");
+        let deserialized: Mode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, Mode::KbUpdate);
+    }
+
+    // --- Concurrent access test ---
+
+    #[tokio::test]
+    async fn test_concurrent_inserts() {
+        let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+        let mut handles = Vec::new();
+
+        for i in 0..10 {
+            let reg = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let slug = format!("tasks/concurrent-{i}");
+                reg.insert(&sample_record(&slug)).await.unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let all = registry.list(StatusFilter::all()).await.unwrap();
+        assert_eq!(all.len(), 10);
     }
 }
