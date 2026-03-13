@@ -49,10 +49,9 @@ pub async fn run(
     match &args.command {
         Commands::Dispatch { mode, slug, inline } => {
             let is_inline = *inline
-                || matches!(
-                    std::env::var("ATC_CI").as_deref(),
-                    Ok("1") | Ok("true") | Ok("yes")
-                );
+                || std::env::var("ATC_CI")
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                    .unwrap_or(false);
             dispatch::dispatch(
                 config,
                 registry.as_ref(),

@@ -7,8 +7,12 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Derive branch name from slug: replace `/` with `--` to avoid collisions.
-/// Single `-` is not bijective (`tasks/foo-bar` and `tasks-foo/bar` would collide).
+/// Derive branch name from slug: replace `/` with `--`.
+///
+/// This is bijective for valid GitKB slugs, which conform to the ABNF
+/// `segment = 1*(ALPHA / DIGIT / "-" / "_")` — segments cannot contain `--`.
+/// If a slug ever contains `--` natively, this mapping would collide;
+/// slug validation (git-kb's ABNF enforcement) prevents that.
 pub fn derive_branch(slug: &str) -> String {
     slug.replace('/', "--")
 }
@@ -210,7 +214,7 @@ pub async fn dispatch(
     );
 
     // 5. Setup log file
-    std::fs::create_dir_all(&log_dir)?;
+    tokio::fs::create_dir_all(&log_dir).await?;
     let log_file = log_dir.join(format!("{}.jsonl", session_name));
 
     // Render system prompt (placeholder — gitkb-268 provides template rendering)
@@ -252,6 +256,12 @@ pub async fn dispatch(
     };
 
     // 7. Insert registry record
+    // For inline runs, the agent has already finished — record terminal status.
+    let status = match handle.inline_exit_code {
+        Some(0) => Status::Done,
+        Some(_) => Status::Failed,
+        None => Status::Running,
+    };
     let now = Utc::now();
     let record = DispatchRecord {
         slug: slug.to_string(),
@@ -259,7 +269,7 @@ pub async fn dispatch(
         worktree_path,
         session: handle.session.clone(),
         log_file,
-        status: Status::Running,
+        status,
         mode,
         retries: 0,
         pr_url: None,

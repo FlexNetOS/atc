@@ -175,8 +175,12 @@ impl ClaudeExecutor {
                         break;
                     }
                     let mut w = writer.lock().await;
-                    let _ = w.write_all(&line).await;
-                    let _ = w.flush().await;
+                    if let Err(e) = w.write_all(&line).await {
+                        eprintln!("warning: failed to write to log: {}", e);
+                    }
+                    if let Err(e) = w.flush().await {
+                        eprintln!("warning: failed to flush log: {}", e);
+                    }
                 }
             }));
         }
@@ -194,8 +198,12 @@ impl ClaudeExecutor {
                         break;
                     }
                     let mut w = writer.lock().await;
-                    let _ = w.write_all(&line).await;
-                    let _ = w.flush().await;
+                    if let Err(e) = w.write_all(&line).await {
+                        eprintln!("warning: failed to write to log: {}", e);
+                    }
+                    if let Err(e) = w.flush().await {
+                        eprintln!("warning: failed to flush log: {}", e);
+                    }
                 }
             }));
         }
@@ -262,15 +270,21 @@ impl ClaudeExecutor {
         // cd to worktree
         bash_parts.push(format!("cd '{}'", shell_escape(&worktree_str)));
 
-        // Build the claude pipeline
+        // Fetch task doc first, fail early if git-kb show fails
+        let task_doc_var = format!(
+            "TASK_DOC=$(GITKB_ROOT='{}' git-kb show '{}') || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
+            shell_escape(kb_root),
+            shell_escape(&opts.slug),
+        );
+        bash_parts.push(task_doc_var);
+
+        // Build the claude pipeline — pipe saved task doc to claude
         let mut claude_cmd = format!(
-            "GITKB_ROOT='{}' git-kb show '{}' | '{}' -p '{}' \
+            "echo \"$TASK_DOC\" | '{}' -p '{}' \
              --append-system-prompt-file '{}' \
              --dangerously-skip-permissions \
              --output-format stream-json --verbose \
              --max-turns {} --max-budget-usd {}",
-            shell_escape(kb_root),
-            shell_escape(&opts.slug),
             shell_escape(&claude_bin_str),
             shell_escape(&user_prompt),
             shell_escape(&prompt_path_str),

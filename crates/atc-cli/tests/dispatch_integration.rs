@@ -178,7 +178,7 @@ async fn test_dispatch_inline_inserts_registry_record() {
     let record = record.unwrap();
     assert_eq!(record.slug, "tasks/gitkb-42");
     assert_eq!(record.branch, "tasks--gitkb-42");
-    assert_eq!(record.status, Status::Running);
+    assert_eq!(record.status, Status::Done);
     assert_eq!(record.mode, Mode::Implement);
     assert!(record.session.starts_with("tasks--gitkb-42@implement@"));
     assert!(record.log_file.to_string_lossy().ends_with(".jsonl"));
