@@ -67,7 +67,7 @@ async fn resolve_base_template(mode: &Mode, config: &AtcConfig) -> Result<String
             return Ok(content);
         }
         if let Some(ref inline) = mode_config.template_inline {
-            if !inline.is_empty() {
+            if !inline.trim().is_empty() {
                 return Ok(inline.clone());
             }
             // Empty string falls through to error
@@ -256,6 +256,24 @@ mod tests {
         let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap_err();
+        assert!(
+            err.to_string().contains("no template configured for mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // -- Whitespace-only template_inline also errors --
+
+    #[tokio::test]
+    async fn test_whitespace_only_inline_errors() {
+        let cfg = config_with_mode(
+            "implement",
+            ModeConfig {
+                template_path: None,
+                template_inline: Some("   \n\t  ".to_string()),
+            },
+        );
+        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap_err();
         assert!(
             err.to_string().contains("no template configured for mode"),
             "unexpected error: {err}"
