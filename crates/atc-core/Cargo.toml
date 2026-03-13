@@ -1,0 +1,25 @@
+[package]
+name = "atc-core"
+description = "Core library for ATC — types, registry trait, SQLite backend, AgentExecutor trait"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+# Only used for ValueEnum derive on Mode enum (re-exported to atc-cli for CLI parsing)
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+toml.workspace = true
+tokio.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile.workspace = true

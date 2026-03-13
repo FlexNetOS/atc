@@ -1,0 +1,21 @@
+#!/bin/bash
+# Pre-push hook for ATC
+# Runs the same checks as CI to catch issues before push
+
+set -e
+
+echo "Running pre-push checks..."
+
+# Format check (fast)
+echo "  Checking formatting..."
+cargo fmt --check
+
+# Clippy with warnings as errors (matches CI)
+echo "  Running clippy..."
+cargo clippy --all-targets -- -D warnings
+
+# Run tests
+echo "  Running tests..."
+cargo test --workspace
+
+echo "All pre-push checks passed!"

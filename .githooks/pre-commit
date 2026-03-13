@@ -1,0 +1,33 @@
+#!/bin/sh
+# Git pre-commit hook for ATC
+# Runs cargo fmt --check before commit
+#
+# Install: git config core.hooksPath .githooks
+# Or:      make install-hooks
+
+set -e
+
+# Check if cargo is available
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "Warning: cargo not found, skipping format check"
+    exit 0
+fi
+
+# Only check Rust files that are staged
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+
+if [ -n "$STAGED_RS" ]; then
+    echo "Checking Rust formatting..."
+    if ! cargo fmt --all -- --check; then
+        echo ""
+        echo "Rust formatting check failed!"
+        echo ""
+        echo "Run 'cargo fmt --all' to fix formatting, then stage the changes."
+        echo "Or commit with --no-verify to bypass this check."
+        echo ""
+        exit 1
+    fi
+    echo "Formatting OK"
+fi
+
+exit 0

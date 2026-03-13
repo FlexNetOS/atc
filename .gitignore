@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Test coverage
+*.profraw
+coverage/
+
+# Dispatch runtime
+.envrc
