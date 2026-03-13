@@ -93,7 +93,8 @@ pub async fn run(
                 slug,
                 config,
                 directive.as_deref().unwrap_or(""),
-            )?;
+            )
+            .await?;
             println!("{prompt}");
             Ok(())
         }

@@ -1,8 +1,9 @@
 use anyhow::Result;
-use atc_core::config::{AtcConfig, DispatchConfig};
+use atc_core::config::{AtcConfig, DispatchConfig, ModeConfig};
 use atc_core::executor::{AgentExecutor, AgentHandle, AgentOpts};
 use atc_core::registry::{Registry, SqliteRegistry};
 use atc_core::types::{Mode, Status};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -125,6 +126,21 @@ exit 1
     make_executable(&script);
 }
 
+/// Build a modes map with template_inline for all modes used in tests.
+fn test_modes() -> HashMap<String, ModeConfig> {
+    let mut modes = HashMap::new();
+    for key in ["implement", "research", "review-fix", "kb-update", "pr-comments", "refine", "create-task"] {
+        modes.insert(
+            key.to_string(),
+            ModeConfig {
+                template_path: None,
+                template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
+            },
+        );
+    }
+    modes
+}
+
 fn make_config(
     tmp: &std::path::Path,
     worktree_base: &std::path::Path,
@@ -142,6 +158,7 @@ fn make_config(
             max_turns: 10_000,
             max_budget_usd: 25.0,
         },
+        modes: test_modes(),
         ..Default::default()
     }
 }

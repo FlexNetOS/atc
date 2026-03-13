@@ -265,6 +265,7 @@ impl Default for BatchConfig {
 
 /// Per-mode template override configuration.
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModeConfig {
     /// Path to a template file on disk. Supports `~` expansion.
     pub template_path: Option<String>,
@@ -578,6 +579,54 @@ max_budget_usd = 10.0
     #[test]
     fn test_legacy_no_sandbox_rejected() {
         let toml = "[dispatch]\nno_sandbox = true";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected deny_unknown_fields error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_modes_from_toml() {
+        let toml = r#"
+[modes.implement]
+template_path = "/etc/atc/implement.md"
+
+[modes.research]
+template_inline = "Research prompt for {{slug}}"
+
+[modes.review-fix]
+template_path = "~/templates/review.md"
+template_inline = "fallback (ignored)"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.modes.len(), 3);
+
+        let implement = cfg.modes.get("implement").unwrap();
+        assert_eq!(
+            implement.template_path.as_deref(),
+            Some("/etc/atc/implement.md")
+        );
+        assert!(implement.template_inline.is_none());
+
+        let research = cfg.modes.get("research").unwrap();
+        assert!(research.template_path.is_none());
+        assert_eq!(
+            research.template_inline.as_deref(),
+            Some("Research prompt for {{slug}}")
+        );
+
+        let review_fix = cfg.modes.get("review-fix").unwrap();
+        assert!(review_fix.template_path.is_some());
+        assert!(review_fix.template_inline.is_some());
+    }
+
+    #[test]
+    fn test_mode_config_rejects_unknown_fields() {
+        let toml = r#"
+[modes.implement]
+template_paht = "typo"
+"#;
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(
             err.to_string().contains("unknown field"),
