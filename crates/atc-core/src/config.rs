@@ -13,6 +13,15 @@ pub struct AtcConfig {
 }
 
 impl AtcConfig {
+    fn parse_and_validate(contents: &str) -> anyhow::Result<Self> {
+        let cfg: Self = toml::from_str(contents)?;
+        anyhow::ensure!(
+            cfg.batch.max_concurrency > 0,
+            "batch.max_concurrency must be >= 1"
+        );
+        Ok(cfg)
+    }
+
     /// Load config using resolution order:
     /// 1. `--config <path>` CLI flag (passed as argument)
     /// 2. `ATC_CONFIG` environment variable
@@ -25,7 +34,7 @@ impl AtcConfig {
         if let Some(path) = config_path {
             let path = expand_tilde(path);
             let contents = std::fs::read_to_string(&path)?;
-            return Ok(toml::from_str(&contents)?);
+            return Self::parse_and_validate(&contents);
         }
 
         // 2. ATC_CONFIG env var (error if set but missing, matching --config behavior)
@@ -38,14 +47,14 @@ impl AtcConfig {
                     e
                 )
             })?;
-            return Ok(toml::from_str(&contents)?);
+            return Self::parse_and_validate(&contents);
         }
 
         // 3. ./atc.toml
         let local_path = PathBuf::from("./atc.toml");
         if local_path.exists() {
             let contents = std::fs::read_to_string(&local_path)?;
-            return Ok(toml::from_str(&contents)?);
+            return Self::parse_and_validate(&contents);
         }
 
         // 4. XDG config path ($XDG_CONFIG_HOME/atc/config.toml, fallback ~/.config)
@@ -55,7 +64,7 @@ impl AtcConfig {
             .join("atc/config.toml");
         if xdg_path.exists() {
             let contents = std::fs::read_to_string(&xdg_path)?;
-            return Ok(toml::from_str(&contents)?);
+            return Self::parse_and_validate(&contents);
         }
 
         Ok(Self::default())
@@ -77,7 +86,7 @@ impl RegistryConfig {
             return expand_tilde(p);
         }
         let root = std::env::var("ATC_ROOT")
-            .map(PathBuf::from)
+            .map(|p| expand_tilde(Path::new(&p)))
             .unwrap_or_else(|_| home_dir().join(".local/share/atc"));
         root.join("registry.db")
     }

@@ -179,9 +179,19 @@ impl Registry for SqliteRegistry {
         )
         .bind(&record.slug)
         .bind(&record.branch)
-        .bind(record.worktree_path.to_string_lossy().as_ref())
+        .bind(
+            record
+                .worktree_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?,
+        )
         .bind(&record.session)
-        .bind(record.log_file.to_string_lossy().as_ref())
+        .bind(
+            record
+                .log_file
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("log_file must be valid UTF-8"))?,
+        )
         .bind(record.status.as_str())
         .bind(record.mode.as_str())
         .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
@@ -344,7 +354,11 @@ impl Registry for SqliteRegistry {
             WHERE slug = ?5"#,
         )
         .bind(new_session)
-        .bind(new_log_file.to_string_lossy().as_ref())
+        .bind(
+            new_log_file
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("new_log_file must be valid UTF-8"))?,
+        )
         .bind(new_dispatched_at.to_rfc3339())
         .bind(&now)
         .bind(slug)
@@ -478,5 +492,15 @@ mod tests {
         assert_eq!(fetched.retries, 1);
         assert_eq!(fetched.status, Status::Running);
         assert_eq!(fetched.session, "new-session");
+        // Verify per-attempt state was reset
+        assert!(!fetched.checks.agent_exited_clean);
+        assert!(!fetched.checks.branch_pushed);
+        assert!(!fetched.checks.pr_created);
+        assert!(!fetched.checks.ci_passed);
+        assert!(!fetched.checks.reviews_approved);
+        assert!(!fetched.checks.threads_resolved);
+        assert_eq!(fetched.cost_usd, None);
+        assert_eq!(fetched.num_turns, None);
+        assert_eq!(fetched.duration_ms, None);
     }
 }
