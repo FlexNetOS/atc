@@ -100,7 +100,6 @@ impl Mode {
             Mode::CreateTask => "create-task",
         }
     }
-
 }
 
 impl std::str::FromStr for Mode {

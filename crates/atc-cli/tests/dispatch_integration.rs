@@ -129,7 +129,15 @@ exit 1
 /// Build a modes map with template_inline for all modes used in tests.
 fn test_modes() -> HashMap<String, ModeConfig> {
     let mut modes = HashMap::new();
-    for key in ["implement", "research", "review-fix", "kb-update", "pr-comments", "refine", "create-task"] {
+    for key in [
+        "implement",
+        "research",
+        "review-fix",
+        "kb-update",
+        "pr-comments",
+        "refine",
+        "create-task",
+    ] {
         modes.insert(
             key.to_string(),
             ModeConfig {

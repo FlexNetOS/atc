@@ -111,7 +111,9 @@ mod tests {
                 template_inline: None,
             },
         );
-        let result = render_prompt(&Mode::Implement, "tasks/abc", &cfg, "").await.unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/abc", &cfg, "")
+            .await
+            .unwrap();
         assert_eq!(result, "Custom prompt for tasks/abc.");
     }
 
@@ -120,7 +122,9 @@ mod tests {
     #[tokio::test]
     async fn test_template_inline_override() {
         let cfg = config_with_inline("research", "Inline prompt for {{slug}}.");
-        let result = render_prompt(&Mode::Research, "tasks/xyz", &cfg, "").await.unwrap();
+        let result = render_prompt(&Mode::Research, "tasks/xyz", &cfg, "")
+            .await
+            .unwrap();
         assert_eq!(result, "Inline prompt for tasks/xyz.");
     }
 
@@ -139,7 +143,9 @@ mod tests {
                 template_inline: Some("From inline.".to_string()),
             },
         );
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap();
         assert_eq!(result, "From file.");
     }
 
@@ -148,7 +154,9 @@ mod tests {
     #[tokio::test]
     async fn test_slug_replaced() {
         let cfg = config_with_inline("implement", "Working on {{slug}} now.");
-        let result = render_prompt(&Mode::Implement, "tasks/gitkb-42", &cfg, "").await.unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/gitkb-42", &cfg, "")
+            .await
+            .unwrap();
         assert_eq!(result, "Working on tasks/gitkb-42 now.");
         assert!(!result.contains("{{slug}}"));
     }
@@ -184,7 +192,9 @@ mod tests {
     #[tokio::test]
     async fn test_directive_omitted_when_empty() {
         let cfg = config_with_inline("implement", "Prompt for {{slug}}.");
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap();
         assert!(!result.contains("Additional directive"));
         assert!(!result.contains("---\n"));
     }
@@ -200,7 +210,9 @@ mod tests {
                 template_inline: None,
             },
         );
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap_err();
+        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("failed to read template file"),
             "unexpected error: {err}"
@@ -212,7 +224,9 @@ mod tests {
     #[tokio::test]
     async fn test_error_when_no_config() {
         let cfg = AtcConfig::default();
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap_err();
+        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("no template configured for mode"),
             "unexpected error: {err}"
@@ -230,7 +244,9 @@ mod tests {
                 template_inline: Some(String::new()),
             },
         );
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "").await.unwrap_err();
+        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("no template configured for mode"),
             "unexpected error: {err}"

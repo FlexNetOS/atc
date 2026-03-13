@@ -230,7 +230,8 @@ pub async fn dispatch(
     let log_file = log_dir.join(format!("{}.jsonl", session_name));
 
     // Render system prompt from mode template + config overrides
-    let prompt = atc_core::templates::render_prompt(&mode, slug, config, directive.unwrap_or("")).await?;
+    let prompt =
+        atc_core::templates::render_prompt(&mode, slug, config, directive.unwrap_or("")).await?;
 
     // 6. Build agent opts and spawn
     let opts = AgentOpts {
