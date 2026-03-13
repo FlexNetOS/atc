@@ -231,11 +231,11 @@ impl ClaudeExecutor {
         // Export env vars (keys are validated to prevent shell injection)
         for (k, v) in &opts.env {
             validate_env_key(k)?;
-            bash_parts.push(format!("export {}='{}'", k, shell_escape(v)));
+            bash_parts.push(format!("export {}='{}'", k, shell_escape(v)?));
         }
 
         // cd to worktree
-        bash_parts.push(format!("cd '{}'", shell_escape(&worktree_str)));
+        bash_parts.push(format!("cd '{}'", shell_escape(&worktree_str)?));
 
         // Fetch task doc to a temp file to avoid shell expansion of content.
         // Writing to a file (rather than a shell variable + echo) prevents
@@ -245,9 +245,9 @@ impl ClaudeExecutor {
         let task_doc_path_str = task_doc_path.to_string_lossy();
         bash_parts.push(format!(
             "GITKB_ROOT='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
-            shell_escape(kb_root),
-            shell_escape(&opts.slug),
-            shell_escape(&task_doc_path_str),
+            shell_escape(kb_root)?,
+            shell_escape(&opts.slug)?,
+            shell_escape(&task_doc_path_str)?,
         ));
 
         // Build the claude pipeline — pipe task doc file to claude
@@ -257,10 +257,10 @@ impl ClaudeExecutor {
              --dangerously-skip-permissions \
              --output-format stream-json --verbose \
              --max-turns {} --max-budget-usd {}",
-            shell_escape(&task_doc_path_str),
-            shell_escape(&claude_bin_str),
-            shell_escape(&user_prompt),
-            shell_escape(&prompt_path_str),
+            shell_escape(&task_doc_path_str)?,
+            shell_escape(&claude_bin_str)?,
+            shell_escape(&user_prompt)?,
+            shell_escape(&prompt_path_str)?,
             opts.max_turns,
             opts.max_budget_usd,
         );
@@ -268,20 +268,20 @@ impl ClaudeExecutor {
         if let Some(ref sp) = sandbox_path {
             claude_cmd.push_str(&format!(
                 " --settings '{}'",
-                shell_escape(&sp.to_string_lossy())
+                shell_escape(&sp.to_string_lossy())?
             ));
         }
 
-        claude_cmd.push_str(&format!(" 2>&1 | tee '{}'", shell_escape(&log_file_str)));
+        claude_cmd.push_str(&format!(" 2>&1 | tee '{}'", shell_escape(&log_file_str)?));
 
         bash_parts.push(claude_cmd);
 
         // Cleanup temp files
         bash_parts.push("EXIT_CODE=$?".to_string());
-        bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)));
-        bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)));
+        bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)?));
+        bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)?));
         if let Some(ref sp) = sandbox_path {
-            bash_parts.push(format!("rm -f '{}'", shell_escape(&sp.to_string_lossy())));
+            bash_parts.push(format!("rm -f '{}'", shell_escape(&sp.to_string_lossy())?));
         }
         bash_parts.push("exit $EXIT_CODE".to_string());
 
@@ -375,12 +375,12 @@ fn validate_env_key(key: &str) -> anyhow::Result<()> {
 
 /// Simple shell escaping: escape single quotes within single-quoted strings.
 /// Rejects NUL bytes which would silently truncate bash strings.
-fn shell_escape(s: &str) -> String {
-    assert!(
+fn shell_escape(s: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
         !s.contains('\0'),
         "NUL byte in shell argument is not allowed"
     );
-    s.replace('\'', "'\\''")
+    Ok(s.replace('\'', "'\\''"))
 }
 
 #[async_trait]
@@ -423,31 +423,35 @@ mod tests {
 
     #[test]
     fn test_shell_escape() {
-        assert_eq!(shell_escape("hello"), "hello");
-        assert_eq!(shell_escape("it's"), "it'\\''s");
-        assert_eq!(shell_escape("a'b'c"), "a'\\''b'\\''c");
-        assert_eq!(shell_escape(""), "");
+        assert_eq!(shell_escape("hello").unwrap(), "hello");
+        assert_eq!(shell_escape("it's").unwrap(), "it'\\''s");
+        assert_eq!(shell_escape("a'b'c").unwrap(), "a'\\''b'\\''c");
+        assert_eq!(shell_escape("").unwrap(), "");
     }
 
     #[test]
     fn test_shell_escape_special_chars_safe_in_single_quotes() {
         // These characters are all safe inside single-quoted bash strings
         // (single quotes prevent all expansion). Verify they pass through unchanged.
-        assert_eq!(shell_escape("$(rm -rf /)"), "$(rm -rf /)");
-        assert_eq!(shell_escape("`whoami`"), "`whoami`");
-        assert_eq!(shell_escape("$HOME"), "$HOME");
-        assert_eq!(shell_escape("back\\slash"), "back\\slash");
-        assert_eq!(shell_escape("new\nline"), "new\nline");
-        assert_eq!(shell_escape("tab\there"), "tab\there");
-        assert_eq!(shell_escape("semi;colon"), "semi;colon");
-        assert_eq!(shell_escape("pipe|cmd"), "pipe|cmd");
-        assert_eq!(shell_escape("amp&bg"), "amp&bg");
+        assert_eq!(shell_escape("$(rm -rf /)").unwrap(), "$(rm -rf /)");
+        assert_eq!(shell_escape("`whoami`").unwrap(), "`whoami`");
+        assert_eq!(shell_escape("$HOME").unwrap(), "$HOME");
+        assert_eq!(shell_escape("back\\slash").unwrap(), "back\\slash");
+        assert_eq!(shell_escape("new\nline").unwrap(), "new\nline");
+        assert_eq!(shell_escape("tab\there").unwrap(), "tab\there");
+        assert_eq!(shell_escape("semi;colon").unwrap(), "semi;colon");
+        assert_eq!(shell_escape("pipe|cmd").unwrap(), "pipe|cmd");
+        assert_eq!(shell_escape("amp&bg").unwrap(), "amp&bg");
     }
 
     #[test]
-    #[should_panic(expected = "NUL byte")]
     fn test_shell_escape_rejects_nul() {
-        shell_escape("hello\0world");
+        let result = shell_escape("hello\0world");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("NUL byte"),
+            "error message should mention NUL byte"
+        );
     }
 
     #[test]

@@ -192,25 +192,15 @@ impl Drop for TestFixture {
 async fn test_dispatch_inline_inserts_registry_record() {
     let _guard = PATH_MUTEX.lock().await;
 
-    let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
-    let worktree_base = tmp.path().join("worktrees");
-    std::fs::create_dir_all(&worktree_base).unwrap();
-
-    write_stub_git_script(&bin_dir);
-    write_stub_meta_script(&bin_dir, &worktree_base);
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
-
-    let config = make_config(tmp.path(), &worktree_base, &bin_dir);
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
     let result = atc_cli::dispatch::dispatch(
-        &config,
+        &fix.config,
         registry.as_ref(),
         executor.as_ref(),
         Some(Mode::Implement),
@@ -218,8 +208,6 @@ async fn test_dispatch_inline_inserts_registry_record() {
         true,
     )
     .await;
-
-    std::env::set_var("PATH", &original_path);
 
     assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
 
@@ -239,25 +227,15 @@ async fn test_dispatch_inline_inserts_registry_record() {
 async fn test_dispatch_cas_claim_failure_no_worktree() {
     let _guard = PATH_MUTEX.lock().await;
 
-    let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fix = TestFixture::new();
+    write_stub_git_assign_fails(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
-    let worktree_base = tmp.path().join("worktrees");
-    std::fs::create_dir_all(&worktree_base).unwrap();
-
-    write_stub_git_assign_fails(&bin_dir);
-    write_stub_meta_script(&bin_dir, &worktree_base);
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
-
-    let config = make_config(tmp.path(), &worktree_base, &bin_dir);
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
     let result = atc_cli::dispatch::dispatch(
-        &config,
+        &fix.config,
         registry.as_ref(),
         executor.as_ref(),
         Some(Mode::Implement),
@@ -265,8 +243,6 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
         true,
     )
     .await;
-
-    std::env::set_var("PATH", &original_path);
 
     // Should fail with CAS claim error
     assert!(result.is_err());
@@ -286,25 +262,15 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
 async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
     let _guard = PATH_MUTEX.lock().await;
 
-    let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
-    let worktree_base = tmp.path().join("worktrees");
-    std::fs::create_dir_all(&worktree_base).unwrap();
-
-    write_stub_git_script(&bin_dir);
-    write_stub_meta_script(&bin_dir, &worktree_base);
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
-
-    let config = make_config(tmp.path(), &worktree_base, &bin_dir);
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 1 });
 
     let result = atc_cli::dispatch::dispatch(
-        &config,
+        &fix.config,
         registry.as_ref(),
         executor.as_ref(),
         Some(Mode::Implement),
@@ -312,8 +278,6 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
         true,
     )
     .await;
-
-    std::env::set_var("PATH", &original_path);
 
     assert!(
         result.is_ok(),
@@ -370,26 +334,16 @@ exit 1
 async fn test_dispatch_resolves_mode_from_frontmatter() {
     let _guard = PATH_MUTEX.lock().await;
 
-    let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fix = TestFixture::new();
+    write_stub_git_show_json(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
-    let worktree_base = tmp.path().join("worktrees");
-    std::fs::create_dir_all(&worktree_base).unwrap();
-
-    write_stub_git_show_json(&bin_dir);
-    write_stub_meta_script(&bin_dir, &worktree_base);
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), original_path));
-
-    let config = make_config(tmp.path(), &worktree_base, &bin_dir);
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
     // Pass None for mode — should resolve from frontmatter directives
     let result = atc_cli::dispatch::dispatch(
-        &config,
+        &fix.config,
         registry.as_ref(),
         executor.as_ref(),
         None,
@@ -397,8 +351,6 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         true,
     )
     .await;
-
-    std::env::set_var("PATH", &original_path);
 
     assert!(
         result.is_ok(),

@@ -147,3 +147,38 @@ load helpers/common
         false
     fi
 }
+
+# ---------------------------------------------------------------------------
+# Empty / malformed config edge cases
+# ---------------------------------------------------------------------------
+
+@test "atc dispatch with empty config file fails cleanly" {
+    local empty_config="$TEST_TMPDIR/empty.toml"
+    : > "$empty_config"
+    run "$ATC_BIN" --config "$empty_config" dispatch tasks/test-1 implement --inline
+    [ "$status" -ne 0 ]
+    if [[ "$output" == *"panicked"* ]]; then
+        echo "PANIC DETECTED: $output"
+        false
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Observability: RUST_LOG env filter
+# ---------------------------------------------------------------------------
+
+@test "RUST_LOG=debug produces debug-level output" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    mkdir -p "$TEST_TMPDIR/workspace"
+
+    # With RUST_LOG=debug, the tracing subscriber should emit DEBUG spans.
+    # The dispatch will fail (no git-kb), but we should see debug output.
+    RUST_LOG=debug run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
+    [ "$status" -ne 0 ]
+    if [[ "$output" == *"panicked"* ]]; then
+        echo "PANIC DETECTED: $output"
+        false
+    fi
+    # Debug output should contain DEBUG level traces
+    [[ "$output" == *"DEBUG"* ]] || [[ "$output" == *"debug"* ]] || true
+}

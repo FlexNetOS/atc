@@ -644,4 +644,37 @@ max_budget_usd = 5.0
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn test_parse_rejects_nan_budget() {
+        let toml = "[dispatch]\nmax_budget_usd = nan";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_infinity_budget() {
+        let toml = "[dispatch]\nmax_budget_usd = inf";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_negative_infinity_budget() {
+        let toml = "[dispatch]\nmax_budget_usd = -inf";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
+    }
 }
