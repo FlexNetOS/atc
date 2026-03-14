@@ -24,6 +24,11 @@ pub struct DispatchRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthChecks {
+    /// True when the agent's tmux session has ended (the process terminated).
+    /// This does NOT distinguish between a clean exit, crash, or OOM kill —
+    /// it only reflects that the session no longer exists. Downstream signals
+    /// (branch_pushed, ci_passed, reviews_approved, threads_resolved) drive
+    /// the subsequent health/status transitions independently.
     pub agent_exited_clean: bool,
     pub branch_pushed: bool,
     pub pr_created: bool,
@@ -32,7 +37,7 @@ pub struct HealthChecks {
     pub threads_resolved: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
     Running,

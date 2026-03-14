@@ -23,6 +23,13 @@ load helpers/common
     [[ "$output" == *"MODE"* ]]
 }
 
+@test "atc health --help exits 0 and shows health usage" {
+    run "$ATC_BIN" health --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--json"* ]]
+    [[ "$output" == *"--all"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Argument validation
 # ---------------------------------------------------------------------------
@@ -146,6 +153,50 @@ load helpers/common
         echo "PANIC DETECTED: $output"
         false
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Health command
+# ---------------------------------------------------------------------------
+
+@test "atc health with empty registry shows no records" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No dispatch records found"* ]]
+}
+
+@test "atc health --json with empty registry outputs empty array" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == "[]" ]]
+}
+
+@test "atc health --all with empty registry shows no records" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health --all
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No dispatch records found"* ]]
+}
+
+@test "config with signal_timeout_secs = 0 is rejected" {
+    local config="$TEST_TMPDIR/bad-health.toml"
+    cat > "$config" <<EOF
+[dispatch]
+repo = "core"
+meta_workspace_root = "$TEST_TMPDIR/workspace"
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
+
+[health]
+signal_timeout_secs = 0
+EOF
+    mkdir -p "$TEST_TMPDIR/workspace"
+    run "$ATC_BIN" --config "$config" health
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"signal_timeout_secs"* ]]
 }
 
 # ---------------------------------------------------------------------------

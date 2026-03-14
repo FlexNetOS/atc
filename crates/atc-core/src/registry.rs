@@ -6,18 +6,25 @@ use std::path::PathBuf;
 
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
-pub struct StatusFilter {
-    pub status: Option<Status>,
+pub enum StatusFilter {
+    /// No filter — return all records.
+    #[default]
+    All,
+    /// Exactly one status.
+    One(Status),
+    /// Any of the given statuses (generates `WHERE status IN (...)`).
+    Any(Vec<Status>),
 }
 
 impl StatusFilter {
     pub fn all() -> Self {
-        Self { status: None }
+        Self::All
     }
     pub fn by_status(status: Status) -> Self {
-        Self {
-            status: Some(status),
-        }
+        Self::One(status)
+    }
+    pub fn any(statuses: Vec<Status>) -> Self {
+        Self::Any(statuses)
     }
 }
 
@@ -25,10 +32,17 @@ impl StatusFilter {
 pub trait Registry: Send + Sync {
     async fn insert(&self, record: &DispatchRecord) -> Result<()>;
     async fn update_status(&self, slug: &str, status: Status) -> Result<()>;
-    async fn update_checks(&self, slug: &str, checks: &HealthChecks) -> Result<()>;
     async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
     async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
+    /// Atomically update health checks, status, and updated_at in a single write.
+    async fn update_health(
+        &self,
+        slug: &str,
+        checks: &HealthChecks,
+        status: Status,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()>;
     async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()>;
     async fn increment_retries(
         &self,
@@ -245,36 +259,6 @@ impl Registry for SqliteRegistry {
         Ok(())
     }
 
-    async fn update_checks(&self, slug: &str, checks: &HealthChecks) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            r#"UPDATE dispatches SET
-                check_agent_exited_clean = ?1,
-                check_branch_pushed = ?2,
-                check_pr_created = ?3,
-                check_ci_passed = ?4,
-                check_reviews_approved = ?5,
-                check_threads_resolved = ?6,
-                updated_at = ?7
-            WHERE slug = ?8"#,
-        )
-        .bind(checks.agent_exited_clean as i32)
-        .bind(checks.branch_pushed as i32)
-        .bind(checks.pr_created as i32)
-        .bind(checks.ci_passed as i32)
-        .bind(checks.reviews_approved as i32)
-        .bind(checks.threads_resolved as i32)
-        .bind(&now)
-        .bind(slug)
-        .execute(&self.pool)
-        .await?;
-        anyhow::ensure!(
-            result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
-        );
-        Ok(())
-    }
-
     async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
@@ -307,18 +291,77 @@ impl Registry for SqliteRegistry {
     }
 
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
-        let rows = if let Some(ref status) = filter.status {
-            sqlx::query("SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC")
+        let rows = match &filter {
+            StatusFilter::All => {
+                sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            StatusFilter::One(status) => {
+                sqlx::query(
+                    "SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC",
+                )
                 .bind(status.as_str())
                 .fetch_all(&self.pool)
                 .await?
-        } else {
-            sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC")
-                .fetch_all(&self.pool)
-                .await?
+            }
+            StatusFilter::Any(statuses) => {
+                if statuses.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // Build parameterised IN clause: WHERE status IN (?1, ?2, ...)
+                let placeholders: Vec<String> =
+                    (1..=statuses.len()).map(|i| format!("?{i}")).collect();
+                let sql = format!(
+                    "SELECT * FROM dispatches WHERE status IN ({}) ORDER BY dispatched_at DESC",
+                    placeholders.join(", ")
+                );
+                let mut query = sqlx::query(&sql);
+                for s in statuses {
+                    query = query.bind(s.as_str());
+                }
+                query.fetch_all(&self.pool).await?
+            }
         };
 
         rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn update_health(
+        &self,
+        slug: &str,
+        checks: &HealthChecks,
+        status: Status,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            r#"UPDATE dispatches SET
+                check_agent_exited_clean = ?1,
+                check_branch_pushed = ?2,
+                check_pr_created = ?3,
+                check_ci_passed = ?4,
+                check_reviews_approved = ?5,
+                check_threads_resolved = ?6,
+                status = ?7,
+                updated_at = ?8
+            WHERE slug = ?9"#,
+        )
+        .bind(checks.agent_exited_clean as i32)
+        .bind(checks.branch_pushed as i32)
+        .bind(checks.pr_created as i32)
+        .bind(checks.ci_passed as i32)
+        .bind(checks.reviews_approved as i32)
+        .bind(checks.threads_resolved as i32)
+        .bind(status.as_str())
+        .bind(updated_at.to_rfc3339())
+        .bind(slug)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for slug: {slug}"
+        );
+        Ok(())
     }
 
     async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()> {
@@ -359,6 +402,7 @@ impl Registry for SqliteRegistry {
                 check_ci_passed = 0,
                 check_reviews_approved = 0,
                 check_threads_resolved = 0,
+                pr_url = NULL,
                 cost_usd = NULL,
                 num_turns = NULL,
                 duration_ms = NULL
@@ -478,36 +522,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_checks() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-
-        let checks = HealthChecks {
-            agent_exited_clean: true,
-            branch_pushed: true,
-            pr_created: true,
-            ci_passed: false,
-            reviews_approved: false,
-            threads_resolved: false,
-        };
-        registry
-            .update_checks("tasks/gitkb-42", &checks)
-            .await
-            .unwrap();
-
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-        assert!(fetched.checks.agent_exited_clean);
-        assert!(fetched.checks.branch_pushed);
-        assert!(fetched.checks.pr_created);
-        assert!(!fetched.checks.ci_passed);
-        assert!(!fetched.checks.reviews_approved);
-        assert!(!fetched.checks.threads_resolved);
-    }
-
-    #[tokio::test]
     async fn test_update_cost() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         registry
@@ -543,6 +557,56 @@ mod tests {
         assert_eq!(
             fetched.pr_url.as_deref(),
             Some("https://github.com/org/repo/pull/1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_health_round_trip() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        registry
+            .insert(&sample_record("tasks/gitkb-42"))
+            .await
+            .unwrap();
+
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            reviews_approved: false,
+            threads_resolved: false,
+        };
+        let status = Status::NeedsReview;
+        let updated_at = DateTime::parse_from_rfc3339("2025-06-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        registry
+            .update_health("tasks/gitkb-42", &checks, status, updated_at)
+            .await
+            .unwrap();
+
+        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        assert_eq!(fetched.checks, checks);
+        assert_eq!(fetched.status, Status::NeedsReview);
+        assert_eq!(fetched.updated_at, updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_update_health_nonexistent_errors() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let err = registry
+            .update_health(
+                "tasks/no-such-slug",
+                &HealthChecks::default(),
+                Status::Running,
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no dispatch record found"),
+            "unexpected error: {err}"
         );
     }
 
@@ -586,19 +650,6 @@ mod tests {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
             .update_status("tasks/no-such-slug", Status::Done)
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("no dispatch record found"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_update_checks_nonexistent_errors() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        let err = registry
-            .update_checks("tasks/no-such-slug", &HealthChecks::default())
             .await
             .unwrap_err();
         assert!(
@@ -681,6 +732,60 @@ mod tests {
         assert!(filtered.is_empty());
     }
 
+    // --- StatusFilter::Any tests ---
+
+    #[tokio::test]
+    async fn test_list_with_any_filter() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        // Insert records with different statuses
+        let mut r1 = sample_record("tasks/running-1");
+        r1.status = Status::Running;
+        let mut r2 = sample_record("tasks/done-1");
+        r2.status = Status::Done;
+        let mut r3 = sample_record("tasks/needs-review-1");
+        r3.status = Status::NeedsReview;
+        let mut r4 = sample_record("tasks/failed-1");
+        r4.status = Status::Failed;
+        let mut r5 = sample_record("tasks/needs-human-1");
+        r5.status = Status::NeedsHuman;
+
+        for r in [&r1, &r2, &r3, &r4, &r5] {
+            registry.insert(r).await.unwrap();
+        }
+
+        // Query running + needs-review (the health check query)
+        let active = registry
+            .list(StatusFilter::any(vec![
+                Status::Running,
+                Status::NeedsReview,
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 2);
+        let slugs: Vec<&str> = active.iter().map(|r| r.slug.as_str()).collect();
+        assert!(slugs.contains(&"tasks/running-1"));
+        assert!(slugs.contains(&"tasks/needs-review-1"));
+
+        // Query single status via Any
+        let done_only = registry
+            .list(StatusFilter::any(vec![Status::Done]))
+            .await
+            .unwrap();
+        assert_eq!(done_only.len(), 1);
+        assert_eq!(done_only[0].slug, "tasks/done-1");
+
+        // Query all terminal statuses
+        let terminal = registry
+            .list(StatusFilter::any(vec![Status::Done, Status::Failed]))
+            .await
+            .unwrap();
+        assert_eq!(terminal.len(), 2);
+
+        // Empty vec returns empty
+        let empty = registry.list(StatusFilter::any(vec![])).await.unwrap();
+        assert!(empty.is_empty());
+    }
+
     // --- Security / red-team tests ---
 
     #[tokio::test]
@@ -750,7 +855,7 @@ mod tests {
         for (i, status) in statuses.iter().enumerate() {
             let slug = format!("tasks/status-{i}");
             let mut record = sample_record(&slug);
-            record.status = status.clone();
+            record.status = *status;
             registry.insert(&record).await.unwrap();
             let fetched = registry.get(&slug).await.unwrap().unwrap();
             assert_eq!(&fetched.status, status);
@@ -813,9 +918,40 @@ mod tests {
         assert!(!fetched.checks.ci_passed);
         assert!(!fetched.checks.reviews_approved);
         assert!(!fetched.checks.threads_resolved);
+        assert_eq!(fetched.pr_url, None);
         assert_eq!(fetched.cost_usd, None);
         assert_eq!(fetched.num_turns, None);
         assert_eq!(fetched.duration_ms, None);
+    }
+
+    #[tokio::test]
+    async fn test_increment_retries_clears_pr_url() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        registry
+            .insert(&sample_record("tasks/gitkb-42"))
+            .await
+            .unwrap();
+        // Set a pr_url from a previous attempt
+        registry
+            .set_pr_url("tasks/gitkb-42", "https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+        let before = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        assert!(before.pr_url.is_some());
+
+        // Retry should clear pr_url
+        registry
+            .increment_retries(
+                "tasks/gitkb-42",
+                "retry-session",
+                &PathBuf::from("/tmp/retry.jsonl"),
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let after = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        assert_eq!(after.pr_url, None, "pr_url should be cleared on retry");
     }
 
     // --- Timestamp advancement tests ---
