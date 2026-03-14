@@ -526,7 +526,8 @@ impl HealthChecker {
                             return SignalResult::Error;
                         }
 
-                        let threads_obj = json.pointer("/data/repository/pullRequest/reviewThreads");
+                        let threads_obj =
+                            json.pointer("/data/repository/pullRequest/reviewThreads");
 
                         // Check pagination — if there are more pages, we can't
                         // confirm all threads are resolved
