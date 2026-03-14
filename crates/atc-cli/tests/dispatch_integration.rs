@@ -260,13 +260,8 @@ async fn test_dispatch_inline_inserts_registry_record() {
         directive: None,
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
     assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
 
@@ -299,13 +294,8 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
         directive: None,
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
     // Should fail with CAS claim error
     assert!(result.is_err());
@@ -338,13 +328,8 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
         directive: None,
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
     assert!(
         result.is_ok(),
@@ -415,13 +400,8 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         directive: None,
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
     assert!(
         result.is_ok(),
@@ -461,23 +441,13 @@ async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
         directive: None,
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
     assert!(result.is_ok(), "first dispatch failed: {:?}", result.err());
 
     // Second dispatch of same slug should fail on UNIQUE constraint
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
     assert!(result.is_err(), "duplicate dispatch should fail");
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -504,13 +474,8 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
         directive: None,
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
     // Should propagate the executor error
     assert!(result.is_err());
@@ -546,13 +511,8 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         directive: Some("focus on error handling".to_string()),
         inline: true,
     };
-    let result = atc_cli::dispatch::dispatch(
-        &fix.config,
-        registry.as_ref(),
-        executor.as_ref(),
-        &opts,
-    )
-    .await;
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
     assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
 
