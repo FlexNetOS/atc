@@ -117,16 +117,11 @@ pub async fn run_health(
     if all {
         let existing_slugs: std::collections::HashSet<String> =
             display_records.iter().map(|r| r.slug.clone()).collect();
-        let done = registry.list(StatusFilter::by_status(Status::Done)).await?;
-        let failed = registry
-            .list(StatusFilter::by_status(Status::Failed))
+        let terminal = registry
+            .list(StatusFilter::any(vec![Status::Done, Status::Failed]))
             .await?;
         display_records.extend(
-            done.into_iter()
-                .filter(|r| !existing_slugs.contains(&r.slug)),
-        );
-        display_records.extend(
-            failed
+            terminal
                 .into_iter()
                 .filter(|r| !existing_slugs.contains(&r.slug)),
         );

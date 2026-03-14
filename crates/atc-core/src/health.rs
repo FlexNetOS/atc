@@ -146,15 +146,12 @@ impl HealthChecker {
     /// Signal 1: Check if tmux session still exists.
     async fn eval_signal_1(&self, record: &DispatchRecord) -> bool {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&self.tmux_bin)
-                .args(["has-session", "-t", &record.session])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(&self.tmux_bin);
+        cmd.kill_on_drop(true)
+            .args(["has-session", "-t", &record.session])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let result = tokio::time::timeout(timeout, cmd.status()).await;
 
         match result {
             Ok(Ok(status)) => {
@@ -182,23 +179,20 @@ impl HealthChecker {
     /// Signal 2: Check if branch exists on remote.
     async fn eval_signal_2(&self, record: &DispatchRecord) -> bool {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&self.git_bin)
-                .args([
-                    "-C",
-                    &record.worktree_path.to_string_lossy(),
-                    "ls-remote",
-                    "--exit-code",
-                    "--heads",
-                    "origin",
-                    &record.branch,
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(&self.git_bin);
+        cmd.kill_on_drop(true)
+            .args([
+                "-C",
+                &record.worktree_path.to_string_lossy(),
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                &record.branch,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let result = tokio::time::timeout(timeout, cmd.status()).await;
 
         match result {
             Ok(Ok(status)) => {
@@ -238,26 +232,23 @@ impl HealthChecker {
         }
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&self.gh_bin)
-                .args([
-                    "pr",
-                    "list",
-                    "--head",
-                    &record.branch,
-                    "--state",
-                    "all",
-                    "--json",
-                    "number,url",
-                    "--jq",
-                    ".[0]",
-                ])
-                .current_dir(&record.worktree_path)
-                .stderr(std::process::Stdio::null())
-                .output(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(&self.gh_bin);
+        cmd.kill_on_drop(true)
+            .args([
+                "pr",
+                "list",
+                "--head",
+                &record.branch,
+                "--state",
+                "all",
+                "--json",
+                "number,url",
+                "--jq",
+                ".[0]",
+            ])
+            .current_dir(&record.worktree_path)
+            .stderr(std::process::Stdio::null());
+        let result = tokio::time::timeout(timeout, cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -305,23 +296,20 @@ impl HealthChecker {
         };
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&self.gh_bin)
-                .args([
-                    "pr",
-                    "checks",
-                    pr_url,
-                    "--json",
-                    "name,state",
-                    "--jq",
-                    "[.[] | select(.state != \"SUCCESS\")] | length",
-                ])
-                .current_dir(&record.worktree_path)
-                .stderr(std::process::Stdio::null())
-                .output(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(&self.gh_bin);
+        cmd.kill_on_drop(true)
+            .args([
+                "pr",
+                "checks",
+                pr_url,
+                "--json",
+                "name,state",
+                "--jq",
+                "[.[] | select(.state != \"SUCCESS\")] | length",
+            ])
+            .current_dir(&record.worktree_path)
+            .stderr(std::process::Stdio::null());
+        let result = tokio::time::timeout(timeout, cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -365,23 +353,20 @@ impl HealthChecker {
         };
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&self.gh_bin)
-                .args([
-                    "pr",
-                    "view",
-                    pr_url,
-                    "--json",
-                    "reviewDecision",
-                    "--jq",
-                    ".reviewDecision",
-                ])
-                .current_dir(&record.worktree_path)
-                .stderr(std::process::Stdio::null())
-                .output(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(&self.gh_bin);
+        cmd.kill_on_drop(true)
+            .args([
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "reviewDecision",
+                "--jq",
+                ".reviewDecision",
+            ])
+            .current_dir(&record.worktree_path)
+            .stderr(std::process::Stdio::null());
+        let result = tokio::time::timeout(timeout, cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -419,62 +404,98 @@ impl HealthChecker {
     }
 
     /// Signal 6: Check if all review threads are resolved.
+    /// Uses the GraphQL API because `gh pr view --json reviewThreads` is not
+    /// a supported JSON field in the GitHub CLI.
     async fn eval_signal_6(&self, record: &DispatchRecord) -> bool {
         let pr_url = match &record.pr_url {
             Some(url) => url,
             None => return false,
         };
 
+        // Parse owner, repo, and PR number from the URL
+        // Expected format: https://github.com/{owner}/{repo}/pull/{number}
+        let (owner, repo, number) = match Self::parse_pr_url(pr_url) {
+            Some(parts) => parts,
+            None => {
+                warn!(slug = %record.slug, url = %pr_url, "signal 6: could not parse PR URL");
+                return false;
+            }
+        };
+
+        let query = format!(
+            r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {number}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"#
+        );
+
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&self.gh_bin)
-                .args([
-                    "pr",
-                    "view",
-                    pr_url,
-                    "--json",
-                    "reviewThreads",
-                    "--jq",
-                    "[.reviewThreads[] | select(.isResolved == false)] | length",
-                ])
-                .current_dir(&record.worktree_path)
-                .stderr(std::process::Stdio::null())
-                .output(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(&self.gh_bin);
+        cmd.kill_on_drop(true)
+            .args(["api", "graphql", "-f", &format!("query={query}")])
+            .stderr(std::process::Stdio::null());
+        let result = tokio::time::timeout(timeout, cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(slug = %record.slug, "signal 6: gh pr view reviewThreads failed");
+                    warn!(slug = %record.slug, "signal 6: gh api graphql failed");
                     return false;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let trimmed = stdout.trim();
-                match trimmed.parse::<u64>() {
-                    Ok(0) => {
-                        debug!(slug = %record.slug, "signal 6: all threads resolved");
-                        true
+                // Parse the GraphQL response to count unresolved threads
+                match serde_json::from_str::<serde_json::Value>(&stdout) {
+                    Ok(json) => {
+                        let nodes = json
+                            .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+                            .and_then(|v| v.as_array());
+                        match nodes {
+                            Some(threads) => {
+                                let unresolved = threads
+                                    .iter()
+                                    .filter(|t| t.get("isResolved") == Some(&serde_json::Value::Bool(false)))
+                                    .count();
+                                if unresolved == 0 {
+                                    debug!(slug = %record.slug, "signal 6: all threads resolved");
+                                    true
+                                } else {
+                                    debug!(slug = %record.slug, unresolved = unresolved, "signal 6: unresolved threads remain");
+                                    false
+                                }
+                            }
+                            None => {
+                                // No review threads at all — treat as resolved
+                                debug!(slug = %record.slug, "signal 6: no review threads found, treating as resolved");
+                                true
+                            }
+                        }
                     }
-                    Ok(n) => {
-                        debug!(slug = %record.slug, unresolved = n, "signal 6: unresolved threads remain");
-                        false
-                    }
-                    Err(_) => {
-                        warn!(slug = %record.slug, output = %trimmed, "signal 6: could not parse gh output");
+                    Err(e) => {
+                        warn!(slug = %record.slug, error = %e, "signal 6: could not parse GraphQL response");
                         false
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.slug, error = %e, "signal 6: gh pr view command failed");
+                warn!(slug = %record.slug, error = %e, "signal 6: gh api graphql command failed");
                 false
             }
             Err(_) => {
-                warn!(slug = %record.slug, "signal 6: gh pr view timed out");
+                warn!(slug = %record.slug, "signal 6: gh api graphql timed out");
                 false
             }
+        }
+    }
+
+    /// Parse a GitHub PR URL into (owner, repo, number).
+    /// Expected format: `https://github.com/{owner}/{repo}/pull/{number}`
+    fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
+        let path = url.strip_prefix("https://github.com/")?;
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 4 && parts[2] == "pull" {
+            let owner = parts[0].to_string();
+            let repo = parts[1].to_string();
+            let number = parts[3].parse::<u64>().ok()?;
+            Some((owner, repo, number))
+        } else {
+            None
         }
     }
 
@@ -587,5 +608,24 @@ mod tests {
             threads_resolved: true,
         };
         assert_eq!(HealthChecker::apply_transition(&checks), Status::Done);
+    }
+
+    #[test]
+    fn test_parse_pr_url_valid() {
+        let result = HealthChecker::parse_pr_url("https://github.com/harmony-labs/atc/pull/6");
+        assert_eq!(
+            result,
+            Some(("harmony-labs".to_string(), "atc".to_string(), 6))
+        );
+    }
+
+    #[test]
+    fn test_parse_pr_url_invalid() {
+        assert_eq!(HealthChecker::parse_pr_url("https://example.com/foo"), None);
+        assert_eq!(HealthChecker::parse_pr_url("not-a-url"), None);
+        assert_eq!(
+            HealthChecker::parse_pr_url("https://github.com/owner/repo/issues/1"),
+            None
+        );
     }
 }
