@@ -450,7 +450,9 @@ impl HealthChecker {
                             Some(threads) => {
                                 let unresolved = threads
                                     .iter()
-                                    .filter(|t| t.get("isResolved") == Some(&serde_json::Value::Bool(false)))
+                                    .filter(|t| {
+                                        t.get("isResolved") == Some(&serde_json::Value::Bool(false))
+                                    })
                                     .count();
                                 if unresolved == 0 {
                                     debug!(slug = %record.slug, "signal 6: all threads resolved");
