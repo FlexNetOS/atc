@@ -2,6 +2,7 @@ use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
+use atc_core::types::DispatchOpts;
 use std::sync::Arc;
 
 pub use args::{Args, Commands};
@@ -72,16 +73,14 @@ pub async fn run(
                 || std::env::var("ATC_CI")
                     .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                     .unwrap_or(false);
-            dispatch::dispatch(
-                config,
-                registry.as_ref(),
-                executor.as_ref(),
-                mode.clone(),
-                slug,
-                directive.as_deref(),
-                is_inline,
-            )
-            .await
+            let opts = DispatchOpts {
+                slug: slug.clone(),
+                cli_mode: mode.clone(),
+                directive: directive.clone(),
+                inline: is_inline,
+            };
+            dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await?;
+            Ok(())
         }
         Commands::Prompt {
             mode,

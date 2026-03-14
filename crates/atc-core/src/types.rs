@@ -123,3 +123,19 @@ impl std::fmt::Display for Mode {
         f.write_str(self.as_str())
     }
 }
+
+/// Options for a single dispatch invocation.
+#[derive(Debug, Clone)]
+pub struct DispatchOpts {
+    pub slug: String,
+    pub cli_mode: Option<Mode>,
+    pub directive: Option<String>,
+    pub inline: bool,
+}
+
+/// Outcome of a successful dispatch.
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    pub session: String,
+    pub inline_exit_code: Option<i32>,
+}

@@ -2,7 +2,7 @@ use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::{AgentExecutor, AgentOpts};
 use atc_core::registry::Registry;
-use atc_core::types::{DispatchRecord, HealthChecks, Mode, Status};
+use atc_core::types::{DispatchOpts, DispatchOutcome, DispatchRecord, HealthChecks, Mode, Status};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
@@ -164,11 +164,9 @@ pub async fn dispatch(
     config: &AtcConfig,
     registry: &dyn Registry,
     executor: &dyn AgentExecutor,
-    cli_mode: Option<Mode>,
-    slug: &str,
-    directive: Option<&str>,
-    inline: bool,
-) -> Result<()> {
+    opts: &DispatchOpts,
+) -> Result<DispatchOutcome> {
+    let slug = &opts.slug;
     let dispatch_cfg = &config.dispatch;
 
     // Resolve config paths
@@ -180,9 +178,9 @@ pub async fn dispatch(
     let log_dir = dispatch_cfg.resolved_log_dir();
 
     // 1. Resolve mode
-    debug!(slug, "resolving mode");
-    let mode = resolve_mode(cli_mode, slug, kb_root).await?;
-    info!(slug, mode = %mode.as_str(), "mode resolved");
+    debug!(%slug, "resolving mode");
+    let mode = resolve_mode(opts.cli_mode.clone(), slug, kb_root).await?;
+    info!(%slug, mode = %mode.as_str(), "mode resolved");
 
     // Derive branch and session name
     let branch = derive_branch(slug);
@@ -230,11 +228,12 @@ pub async fn dispatch(
     let log_file = log_dir.join(format!("{}.jsonl", session_name));
 
     // Render system prompt from mode template + config overrides
+    let directive = opts.directive.as_deref().unwrap_or("");
     let prompt =
-        atc_core::templates::render_prompt(&mode, slug, config, directive.unwrap_or("")).await?;
+        atc_core::templates::render_prompt(&mode, slug, config, directive).await?;
 
     // 6. Build agent opts and spawn
-    let opts = AgentOpts {
+    let agent_opts = AgentOpts {
         slug: slug.to_string(),
         worktree_path: worktree_path.clone(),
         prompt,
@@ -243,12 +242,12 @@ pub async fn dispatch(
         env,
         session_name: session_name.clone(),
         sandbox: dispatch_cfg.sandbox,
-        inline,
+        inline: opts.inline,
         max_turns: dispatch_cfg.max_turns,
         max_budget_usd: dispatch_cfg.max_budget_usd,
     };
 
-    let handle = match executor.spawn(&opts).await {
+    let handle = match executor.spawn(&agent_opts).await {
         Ok(h) => h,
         Err(e) => {
             unassign_task(slug, kb_root).await;
@@ -295,22 +294,27 @@ pub async fn dispatch(
     };
     registry.insert(&record).await?;
 
+    let outcome = DispatchOutcome {
+        session: handle.session.clone(),
+        inline_exit_code: handle.inline_exit_code,
+    };
+
     if let Some(exit_code) = handle.inline_exit_code {
         info!(
-            slug,
+            %slug,
             session = %handle.session,
             exit_code,
             "dispatch complete (inline)"
         );
     } else {
         info!(
-            slug,
+            %slug,
             session = %handle.session,
             "dispatch started (tmux)"
         );
     }
 
-    Ok(())
+    Ok(outcome)
 }
 
 #[cfg(test)]
