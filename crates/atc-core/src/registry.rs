@@ -6,18 +6,25 @@ use std::path::PathBuf;
 
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
-pub struct StatusFilter {
-    pub status: Option<Status>,
+pub enum StatusFilter {
+    /// No filter — return all records.
+    #[default]
+    All,
+    /// Exactly one status.
+    One(Status),
+    /// Any of the given statuses (generates `WHERE status IN (...)`).
+    Any(Vec<Status>),
 }
 
 impl StatusFilter {
     pub fn all() -> Self {
-        Self { status: None }
+        Self::All
     }
     pub fn by_status(status: Status) -> Self {
-        Self {
-            status: Some(status),
-        }
+        Self::One(status)
+    }
+    pub fn any(statuses: Vec<Status>) -> Self {
+        Self::Any(statuses)
     }
 }
 
@@ -307,15 +314,37 @@ impl Registry for SqliteRegistry {
     }
 
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
-        let rows = if let Some(ref status) = filter.status {
-            sqlx::query("SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC")
+        let rows = match &filter {
+            StatusFilter::All => {
+                sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            StatusFilter::One(status) => {
+                sqlx::query(
+                    "SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC",
+                )
                 .bind(status.as_str())
                 .fetch_all(&self.pool)
                 .await?
-        } else {
-            sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC")
-                .fetch_all(&self.pool)
-                .await?
+            }
+            StatusFilter::Any(statuses) => {
+                if statuses.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // Build parameterised IN clause: WHERE status IN (?1, ?2, ...)
+                let placeholders: Vec<String> =
+                    (1..=statuses.len()).map(|i| format!("?{i}")).collect();
+                let sql = format!(
+                    "SELECT * FROM dispatches WHERE status IN ({}) ORDER BY dispatched_at DESC",
+                    placeholders.join(", ")
+                );
+                let mut query = sqlx::query(&sql);
+                for s in statuses {
+                    query = query.bind(s.as_str());
+                }
+                query.fetch_all(&self.pool).await?
+            }
         };
 
         rows.iter().map(Self::row_to_record).collect()
@@ -679,6 +708,60 @@ mod tests {
             .await
             .unwrap();
         assert!(filtered.is_empty());
+    }
+
+    // --- StatusFilter::Any tests ---
+
+    #[tokio::test]
+    async fn test_list_with_any_filter() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        // Insert records with different statuses
+        let mut r1 = sample_record("tasks/running-1");
+        r1.status = Status::Running;
+        let mut r2 = sample_record("tasks/done-1");
+        r2.status = Status::Done;
+        let mut r3 = sample_record("tasks/needs-review-1");
+        r3.status = Status::NeedsReview;
+        let mut r4 = sample_record("tasks/failed-1");
+        r4.status = Status::Failed;
+        let mut r5 = sample_record("tasks/needs-human-1");
+        r5.status = Status::NeedsHuman;
+
+        for r in [&r1, &r2, &r3, &r4, &r5] {
+            registry.insert(r).await.unwrap();
+        }
+
+        // Query running + needs-review (the health check query)
+        let active = registry
+            .list(StatusFilter::any(vec![
+                Status::Running,
+                Status::NeedsReview,
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 2);
+        let slugs: Vec<&str> = active.iter().map(|r| r.slug.as_str()).collect();
+        assert!(slugs.contains(&"tasks/running-1"));
+        assert!(slugs.contains(&"tasks/needs-review-1"));
+
+        // Query single status via Any
+        let done_only = registry
+            .list(StatusFilter::any(vec![Status::Done]))
+            .await
+            .unwrap();
+        assert_eq!(done_only.len(), 1);
+        assert_eq!(done_only[0].slug, "tasks/done-1");
+
+        // Query all terminal statuses
+        let terminal = registry
+            .list(StatusFilter::any(vec![Status::Done, Status::Failed]))
+            .await
+            .unwrap();
+        assert_eq!(terminal.len(), 2);
+
+        // Empty vec returns empty
+        let empty = registry.list(StatusFilter::any(vec![])).await.unwrap();
+        assert!(empty.is_empty());
     }
 
     // --- Security / red-team tests ---

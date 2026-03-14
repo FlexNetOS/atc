@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level ATC configuration. Loaded from TOML file.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AtcConfig {
     /// Directory containing the config file that was loaded.
     /// Used to resolve relative paths in DispatchConfig.
@@ -16,6 +16,8 @@ pub struct AtcConfig {
     pub dispatch: DispatchConfig,
     #[serde(default)]
     pub batch: BatchConfig,
+    #[serde(default)]
+    pub health: HealthConfig,
     /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
@@ -24,6 +26,10 @@ pub struct AtcConfig {
 impl AtcConfig {
     fn parse_and_validate(contents: &str) -> anyhow::Result<Self> {
         let cfg: Self = toml::from_str(contents)?;
+        anyhow::ensure!(
+            cfg.health.signal_timeout_secs > 0,
+            "health.signal_timeout_secs must be >= 1"
+        );
         anyhow::ensure!(
             cfg.batch.max_concurrency > 0,
             "batch.max_concurrency must be >= 1"
@@ -106,7 +112,7 @@ impl AtcConfig {
 }
 
 /// `[registry]` section
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RegistryConfig {
     /// Path to SQLite DB file. Supports ~ expansion.
     /// Default: ~/.local/share/atc/registry.db
@@ -127,7 +133,7 @@ impl RegistryConfig {
 }
 
 /// `[dispatch]` section
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchConfig {
     /// Repo alias passed to `meta git worktree create --repo`. Required.
@@ -252,8 +258,29 @@ impl DispatchConfig {
     }
 }
 
+/// `[health]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HealthConfig {
+    /// Timeout in seconds per subprocess call per signal per record.
+    /// Default: 30.
+    #[serde(default = "default_signal_timeout_secs")]
+    pub signal_timeout_secs: u64,
+}
+
+fn default_signal_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            signal_timeout_secs: default_signal_timeout_secs(),
+        }
+    }
+}
+
 /// `[batch]` section
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BatchConfig {
     /// Maximum concurrent dispatches. Default: 3.
     #[serde(default = "default_max_concurrency")]
@@ -273,7 +300,7 @@ impl Default for BatchConfig {
 }
 
 /// Per-mode template override configuration.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModeConfig {
     /// Path to a template file on disk. Supports `~` expansion.
@@ -354,6 +381,30 @@ max_budget_usd = 10.0
         assert!(cfg.registry.path.is_none());
         assert_eq!(cfg.dispatch.max_turns, 10_000);
         assert_eq!(cfg.dispatch.max_budget_usd, 25.0);
+    }
+
+    #[test]
+    fn test_health_config_defaults() {
+        let cfg = AtcConfig::default();
+        assert_eq!(cfg.health.signal_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_health_config_from_toml() {
+        let toml = "[health]\nsignal_timeout_secs = 60";
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.health.signal_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_signal_timeout() {
+        let toml = "[health]\nsignal_timeout_secs = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("signal_timeout_secs must be >= 1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

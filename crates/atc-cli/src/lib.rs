@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub use args::{Args, Commands};
 
 pub mod dispatch;
+pub mod health;
 
 mod args {
     use atc_core::types::Mode;
@@ -38,6 +39,15 @@ mod args {
             /// Run inline (synchronous, no tmux). Auto-enabled when ATC_CI=true.
             #[arg(long)]
             inline: bool,
+        },
+        /// Check health of all active dispatches
+        Health {
+            /// Output as JSON array
+            #[arg(long)]
+            json: bool,
+            /// Include done and failed records
+            #[arg(long)]
+            all: bool,
         },
         /// Render and print the system prompt for a mode (useful for debugging)
         Prompt {
@@ -87,6 +97,9 @@ pub async fn run(
                 }
             }
             Ok(())
+        }
+        Commands::Health { json, all } => {
+            health::run_health(config, registry, *json, *all).await
         }
         Commands::Prompt {
             mode,

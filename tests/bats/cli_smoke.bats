@@ -23,6 +23,13 @@ load helpers/common
     [[ "$output" == *"MODE"* ]]
 }
 
+@test "atc health --help exits 0 and shows health usage" {
+    run "$ATC_BIN" health --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--json"* ]]
+    [[ "$output" == *"--all"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Argument validation
 # ---------------------------------------------------------------------------
@@ -146,6 +153,24 @@ load helpers/common
         echo "PANIC DETECTED: $output"
         false
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Health command
+# ---------------------------------------------------------------------------
+
+@test "atc health with empty registry shows no records" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No dispatch records found"* ]]
+}
+
+@test "atc health --json with empty registry outputs empty array" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == "[]" ]]
 }
 
 # ---------------------------------------------------------------------------
