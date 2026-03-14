@@ -380,6 +380,16 @@ mod tests {
     }
 
     #[test]
+    fn test_derive_branch_double_hyphen_invariant() {
+        // Slug ABNF (`segment = 1*(ALPHA / DIGIT / "-" / "_")`) prevents `--`
+        // in valid slugs. If a malformed slug with `--` reaches derive_branch,
+        // the output would collide with the `/` → `--` mapping. This test locks
+        // the invariant: derive_branch is a pure replace and does NOT reject `--`.
+        // Upstream slug validation (git-kb) is responsible for preventing this.
+        assert_eq!(derive_branch("tasks/a--b"), "tasks--a--b");
+    }
+
+    #[test]
     fn test_build_session_name_shell_metacharacters() {
         // Session names derived from adversarial slugs should not cause
         // parsing ambiguity beyond the expected format.
