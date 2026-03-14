@@ -79,7 +79,13 @@ pub async fn run(
                 directive: directive.clone(),
                 inline: is_inline,
             };
-            dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await?;
+            let outcome =
+                dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await?;
+            if let Some(code) = outcome.inline_exit_code {
+                if code != 0 {
+                    anyhow::bail!("inline dispatch failed with exit code {code}");
+                }
+            }
             Ok(())
         }
         Commands::Prompt {
