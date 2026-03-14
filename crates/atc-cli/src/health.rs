@@ -104,8 +104,7 @@ pub async fn run_health(
     let results: Vec<HealthResult> = checker.run().await?;
 
     // Collect evaluated records
-    let mut display_records: Vec<DispatchRecord> =
-        results.into_iter().map(|r| r.record).collect();
+    let mut display_records: Vec<DispatchRecord> = results.into_iter().map(|r| r.record).collect();
 
     // Add needs-human records (shown but not evaluated)
     let needs_human = registry
@@ -115,9 +114,7 @@ pub async fn run_health(
 
     // If --all, also include done and failed
     if all {
-        let done = registry
-            .list(StatusFilter::by_status(Status::Done))
-            .await?;
+        let done = registry.list(StatusFilter::by_status(Status::Done)).await?;
         let failed = registry
             .list(StatusFilter::by_status(Status::Failed))
             .await?;

@@ -401,8 +401,7 @@ max_budget_usd = 10.0
         let toml = "[health]\nsignal_timeout_secs = 0";
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("signal_timeout_secs must be >= 1"),
+            err.to_string().contains("signal_timeout_secs must be >= 1"),
             "unexpected error: {err}"
         );
     }

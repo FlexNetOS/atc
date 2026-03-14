@@ -98,9 +98,7 @@ pub async fn run(
             }
             Ok(())
         }
-        Commands::Health { json, all } => {
-            health::run_health(config, registry, *json, *all).await
-        }
+        Commands::Health { json, all } => health::run_health(config, registry, *json, *all).await,
         Commands::Prompt {
             mode,
             slug,
