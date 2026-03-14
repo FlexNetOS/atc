@@ -93,6 +93,16 @@ impl HealthChecker {
         Ok(results)
     }
 
+    /// Evaluate all six health signals for a single record and apply the
+    /// transition matrix. Signals are evaluated sequentially with short-circuit
+    /// logic — if signal N is false/error, downstream signals are skipped.
+    ///
+    /// **Timing**: Worst-case per-record time is 6 × `signal_timeout_secs`
+    /// (default 30s × 6 = 180s) when every signal hits the timeout. In practice,
+    /// short-circuiting and fast subprocess responses keep this well below the
+    /// theoretical maximum. Records are evaluated concurrently via `tokio::spawn`
+    /// in `run()`, so total wall-clock time is bounded by the slowest record,
+    /// not the sum.
     async fn check_record(&self, mut record: DispatchRecord) -> Result<HealthResult> {
         let old_checks = record.checks.clone();
         let old_status = record.status;
@@ -501,20 +511,25 @@ impl HealthChecker {
             }
         };
 
-        // Defense in depth: validate owner/repo before interpolating into GraphQL
-        if !Self::is_valid_github_name(&owner) || !Self::is_valid_github_name(&repo) {
-            warn!(slug = %record.slug, owner = %owner, repo = %repo, "signal 6: owner/repo contains invalid characters");
-            return SignalResult::Error;
-        }
-
-        let query = format!(
-            r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {number}) {{ reviewThreads(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ isResolved }} }} }} }} }}"#
-        );
+        // Use GraphQL variables instead of string interpolation for hygiene.
+        // The gh CLI's -f flag passes string variables, -F passes JSON-typed values.
+        let query = r#"query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } } } } }"#;
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
         let mut cmd = tokio::process::Command::new(&self.gh_bin);
         cmd.kill_on_drop(true)
-            .args(["api", "graphql", "-f", &format!("query={query}")])
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={query}"),
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("repo={repo}"),
+                "-F",
+                &format!("number={number}"),
+            ])
             .stderr(std::process::Stdio::null());
         let result = tokio::time::timeout(timeout, cmd.output()).await;
 
@@ -592,14 +607,6 @@ impl HealthChecker {
                 SignalResult::Error
             }
         }
-    }
-
-    /// Validate that a string is a valid GitHub owner or repo name.
-    /// Only ASCII alphanumerics, hyphens, underscores, and dots are allowed.
-    fn is_valid_github_name(s: &str) -> bool {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     }
 
     /// Parse a GitHub PR URL into (owner, repo, number).
@@ -778,15 +785,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_is_valid_github_name() {
-        assert!(HealthChecker::is_valid_github_name("harmony-labs"));
-        assert!(HealthChecker::is_valid_github_name("my_repo.v2"));
-        assert!(HealthChecker::is_valid_github_name("a"));
-        assert!(!HealthChecker::is_valid_github_name(""));
-        assert!(!HealthChecker::is_valid_github_name("owner/repo"));
-        assert!(!HealthChecker::is_valid_github_name("foo bar"));
-        assert!(!HealthChecker::is_valid_github_name("a\"b"));
-        assert!(!HealthChecker::is_valid_github_name("a{b}"));
-    }
 }
