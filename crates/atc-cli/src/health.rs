@@ -112,14 +112,24 @@ pub async fn run_health(
         .await?;
     display_records.extend(needs_human);
 
-    // If --all, also include done and failed
+    // If --all, also include done and failed (excluding already-collected slugs
+    // to avoid duplicates when a record transitioned to terminal status this run)
     if all {
+        let existing_slugs: std::collections::HashSet<String> =
+            display_records.iter().map(|r| r.slug.clone()).collect();
         let done = registry.list(StatusFilter::by_status(Status::Done)).await?;
         let failed = registry
             .list(StatusFilter::by_status(Status::Failed))
             .await?;
-        display_records.extend(done);
-        display_records.extend(failed);
+        display_records.extend(
+            done.into_iter()
+                .filter(|r| !existing_slugs.contains(&r.slug)),
+        );
+        display_records.extend(
+            failed
+                .into_iter()
+                .filter(|r| !existing_slugs.contains(&r.slug)),
+        );
     }
 
     // Sort by dispatched_at desc for consistent display

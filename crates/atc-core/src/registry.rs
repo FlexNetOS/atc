@@ -36,6 +36,14 @@ pub trait Registry: Send + Sync {
     async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
     async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
+    /// Atomically update health checks, status, and updated_at in a single write.
+    async fn update_health(
+        &self,
+        slug: &str,
+        checks: &HealthChecks,
+        status: Status,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()>;
     async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()>;
     async fn increment_retries(
         &self,
@@ -348,6 +356,43 @@ impl Registry for SqliteRegistry {
         };
 
         rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn update_health(
+        &self,
+        slug: &str,
+        checks: &HealthChecks,
+        status: Status,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            r#"UPDATE dispatches SET
+                check_agent_exited_clean = ?1,
+                check_branch_pushed = ?2,
+                check_pr_created = ?3,
+                check_ci_passed = ?4,
+                check_reviews_approved = ?5,
+                check_threads_resolved = ?6,
+                status = ?7,
+                updated_at = ?8
+            WHERE slug = ?9"#,
+        )
+        .bind(checks.agent_exited_clean as i32)
+        .bind(checks.branch_pushed as i32)
+        .bind(checks.pr_created as i32)
+        .bind(checks.ci_passed as i32)
+        .bind(checks.reviews_approved as i32)
+        .bind(checks.threads_resolved as i32)
+        .bind(status.as_str())
+        .bind(updated_at.to_rfc3339())
+        .bind(slug)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for slug: {slug}"
+        );
+        Ok(())
     }
 
     async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()> {

@@ -114,12 +114,14 @@ impl HealthChecker {
             record.status = new_status;
             record.updated_at = now;
 
-            // Persist changes
+            // Persist checks + status atomically in a single UPDATE
             self.registry
-                .update_checks(&record.slug, &record.checks)
-                .await?;
-            self.registry
-                .update_status(&record.slug, record.status.clone())
+                .update_health(
+                    &record.slug,
+                    &record.checks,
+                    record.status.clone(),
+                    record.updated_at,
+                )
                 .await?;
 
             info!(
