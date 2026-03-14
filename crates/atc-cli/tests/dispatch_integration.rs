@@ -260,14 +260,17 @@ async fn test_dispatch_inline_inserts_registry_record() {
         directive: None,
         inline: true,
     };
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let outcome =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("dispatch failed");
 
-    assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
+    assert_eq!(outcome.inline_exit_code, Some(0));
 
     let record = registry.get("tasks/gitkb-42").await.unwrap();
     assert!(record.is_some(), "registry record should exist");
     let record = record.unwrap();
+    assert_eq!(outcome.session, record.session);
     assert_eq!(record.slug, "tasks/gitkb-42");
     assert_eq!(record.branch, "tasks--gitkb-42");
     assert_eq!(record.status, Status::Done);
@@ -328,18 +331,17 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
         directive: None,
         inline: true,
     };
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let outcome =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("dispatch should succeed even with non-zero exit");
 
-    assert!(
-        result.is_ok(),
-        "dispatch should succeed even with non-zero exit: {:?}",
-        result.err()
-    );
+    assert_eq!(outcome.inline_exit_code, Some(1));
 
     let record = registry.get("tasks/gitkb-fail").await.unwrap();
     assert!(record.is_some(), "registry record should exist");
     let record = record.unwrap();
+    assert_eq!(outcome.session, record.session);
     assert_eq!(
         record.status,
         Status::Failed,
