@@ -63,9 +63,9 @@ impl HealthChecker {
         let mut handles = Vec::new();
         for record in records {
             let checker = self.clone();
-            handles.push(tokio::spawn(async move {
-                checker.check_record(record).await
-            }));
+            handles.push(tokio::spawn(
+                async move { checker.check_record(record).await },
+            ));
         }
 
         // Collect all results — don't short-circuit on error so that remaining
@@ -768,7 +768,10 @@ mod tests {
         // Error + Failed → skip
         assert!(HealthChecker::should_skip_transition(true, Status::Failed));
         // Error + non-terminal → don't skip
-        assert!(!HealthChecker::should_skip_transition(true, Status::Running));
+        assert!(!HealthChecker::should_skip_transition(
+            true,
+            Status::Running
+        ));
         assert!(!HealthChecker::should_skip_transition(
             true,
             Status::NeedsReview
@@ -784,5 +787,4 @@ mod tests {
             Status::Failed
         ));
     }
-
 }

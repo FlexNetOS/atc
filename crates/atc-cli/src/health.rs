@@ -206,10 +206,7 @@ mod tests {
         };
         let record = make_record(Status::Failed, checks);
         let vals = signal_values(&record);
-        assert_eq!(
-            vals,
-            [Some(true), Some(false), None, None, None, None]
-        );
+        assert_eq!(vals, [Some(true), Some(false), None, None, None, None]);
     }
 
     #[test]
