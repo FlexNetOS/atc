@@ -433,6 +433,7 @@ impl Registry for SqliteRegistry {
                 check_ci_passed = 0,
                 check_reviews_approved = 0,
                 check_threads_resolved = 0,
+                pr_url = NULL,
                 cost_usd = NULL,
                 num_turns = NULL,
                 duration_ms = NULL
@@ -941,9 +942,40 @@ mod tests {
         assert!(!fetched.checks.ci_passed);
         assert!(!fetched.checks.reviews_approved);
         assert!(!fetched.checks.threads_resolved);
+        assert_eq!(fetched.pr_url, None);
         assert_eq!(fetched.cost_usd, None);
         assert_eq!(fetched.num_turns, None);
         assert_eq!(fetched.duration_ms, None);
+    }
+
+    #[tokio::test]
+    async fn test_increment_retries_clears_pr_url() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        registry
+            .insert(&sample_record("tasks/gitkb-42"))
+            .await
+            .unwrap();
+        // Set a pr_url from a previous attempt
+        registry
+            .set_pr_url("tasks/gitkb-42", "https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+        let before = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        assert!(before.pr_url.is_some());
+
+        // Retry should clear pr_url
+        registry
+            .increment_retries(
+                "tasks/gitkb-42",
+                "retry-session",
+                &PathBuf::from("/tmp/retry.jsonl"),
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let after = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        assert_eq!(after.pr_url, None, "pr_url should be cleared on retry");
     }
 
     // --- Timestamp advancement tests ---

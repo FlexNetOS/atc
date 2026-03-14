@@ -16,6 +16,28 @@ pub struct HealthResult {
     pub changed: bool,
 }
 
+/// Tri-state signal result distinguishing definitive answers from transient errors.
+/// When a signal returns `Error`, the health checker skips the transition to avoid
+/// permanently stranding a record in a terminal state due to a transient failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalResult {
+    /// Signal definitively true (e.g. branch exists, CI passed).
+    True,
+    /// Signal definitively false (e.g. branch not found, CI failed).
+    False,
+    /// Transient error (timeout, CLI failure, auth issue) — cannot determine state.
+    Error,
+}
+
+impl SignalResult {
+    fn is_true(self) -> bool {
+        self == Self::True
+    }
+    fn is_error(self) -> bool {
+        self == Self::Error
+    }
+}
+
 pub struct HealthChecker {
     pub registry: Arc<dyn Registry>,
     pub config: Arc<AtcConfig>,
@@ -26,6 +48,8 @@ pub struct HealthChecker {
 
 impl HealthChecker {
     /// Evaluate all active records and apply transitions.
+    /// Waits for all spawned tasks to complete before returning, ensuring no
+    /// detached tasks continue writing to the DB after this function returns.
     pub async fn run(&self) -> Result<Vec<HealthResult>> {
         let records = self
             .registry
@@ -55,10 +79,28 @@ impl HealthChecker {
             }));
         }
 
+        // Collect all results — don't short-circuit on error so that remaining
+        // tasks are not detached (which would let them keep writing to the DB).
         let mut results = Vec::new();
+        let mut errors = Vec::new();
         for handle in handles {
-            results.push(handle.await??);
+            match handle.await {
+                Ok(Ok(result)) => results.push(result),
+                Ok(Err(e)) => errors.push(e),
+                Err(e) => errors.push(anyhow::anyhow!("task panicked: {e}")),
+            }
         }
+
+        // Log errors but still return successful results
+        for e in &errors {
+            warn!(error = %e, "health check task failed");
+        }
+
+        // If ALL tasks failed, propagate the first error
+        if results.is_empty() && !errors.is_empty() {
+            return Err(errors.into_iter().next().unwrap());
+        }
+
         Ok(results)
     }
 
@@ -66,38 +108,51 @@ impl HealthChecker {
         let old_checks = record.checks.clone();
         let old_status = record.status.clone();
 
+        let mut had_error = false;
+
         // Signal 1: agent_exited_clean
-        let agent_exited_clean = self.eval_signal_1(&record).await;
+        let s1 = self.eval_signal_1(&record).await;
+        had_error = had_error || s1.is_error();
         let mut checks = HealthChecks {
-            agent_exited_clean,
+            agent_exited_clean: s1.is_true(),
             ..Default::default()
         };
 
-        if !agent_exited_clean {
+        if !s1.is_true() {
             // short-circuit: all downstream stays false
         } else {
             // Signal 2: branch_pushed
-            checks.branch_pushed = self.eval_signal_2(&record).await;
-            if !checks.branch_pushed {
+            let s2 = self.eval_signal_2(&record).await;
+            had_error = had_error || s2.is_error();
+            checks.branch_pushed = s2.is_true();
+            if !s2.is_true() {
                 // short-circuit: downstream stays false
             } else {
                 // Signal 3: pr_created (may update pr_url)
-                checks.pr_created = self.eval_signal_3(&mut record).await;
-                if !checks.pr_created {
+                let s3 = self.eval_signal_3(&mut record).await;
+                had_error = had_error || s3.is_error();
+                checks.pr_created = s3.is_true();
+                if !s3.is_true() {
                     // short-circuit
                 } else {
                     // Signal 4: ci_passed
-                    checks.ci_passed = self.eval_signal_4(&record).await;
-                    if !checks.ci_passed {
+                    let s4 = self.eval_signal_4(&record).await;
+                    had_error = had_error || s4.is_error();
+                    checks.ci_passed = s4.is_true();
+                    if !s4.is_true() {
                         // short-circuit
                     } else {
                         // Signal 5: reviews_approved
-                        checks.reviews_approved = self.eval_signal_5(&record).await;
-                        if !checks.reviews_approved {
+                        let s5 = self.eval_signal_5(&record).await;
+                        had_error = had_error || s5.is_error();
+                        checks.reviews_approved = s5.is_true();
+                        if !s5.is_true() {
                             // short-circuit
                         } else {
                             // Signal 6: threads_resolved
-                            checks.threads_resolved = self.eval_signal_6(&record).await;
+                            let s6 = self.eval_signal_6(&record).await;
+                            had_error = had_error || s6.is_error();
+                            checks.threads_resolved = s6.is_true();
                         }
                     }
                 }
@@ -105,6 +160,22 @@ impl HealthChecker {
         }
 
         let new_status = Self::apply_transition(&checks);
+
+        // If any signal hit a transient error AND the transition would move to a
+        // terminal state (Done/Failed), skip the transition to avoid permanently
+        // stranding the record due to a transient failure.
+        let would_terminate = matches!(new_status, Status::Done | Status::Failed);
+        if had_error && would_terminate {
+            warn!(
+                slug = %record.slug,
+                proposed_status = %new_status,
+                "health check: skipping terminal transition due to transient signal error"
+            );
+            return Ok(HealthResult {
+                record,
+                changed: false,
+            });
+        }
 
         let changed = checks != old_checks || new_status != old_status;
 
@@ -144,7 +215,7 @@ impl HealthChecker {
     }
 
     /// Signal 1: Check if tmux session still exists.
-    async fn eval_signal_1(&self, record: &DispatchRecord) -> bool {
+    async fn eval_signal_1(&self, record: &DispatchRecord) -> SignalResult {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
         let mut cmd = tokio::process::Command::new(&self.tmux_bin);
         cmd.kill_on_drop(true)
@@ -158,26 +229,26 @@ impl HealthChecker {
                 if status.success() {
                     // Session exists — agent still running
                     debug!(slug = %record.slug, "signal 1: tmux session exists, agent running");
-                    false
+                    SignalResult::False
                 } else {
                     // Session gone — agent finished
                     debug!(slug = %record.slug, "signal 1: tmux session gone, agent exited");
-                    true
+                    SignalResult::True
                 }
             }
             Ok(Err(e)) => {
                 warn!(slug = %record.slug, error = %e, "signal 1: tmux command failed");
-                false
+                SignalResult::Error
             }
             Err(_) => {
                 warn!(slug = %record.slug, "signal 1: tmux command timed out");
-                false
+                SignalResult::Error
             }
         }
     }
 
     /// Signal 2: Check if branch exists on remote.
-    async fn eval_signal_2(&self, record: &DispatchRecord) -> bool {
+    async fn eval_signal_2(&self, record: &DispatchRecord) -> SignalResult {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
         let mut cmd = tokio::process::Command::new(&self.git_bin);
         cmd.kill_on_drop(true)
@@ -200,35 +271,37 @@ impl HealthChecker {
                 match code {
                     0 => {
                         debug!(slug = %record.slug, "signal 2: branch exists on remote");
-                        true
+                        SignalResult::True
                     }
                     2 => {
+                        // Exit code 2 = definitive "not found"
                         debug!(slug = %record.slug, "signal 2: branch not found on remote");
-                        false
+                        SignalResult::False
                     }
                     other => {
+                        // Unexpected exit code — could be auth/network error
                         warn!(slug = %record.slug, exit_code = other, "signal 2: git ls-remote unexpected exit code");
-                        false
+                        SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
                 warn!(slug = %record.slug, error = %e, "signal 2: git ls-remote failed");
-                false
+                SignalResult::Error
             }
             Err(_) => {
                 warn!(slug = %record.slug, "signal 2: git ls-remote timed out");
-                false
+                SignalResult::Error
             }
         }
     }
 
     /// Signal 3: Check if PR exists for the branch. Updates pr_url in registry if discovered.
-    async fn eval_signal_3(&self, record: &mut DispatchRecord) -> bool {
+    async fn eval_signal_3(&self, record: &mut DispatchRecord) -> SignalResult {
         // If pr_url already known, skip the gh call
         if record.pr_url.is_some() {
             debug!(slug = %record.slug, "signal 3: pr_url already known, skipping gh call");
-            return true;
+            return SignalResult::True;
         }
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
@@ -254,13 +327,14 @@ impl HealthChecker {
             Ok(Ok(output)) => {
                 if !output.status.success() {
                     warn!(slug = %record.slug, "signal 3: gh pr list failed");
-                    return false;
+                    return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 if trimmed.is_empty() || trimmed == "null" {
+                    // gh succeeded but returned no results — definitively no PR
                     debug!(slug = %record.slug, "signal 3: no PR found");
-                    return false;
+                    return SignalResult::False;
                 }
                 // Parse JSON to extract url
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -271,28 +345,30 @@ impl HealthChecker {
                             warn!(slug = %record.slug, error = %e, "signal 3: failed to store pr_url");
                         }
                         record.pr_url = Some(url.to_string());
-                        return true;
+                        return SignalResult::True;
                     }
                 }
                 warn!(slug = %record.slug, output = %trimmed, "signal 3: could not parse PR URL from gh output");
-                false
+                SignalResult::Error
             }
             Ok(Err(e)) => {
                 warn!(slug = %record.slug, error = %e, "signal 3: gh pr list command failed");
-                false
+                SignalResult::Error
             }
             Err(_) => {
                 warn!(slug = %record.slug, "signal 3: gh pr list timed out");
-                false
+                SignalResult::Error
             }
         }
     }
 
     /// Signal 4: Check if all CI checks passed on the PR.
-    async fn eval_signal_4(&self, record: &DispatchRecord) -> bool {
+    /// Only counts genuinely failed states (FAILURE, TIMED_OUT, CANCELLED,
+    /// ACTION_REQUIRED). SKIPPED and NEUTRAL are not considered failures.
+    async fn eval_signal_4(&self, record: &DispatchRecord) -> SignalResult {
         let pr_url = match &record.pr_url {
             Some(url) => url,
-            None => return false,
+            None => return SignalResult::False,
         };
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
@@ -305,7 +381,7 @@ impl HealthChecker {
                 "--json",
                 "name,state",
                 "--jq",
-                "[.[] | select(.state != \"SUCCESS\")] | length",
+                "[.[] | select(.state == \"FAILURE\" or .state == \"TIMED_OUT\" or .state == \"CANCELLED\" or .state == \"ACTION_REQUIRED\")] | length",
             ])
             .current_dir(&record.worktree_path)
             .stderr(std::process::Stdio::null());
@@ -315,41 +391,41 @@ impl HealthChecker {
             Ok(Ok(output)) => {
                 if !output.status.success() {
                     warn!(slug = %record.slug, "signal 4: gh pr checks failed");
-                    return false;
+                    return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 match trimmed.parse::<u64>() {
                     Ok(0) => {
                         debug!(slug = %record.slug, "signal 4: all CI checks passed");
-                        true
+                        SignalResult::True
                     }
                     Ok(n) => {
-                        debug!(slug = %record.slug, failing = n, "signal 4: CI checks not all passing");
-                        false
+                        debug!(slug = %record.slug, failing = n, "signal 4: CI checks failing");
+                        SignalResult::False
                     }
                     Err(_) => {
                         warn!(slug = %record.slug, output = %trimmed, "signal 4: could not parse gh pr checks output");
-                        false
+                        SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
                 warn!(slug = %record.slug, error = %e, "signal 4: gh pr checks command failed");
-                false
+                SignalResult::Error
             }
             Err(_) => {
                 warn!(slug = %record.slug, "signal 4: gh pr checks timed out");
-                false
+                SignalResult::Error
             }
         }
     }
 
     /// Signal 5: Check if PR reviews are approved.
-    async fn eval_signal_5(&self, record: &DispatchRecord) -> bool {
+    async fn eval_signal_5(&self, record: &DispatchRecord) -> SignalResult {
         let pr_url = match &record.pr_url {
             Some(url) => url,
-            None => return false,
+            None => return SignalResult::False,
         };
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
@@ -372,44 +448,45 @@ impl HealthChecker {
             Ok(Ok(output)) => {
                 if !output.status.success() {
                     warn!(slug = %record.slug, "signal 5: gh pr view failed");
-                    return false;
+                    return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 match trimmed {
                     "APPROVED" => {
                         debug!(slug = %record.slug, "signal 5: reviews approved");
-                        true
+                        SignalResult::True
                     }
                     "" | "null" => {
                         // No review policy — treat as approved
                         debug!(slug = %record.slug, "signal 5: no review policy, treating as approved");
-                        true
+                        SignalResult::True
                     }
                     other => {
                         debug!(slug = %record.slug, decision = %other, "signal 5: reviews not approved");
-                        false
+                        SignalResult::False
                     }
                 }
             }
             Ok(Err(e)) => {
                 warn!(slug = %record.slug, error = %e, "signal 5: gh pr view command failed");
-                false
+                SignalResult::Error
             }
             Err(_) => {
                 warn!(slug = %record.slug, "signal 5: gh pr view timed out");
-                false
+                SignalResult::Error
             }
         }
     }
 
     /// Signal 6: Check if all review threads are resolved.
     /// Uses the GraphQL API because `gh pr view --json reviewThreads` is not
-    /// a supported JSON field in the GitHub CLI.
-    async fn eval_signal_6(&self, record: &DispatchRecord) -> bool {
+    /// a supported JSON field in the GitHub CLI. Includes `pageInfo` to detect
+    /// truncated results (>100 threads) and treats them conservatively as unresolved.
+    async fn eval_signal_6(&self, record: &DispatchRecord) -> SignalResult {
         let pr_url = match &record.pr_url {
             Some(url) => url,
-            None => return false,
+            None => return SignalResult::False,
         };
 
         // Parse owner, repo, and PR number from the URL
@@ -418,12 +495,12 @@ impl HealthChecker {
             Some(parts) => parts,
             None => {
                 warn!(slug = %record.slug, url = %pr_url, "signal 6: could not parse PR URL");
-                return false;
+                return SignalResult::Error;
             }
         };
 
         let query = format!(
-            r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {number}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"#
+            r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {number}) {{ reviewThreads(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ isResolved }} }} }} }} }}"#
         );
 
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
@@ -437,15 +514,36 @@ impl HealthChecker {
             Ok(Ok(output)) => {
                 if !output.status.success() {
                     warn!(slug = %record.slug, "signal 6: gh api graphql failed");
-                    return false;
+                    return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 // Parse the GraphQL response to count unresolved threads
                 match serde_json::from_str::<serde_json::Value>(&stdout) {
                     Ok(json) => {
-                        let nodes = json
-                            .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+                        // Check for GraphQL-level errors
+                        if json.get("errors").is_some() {
+                            warn!(slug = %record.slug, "signal 6: GraphQL response contains errors");
+                            return SignalResult::Error;
+                        }
+
+                        let threads_obj = json.pointer("/data/repository/pullRequest/reviewThreads");
+
+                        // Check pagination — if there are more pages, we can't
+                        // confirm all threads are resolved
+                        if let Some(has_next) = threads_obj
+                            .and_then(|t| t.pointer("/pageInfo/hasNextPage"))
+                            .and_then(|v| v.as_bool())
+                        {
+                            if has_next {
+                                warn!(slug = %record.slug, "signal 6: >100 review threads, result truncated — treating as unresolved");
+                                return SignalResult::False;
+                            }
+                        }
+
+                        let nodes = threads_obj
+                            .and_then(|t| t.get("nodes"))
                             .and_then(|v| v.as_array());
+
                         match nodes {
                             Some(threads) => {
                                 let unresolved = threads
@@ -456,32 +554,33 @@ impl HealthChecker {
                                     .count();
                                 if unresolved == 0 {
                                     debug!(slug = %record.slug, "signal 6: all threads resolved");
-                                    true
+                                    SignalResult::True
                                 } else {
                                     debug!(slug = %record.slug, unresolved = unresolved, "signal 6: unresolved threads remain");
-                                    false
+                                    SignalResult::False
                                 }
                             }
                             None => {
-                                // No review threads at all — treat as resolved
-                                debug!(slug = %record.slug, "signal 6: no review threads found, treating as resolved");
-                                true
+                                // nodes is null or missing — could be a field-level
+                                // GraphQL error, treat as error rather than resolved
+                                warn!(slug = %record.slug, "signal 6: reviewThreads nodes is null/missing");
+                                SignalResult::Error
                             }
                         }
                     }
                     Err(e) => {
                         warn!(slug = %record.slug, error = %e, "signal 6: could not parse GraphQL response");
-                        false
+                        SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
                 warn!(slug = %record.slug, error = %e, "signal 6: gh api graphql command failed");
-                false
+                SignalResult::Error
             }
             Err(_) => {
                 warn!(slug = %record.slug, "signal 6: gh api graphql timed out");
-                false
+                SignalResult::Error
             }
         }
     }
