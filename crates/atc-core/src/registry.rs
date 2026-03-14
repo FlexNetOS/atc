@@ -32,7 +32,6 @@ impl StatusFilter {
 pub trait Registry: Send + Sync {
     async fn insert(&self, record: &DispatchRecord) -> Result<()>;
     async fn update_status(&self, slug: &str, status: Status) -> Result<()>;
-    async fn update_checks(&self, slug: &str, checks: &HealthChecks) -> Result<()>;
     async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
     async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
@@ -253,36 +252,6 @@ impl Registry for SqliteRegistry {
                 .bind(slug)
                 .execute(&self.pool)
                 .await?;
-        anyhow::ensure!(
-            result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
-        );
-        Ok(())
-    }
-
-    async fn update_checks(&self, slug: &str, checks: &HealthChecks) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let result = sqlx::query(
-            r#"UPDATE dispatches SET
-                check_agent_exited_clean = ?1,
-                check_branch_pushed = ?2,
-                check_pr_created = ?3,
-                check_ci_passed = ?4,
-                check_reviews_approved = ?5,
-                check_threads_resolved = ?6,
-                updated_at = ?7
-            WHERE slug = ?8"#,
-        )
-        .bind(checks.agent_exited_clean as i32)
-        .bind(checks.branch_pushed as i32)
-        .bind(checks.pr_created as i32)
-        .bind(checks.ci_passed as i32)
-        .bind(checks.reviews_approved as i32)
-        .bind(checks.threads_resolved as i32)
-        .bind(&now)
-        .bind(slug)
-        .execute(&self.pool)
-        .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
             "no dispatch record found for slug: {slug}"
@@ -553,36 +522,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_checks() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-
-        let checks = HealthChecks {
-            agent_exited_clean: true,
-            branch_pushed: true,
-            pr_created: true,
-            ci_passed: false,
-            reviews_approved: false,
-            threads_resolved: false,
-        };
-        registry
-            .update_checks("tasks/gitkb-42", &checks)
-            .await
-            .unwrap();
-
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-        assert!(fetched.checks.agent_exited_clean);
-        assert!(fetched.checks.branch_pushed);
-        assert!(fetched.checks.pr_created);
-        assert!(!fetched.checks.ci_passed);
-        assert!(!fetched.checks.reviews_approved);
-        assert!(!fetched.checks.threads_resolved);
-    }
-
-    #[tokio::test]
     async fn test_update_cost() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         registry
@@ -618,6 +557,56 @@ mod tests {
         assert_eq!(
             fetched.pr_url.as_deref(),
             Some("https://github.com/org/repo/pull/1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_health_round_trip() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        registry
+            .insert(&sample_record("tasks/gitkb-42"))
+            .await
+            .unwrap();
+
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            reviews_approved: false,
+            threads_resolved: false,
+        };
+        let status = Status::NeedsReview;
+        let updated_at = DateTime::parse_from_rfc3339("2025-06-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        registry
+            .update_health("tasks/gitkb-42", &checks, status, updated_at)
+            .await
+            .unwrap();
+
+        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        assert_eq!(fetched.checks, checks);
+        assert_eq!(fetched.status, Status::NeedsReview);
+        assert_eq!(fetched.updated_at, updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_update_health_nonexistent_errors() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let err = registry
+            .update_health(
+                "tasks/no-such-slug",
+                &HealthChecks::default(),
+                Status::Running,
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no dispatch record found"),
+            "unexpected error: {err}"
         );
     }
 
@@ -661,19 +650,6 @@ mod tests {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
             .update_status("tasks/no-such-slug", Status::Done)
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("no dispatch record found"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_update_checks_nonexistent_errors() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        let err = registry
-            .update_checks("tasks/no-such-slug", &HealthChecks::default())
             .await
             .unwrap_err();
         assert!(
@@ -879,7 +855,7 @@ mod tests {
         for (i, status) in statuses.iter().enumerate() {
             let slug = format!("tasks/status-{i}");
             let mut record = sample_record(&slug);
-            record.status = status.clone();
+            record.status = *status;
             registry.insert(&record).await.unwrap();
             let fetched = registry.get(&slug).await.unwrap().unwrap();
             assert_eq!(&fetched.status, status);

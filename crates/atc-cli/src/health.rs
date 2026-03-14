@@ -141,3 +141,139 @@ pub async fn run_health(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atc_core::types::{HealthChecks, Mode};
+    use chrono::Utc;
+
+    fn make_record(status: Status, checks: HealthChecks) -> DispatchRecord {
+        DispatchRecord {
+            slug: "test".to_string(),
+            branch: "test-branch".to_string(),
+            worktree_path: PathBuf::from("/tmp/test"),
+            session: "test-session".to_string(),
+            log_file: PathBuf::from("/tmp/test.jsonl"),
+            status,
+            mode: Mode::Implement,
+            retries: 0,
+            pr_url: None,
+            checks,
+            cost_usd: None,
+            num_turns: None,
+            duration_ms: None,
+            dispatched_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_signal_values_all_false_running() {
+        let record = make_record(Status::Running, HealthChecks::default());
+        let vals = signal_values(&record);
+        assert_eq!(vals, [Some(false), None, None, None, None, None]);
+    }
+
+    #[test]
+    fn test_signal_values_needs_human_all_none() {
+        let record = make_record(Status::NeedsHuman, HealthChecks::default());
+        let vals = signal_values(&record);
+        assert_eq!(vals, [None; 6]);
+    }
+
+    #[test]
+    fn test_signal_values_all_true() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: true,
+            reviews_approved: true,
+            threads_resolved: true,
+        };
+        let record = make_record(Status::Done, checks);
+        let vals = signal_values(&record);
+        assert_eq!(vals, [Some(true); 6]);
+    }
+
+    #[test]
+    fn test_signal_values_short_circuit_at_branch() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: false,
+            ..Default::default()
+        };
+        let record = make_record(Status::Failed, checks);
+        let vals = signal_values(&record);
+        assert_eq!(
+            vals,
+            [Some(true), Some(false), None, None, None, None]
+        );
+    }
+
+    #[test]
+    fn test_signal_values_short_circuit_at_pr() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: false,
+            ..Default::default()
+        };
+        let record = make_record(Status::Failed, checks);
+        let vals = signal_values(&record);
+        assert_eq!(
+            vals,
+            [Some(true), Some(true), Some(false), None, None, None]
+        );
+    }
+
+    #[test]
+    fn test_signal_values_short_circuit_at_ci() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            ..Default::default()
+        };
+        let record = make_record(Status::NeedsReview, checks);
+        let vals = signal_values(&record);
+        assert_eq!(
+            vals,
+            [Some(true), Some(true), Some(true), Some(false), None, None]
+        );
+    }
+
+    #[test]
+    fn test_signal_values_short_circuit_at_reviews() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: true,
+            reviews_approved: false,
+            ..Default::default()
+        };
+        let record = make_record(Status::NeedsReview, checks);
+        let vals = signal_values(&record);
+        assert_eq!(
+            vals,
+            [
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(false),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn test_signal_display_values() {
+        assert_eq!(signal_display(Some(true)), "✓");
+        assert_eq!(signal_display(Some(false)), "✗");
+        assert_eq!(signal_display(None), "-");
+    }
+}

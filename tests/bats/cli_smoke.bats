@@ -173,6 +173,32 @@ load helpers/common
     [[ "$output" == "[]" ]]
 }
 
+@test "atc health --all with empty registry shows no records" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health --all
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No dispatch records found"* ]]
+}
+
+@test "config with signal_timeout_secs = 0 is rejected" {
+    local config="$TEST_TMPDIR/bad-health.toml"
+    cat > "$config" <<EOF
+[dispatch]
+repo = "core"
+meta_workspace_root = "$TEST_TMPDIR/workspace"
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
+
+[health]
+signal_timeout_secs = 0
+EOF
+    mkdir -p "$TEST_TMPDIR/workspace"
+    run "$ATC_BIN" --config "$config" health
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"signal_timeout_secs"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Empty / malformed config edge cases
 # ---------------------------------------------------------------------------

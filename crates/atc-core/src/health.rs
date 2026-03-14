@@ -38,6 +38,7 @@ impl SignalResult {
     }
 }
 
+#[derive(Clone)]
 pub struct HealthChecker {
     pub registry: Arc<dyn Registry>,
     pub config: Arc<AtcConfig>,
@@ -61,20 +62,8 @@ impl HealthChecker {
 
         let mut handles = Vec::new();
         for record in records {
-            let registry = self.registry.clone();
-            let config = self.config.clone();
-            let git_bin = self.git_bin.clone();
-            let gh_bin = self.gh_bin.clone();
-            let tmux_bin = self.tmux_bin.clone();
-
+            let checker = self.clone();
             handles.push(tokio::spawn(async move {
-                let checker = HealthChecker {
-                    registry,
-                    config,
-                    git_bin,
-                    gh_bin,
-                    tmux_bin,
-                };
                 checker.check_record(record).await
             }));
         }
@@ -106,7 +95,7 @@ impl HealthChecker {
 
     async fn check_record(&self, mut record: DispatchRecord) -> Result<HealthResult> {
         let old_checks = record.checks.clone();
-        let old_status = record.status.clone();
+        let old_status = record.status;
 
         let mut had_error = false;
 
@@ -164,8 +153,7 @@ impl HealthChecker {
         // If any signal hit a transient error AND the transition would move to a
         // terminal state (Done/Failed), skip the transition to avoid permanently
         // stranding the record due to a transient failure.
-        let would_terminate = matches!(new_status, Status::Done | Status::Failed);
-        if had_error && would_terminate {
+        if Self::should_skip_transition(had_error, new_status) {
             warn!(
                 slug = %record.slug,
                 proposed_status = %new_status,
@@ -190,7 +178,7 @@ impl HealthChecker {
                 .update_health(
                     &record.slug,
                     &record.checks,
-                    record.status.clone(),
+                    record.status,
                     record.updated_at,
                 )
                 .await?;
@@ -365,6 +353,12 @@ impl HealthChecker {
     /// Signal 4: Check if all CI checks passed on the PR.
     /// Only counts genuinely failed states (FAILURE, TIMED_OUT, CANCELLED,
     /// ACTION_REQUIRED). SKIPPED and NEUTRAL are not considered failures.
+    ///
+    /// **Note:** If the repository has no CI checks configured, `gh pr checks`
+    /// returns an empty list. The jq filter then evaluates to `0` (zero failures),
+    /// so this signal returns `True`. This is intentional: repos without CI
+    /// should not block the Done transition. If CI is later added and fails,
+    /// the next health check cycle will catch it.
     async fn eval_signal_4(&self, record: &DispatchRecord) -> SignalResult {
         let pr_url = match &record.pr_url {
             Some(url) => url,
@@ -458,8 +452,16 @@ impl HealthChecker {
                         SignalResult::True
                     }
                     "" | "null" => {
-                        // No review policy — treat as approved
-                        debug!(slug = %record.slug, "signal 5: no review policy, treating as approved");
+                        // Empty or "null" reviewDecision means the repo either has no
+                        // branch protection rules requiring reviews, or the PR has not
+                        // yet received any reviews.  We treat this as approved because:
+                        //   1. Most agent-created PRs target repos without mandatory review.
+                        //   2. Blocking on a review that may never come would strand the
+                        //      record permanently in NeedsReview.
+                        // If the repo does require reviews, this signal will flip to
+                        // CHANGES_REQUESTED or REVIEW_REQUIRED once a reviewer acts,
+                        // and the next health check cycle will pick up the change.
+                        debug!(slug = %record.slug, "signal 5: no review policy or no reviews yet, treating as approved");
                         SignalResult::True
                     }
                     other => {
@@ -498,6 +500,12 @@ impl HealthChecker {
                 return SignalResult::Error;
             }
         };
+
+        // Defense in depth: validate owner/repo before interpolating into GraphQL
+        if !Self::is_valid_github_name(&owner) || !Self::is_valid_github_name(&repo) {
+            warn!(slug = %record.slug, owner = %owner, repo = %repo, "signal 6: owner/repo contains invalid characters");
+            return SignalResult::Error;
+        }
 
         let query = format!(
             r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {number}) {{ reviewThreads(first: 100) {{ pageInfo {{ hasNextPage }} nodes {{ isResolved }} }} }} }} }}"#
@@ -586,6 +594,14 @@ impl HealthChecker {
         }
     }
 
+    /// Validate that a string is a valid GitHub owner or repo name.
+    /// Only ASCII alphanumerics, hyphens, underscores, and dots are allowed.
+    fn is_valid_github_name(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    }
+
     /// Parse a GitHub PR URL into (owner, repo, number).
     /// Expected format: `https://github.com/{owner}/{repo}/pull/{number}`
     fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
@@ -599,6 +615,13 @@ impl HealthChecker {
         } else {
             None
         }
+    }
+
+    /// Returns true if a terminal transition should be skipped because at least
+    /// one signal returned a transient error. Prevents permanently stranding a
+    /// record in Done/Failed when the true signal state is unknown.
+    fn should_skip_transition(had_error: bool, new_status: Status) -> bool {
+        had_error && matches!(new_status, Status::Done | Status::Failed)
     }
 
     /// Apply the transition matrix to determine the new status from health checks.
@@ -729,5 +752,41 @@ mod tests {
             HealthChecker::parse_pr_url("https://github.com/owner/repo/issues/1"),
             None
         );
+    }
+
+    #[test]
+    fn test_should_skip_transition_error_and_terminal() {
+        // Error + Done → skip
+        assert!(HealthChecker::should_skip_transition(true, Status::Done));
+        // Error + Failed → skip
+        assert!(HealthChecker::should_skip_transition(true, Status::Failed));
+        // Error + non-terminal → don't skip
+        assert!(!HealthChecker::should_skip_transition(true, Status::Running));
+        assert!(!HealthChecker::should_skip_transition(
+            true,
+            Status::NeedsReview
+        ));
+        assert!(!HealthChecker::should_skip_transition(
+            true,
+            Status::NeedsHuman
+        ));
+        // No error + terminal → don't skip
+        assert!(!HealthChecker::should_skip_transition(false, Status::Done));
+        assert!(!HealthChecker::should_skip_transition(
+            false,
+            Status::Failed
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_github_name() {
+        assert!(HealthChecker::is_valid_github_name("harmony-labs"));
+        assert!(HealthChecker::is_valid_github_name("my_repo.v2"));
+        assert!(HealthChecker::is_valid_github_name("a"));
+        assert!(!HealthChecker::is_valid_github_name(""));
+        assert!(!HealthChecker::is_valid_github_name("owner/repo"));
+        assert!(!HealthChecker::is_valid_github_name("foo bar"));
+        assert!(!HealthChecker::is_valid_github_name("a\"b"));
+        assert!(!HealthChecker::is_valid_github_name("a{b}"));
     }
 }
