@@ -366,4 +366,27 @@ mod tests {
         let name = build_session_name("tasks/gitkb-264", &Mode::ReviewFix);
         assert!(name.starts_with("tasks--gitkb-264@review-fix@"));
     }
+
+    #[test]
+    fn test_derive_branch_shell_metacharacters() {
+        // Slugs with shell metacharacters should pass through derive_branch
+        // without any injection risk — it only replaces `/` with `--`.
+        assert_eq!(derive_branch("tasks/$(whoami)"), "tasks--$(whoami)");
+        assert_eq!(derive_branch("tasks/;rm -rf /"), "tasks--;rm -rf --");
+        assert_eq!(derive_branch("tasks/`id`"), "tasks--`id`");
+        assert_eq!(derive_branch("tasks/$HOME"), "tasks--$HOME");
+        assert_eq!(derive_branch("tasks/a'b"), "tasks--a'b");
+        assert_eq!(derive_branch("tasks/a\"b"), "tasks--a\"b");
+    }
+
+    #[test]
+    fn test_build_session_name_shell_metacharacters() {
+        // Session names derived from adversarial slugs should not cause
+        // parsing ambiguity beyond the expected format.
+        let name = build_session_name("tasks/$(rm -rf /)", &Mode::Implement);
+        assert!(name.starts_with("tasks--$(rm -rf --)@implement@"));
+
+        let name = build_session_name("tasks/;echo pwned", &Mode::Research);
+        assert!(name.starts_with("tasks--;echo pwned@research@"));
+    }
 }

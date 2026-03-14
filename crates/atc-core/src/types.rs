@@ -125,7 +125,7 @@ impl std::fmt::Display for Mode {
 }
 
 /// Options for a single dispatch invocation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DispatchOpts {
     pub slug: String,
     pub cli_mode: Option<Mode>,
@@ -134,7 +134,7 @@ pub struct DispatchOpts {
 }
 
 /// Outcome of a successful dispatch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchOutcome {
     pub session: String,
     pub inline_exit_code: Option<i32>,

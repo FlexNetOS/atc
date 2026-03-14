@@ -402,18 +402,17 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         directive: None,
         inline: true,
     };
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let outcome =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("dispatch with mode from frontmatter failed");
 
-    assert!(
-        result.is_ok(),
-        "dispatch with mode from frontmatter failed: {:?}",
-        result.err()
-    );
+    assert_eq!(outcome.inline_exit_code, Some(0));
 
     let record = registry.get("tasks/gitkb-auto-mode").await.unwrap();
     assert!(record.is_some(), "registry record should exist");
     let record = record.unwrap();
+    assert_eq!(outcome.session, record.session);
     assert_eq!(
         record.mode,
         Mode::Research,
@@ -513,10 +512,12 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         directive: Some("focus on error handling".to_string()),
         inline: true,
     };
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let outcome =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("dispatch failed");
 
-    assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
+    assert_eq!(outcome.inline_exit_code, Some(0));
 
     let prompt = executor.prompt.lock().await;
     let prompt = prompt
