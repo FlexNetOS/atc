@@ -161,6 +161,9 @@ pub struct DispatchConfig {
     /// --max-budget-usd flag for claude. Default: 25.0.
     #[serde(default = "default_max_budget_usd")]
     pub max_budget_usd: f64,
+    /// Maximum number of retries before marking a task as needs-human. Default: 3.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 fn default_max_turns() -> u32 {
@@ -168,6 +171,9 @@ fn default_max_turns() -> u32 {
 }
 fn default_max_budget_usd() -> f64 {
     25.0
+}
+fn default_max_retries() -> u32 {
+    3
 }
 
 impl Default for DispatchConfig {
@@ -181,6 +187,7 @@ impl Default for DispatchConfig {
             sandbox: false,
             max_turns: default_max_turns(),
             max_budget_usd: default_max_budget_usd(),
+            max_retries: default_max_retries(),
         }
     }
 }
@@ -759,6 +766,7 @@ claude_bin = "/usr/bin/claude"
 sandbox = true
 max_turns = 500
 max_budget_usd = 5.0
+max_retries = 5
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
         assert_eq!(cfg.dispatch.repo.as_deref(), Some("core"));
@@ -773,6 +781,13 @@ max_budget_usd = 5.0
         assert!(cfg.dispatch.sandbox);
         assert_eq!(cfg.dispatch.max_turns, 500);
         assert_eq!(cfg.dispatch.max_budget_usd, 5.0);
+        assert_eq!(cfg.dispatch.max_retries, 5);
+    }
+
+    #[test]
+    fn test_max_retries_default() {
+        let cfg = AtcConfig::default();
+        assert_eq!(cfg.dispatch.max_retries, 3);
     }
 
     #[test]

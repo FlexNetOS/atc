@@ -233,3 +233,46 @@ EOF
     # Debug output should contain DEBUG level traces
     [[ "$output" == *"DEBUG"* ]] || [[ "$output" == *"debug"* ]] || true
 }
+
+# ---------------------------------------------------------------------------
+# Lifecycle commands: close, redirect, retry
+# ---------------------------------------------------------------------------
+
+@test "atc close --help exits 0 and shows usage" {
+    run "$ATC_BIN" close --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SLUG"* ]]
+    [[ "$output" == *"--pr"* ]]
+}
+
+@test "atc redirect --help exits 0 and shows usage" {
+    run "$ATC_BIN" redirect --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SLUG"* ]]
+    [[ "$output" == *"MESSAGE"* ]]
+}
+
+@test "atc retry --help exits 0 and shows usage" {
+    run "$ATC_BIN" retry --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SLUG"* ]]
+}
+
+@test "atc close with unknown slug fails cleanly" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" close tasks/nonexistent
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no dispatch record found"* ]]
+}
+
+@test "atc redirect with no args fails" {
+    run "$ATC_BIN" redirect
+    [ "$status" -ne 0 ]
+}
+
+@test "atc retry with unknown slug fails cleanly" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" retry tasks/nonexistent
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no dispatch record found"* ]]
+}

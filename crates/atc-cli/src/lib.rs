@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 pub use args::{Args, Commands};
 
+pub mod close;
 pub mod dispatch;
 pub mod health;
+pub mod redirect;
+pub mod retry;
 
 mod args {
     use atc_core::types::Mode;
@@ -60,6 +63,26 @@ mod args {
             /// Additional directive passed into prompt rendering
             #[arg(long)]
             directive: Option<String>,
+        },
+        /// Mark a task as complete, remove worktree, update git-kb
+        Close {
+            /// Task slug (e.g. tasks/gitkb-42)
+            slug: String,
+            /// PR URL to record
+            #[arg(long)]
+            pr: Option<String>,
+        },
+        /// Send a message to a running agent's tmux session
+        Redirect {
+            /// Task slug (e.g. tasks/gitkb-42)
+            slug: String,
+            /// Message to send to the agent
+            message: String,
+        },
+        /// Re-dispatch a failed task with the same mode and config
+        Retry {
+            /// Task slug (e.g. tasks/gitkb-42)
+            slug: String,
         },
     }
 }
@@ -113,6 +136,15 @@ pub async fn run(
             .await?;
             println!("{prompt}");
             Ok(())
+        }
+        Commands::Close { slug, pr } => {
+            close::run_close(config, registry.as_ref(), slug, pr.as_deref()).await
+        }
+        Commands::Redirect { slug, message } => {
+            redirect::run_redirect(registry.as_ref(), slug, message).await
+        }
+        Commands::Retry { slug } => {
+            retry::run_retry(config, registry.as_ref(), executor.as_ref(), slug).await
         }
     }
 }
