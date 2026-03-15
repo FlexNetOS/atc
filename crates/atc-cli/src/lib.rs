@@ -9,6 +9,9 @@ pub use args::{Args, Commands};
 
 pub mod dispatch;
 pub mod health;
+pub mod info;
+pub mod logs;
+pub mod status;
 
 mod args {
     use atc_core::types::Mode;
@@ -60,6 +63,29 @@ mod args {
             /// Additional directive passed into prompt rendering
             #[arg(long)]
             directive: Option<String>,
+        },
+        /// Show table view of all dispatch records
+        #[command(name = "status")]
+        StatusCmd {
+            /// Filter by status (running, done, failed, needs-review, needs-human)
+            #[arg(long = "status")]
+            status_filter: Option<String>,
+            /// Output as JSON array
+            #[arg(long)]
+            json: bool,
+        },
+        /// Show detailed info for a single dispatch record
+        Info {
+            /// Task slug (e.g. tasks/gitkb-42)
+            slug: String,
+        },
+        /// Tail the stream-json log for a dispatch
+        Logs {
+            /// Task slug or session name
+            arg: String,
+            /// Follow log file (like tail -f)
+            #[arg(short = 'f', long)]
+            follow: bool,
         },
     }
 }
@@ -114,5 +140,11 @@ pub async fn run(
             println!("{prompt}");
             Ok(())
         }
+        Commands::StatusCmd {
+            status_filter,
+            json,
+        } => status::run_status(registry, status_filter.clone(), *json).await,
+        Commands::Info { slug } => info::run_info(registry, slug).await,
+        Commands::Logs { arg, follow } => logs::run_logs(registry, config, arg, *follow).await,
     }
 }
