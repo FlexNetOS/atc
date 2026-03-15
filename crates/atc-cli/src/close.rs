@@ -42,7 +42,7 @@ pub async fn run_close(
 
     if let Some(ref kb_root) = kb_root {
         let status = tokio::process::Command::new("git-kb")
-            .args(["set", &format!("tasks/{slug}"), "status=completed"])
+            .args(["set", slug, "status=completed"])
             .env("GITKB_ROOT", kb_root)
             .status()
             .await;
@@ -69,7 +69,11 @@ pub async fn run_close(
     let worktree_path = &record.worktree_path;
 
     if worktree_path.exists() {
-        // Check if another Running record shares the same worktree_path
+        // Check if another Running record shares the same worktree_path.
+        // NOTE: This check is inherently racy (TOCTOU) — another dispatch could start
+        // between the check and the removal. This is acceptable because the window is
+        // very small and the consequence (removing a shared worktree) is recoverable
+        // via re-dispatch. A lock-based approach would add complexity for minimal benefit.
         let all_records = registry.list(StatusFilter::all()).await?;
         let shared = all_records.iter().any(|r| {
             r.slug != slug && r.status == Status::Running && r.worktree_path == *worktree_path

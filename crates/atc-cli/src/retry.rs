@@ -19,9 +19,19 @@ pub async fn run_retry(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no dispatch record found for slug: {slug}"))?;
 
+    // 2. Only allow retrying failed or needs-human tasks
+    match record.status {
+        Status::Failed | Status::NeedsHuman => {}
+        other => {
+            anyhow::bail!(
+                "cannot retry task {slug}: status is '{other}', expected 'failed' or 'needs-human'"
+            );
+        }
+    }
+
     let max_retries = config.dispatch.max_retries;
 
-    // 2. Check retry limit
+    // 3. Check retry limit
     if record.retries >= max_retries {
         registry.update_status(slug, Status::NeedsHuman).await?;
 
@@ -61,11 +71,20 @@ pub async fn run_retry(
         .await?;
 
     // 6. Kill old tmux session (non-fatal)
-    let _ = tokio::process::Command::new("tmux")
+    match tokio::process::Command::new("tmux")
         .args(["kill-session", "-t", &record.session])
         .stderr(std::process::Stdio::null())
         .status()
-        .await;
+        .await
+    {
+        Ok(s) if !s.success() => {
+            tracing::debug!(slug, session = %record.session, "tmux kill-session exited non-zero (session may not exist)");
+        }
+        Err(e) => {
+            tracing::debug!(slug, error = %e, "tmux kill-session failed (non-fatal)");
+        }
+        _ => {}
+    }
 
     // 7. Clear git-kb claim (non-fatal)
     kb_unassign(slug, config).await;
@@ -131,7 +150,7 @@ async fn kb_set_status_draft(slug: &str, config: &AtcConfig) {
     };
 
     let status = tokio::process::Command::new("git-kb")
-        .args(["set", &format!("tasks/{slug}"), "status=draft"])
+        .args(["set", slug, "status=draft"])
         .env("GITKB_ROOT", &kb_root)
         .status()
         .await;
@@ -328,6 +347,40 @@ mod tests {
         // Retries should have been incremented
         let r = registry.get("tasks/test-1").await.unwrap().unwrap();
         assert_eq!(r.retries, 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_rejects_running_task() {
+        let mut record = sample_record("tasks/test-1", 0);
+        record.status = Status::Running;
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let config = AtcConfig::default();
+
+        let result = run_retry(&config, &registry, &executor, "tasks/test-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot retry"),
+            "expected status guard error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_rejects_done_task() {
+        let mut record = sample_record("tasks/test-1", 0);
+        record.status = Status::Done;
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let config = AtcConfig::default();
+
+        let result = run_retry(&config, &registry, &executor, "tasks/test-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot retry"),
+            "expected status guard error, got: {err}"
+        );
     }
 
     #[tokio::test]

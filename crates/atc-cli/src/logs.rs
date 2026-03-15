@@ -32,9 +32,12 @@ async fn resolve_log_path(
         }
     }
 
-    // 3. Path fallback
+    // 3. Path fallback — sanitize to prevent directory traversal
     let log_dir = config.dispatch.resolved_log_dir();
-    let fallback = log_dir.join(format!("{arg}.jsonl"));
+    let sanitized = std::path::Path::new(arg)
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("invalid log argument: {arg}"))?;
+    let fallback = log_dir.join(format!("{}.jsonl", sanitized.to_string_lossy()));
     if fallback.exists() {
         return Ok(fallback);
     }
@@ -82,11 +85,14 @@ fn render_event(event: &StreamEvent) {
     }
 }
 
-/// Print all existing lines from a log file.
+/// Print all existing lines from a log file using buffered I/O.
 fn print_existing_lines(path: &std::path::Path) -> Result<()> {
-    let contents = std::fs::read_to_string(path)?;
-    for line in contents.lines() {
-        for event in parse_stream_events(line) {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        for event in parse_stream_events(&line) {
             render_event(&event);
         }
     }
@@ -178,19 +184,17 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
                 let metadata = tokio::fs::metadata(path).await?;
                 let new_len = metadata.len();
                 if new_len > pos {
-                    let file = tokio::fs::File::open(path).await?;
+                    // Seek to where we left off and read only new bytes
+                    use tokio::io::AsyncSeekExt;
+                    let mut file = tokio::fs::File::open(path).await?;
+                    file.seek(std::io::SeekFrom::Start(pos)).await?;
                     let reader = tokio::io::BufReader::new(file);
                     let mut lines = reader.lines();
-                    let mut current = 0u64;
 
                     while let Some(line) = lines.next_line().await? {
-                        let line_end = current + line.len() as u64 + 1;
-                        if current >= pos {
-                            for event in parse_stream_events(&line) {
-                                render_event(&event);
-                            }
+                        for event in parse_stream_events(&line) {
+                            render_event(&event);
                         }
-                        current = line_end;
                     }
                     pos = new_len;
                 }

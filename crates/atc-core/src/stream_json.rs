@@ -173,14 +173,17 @@ pub fn parse_result_event(line: &str) -> Option<ResultEvent> {
 /// Scans the file line by line, keeping the last matching result event.
 /// Returns `Ok(None)` if the file doesn't exist, is empty, or contains no result events.
 pub fn read_last_result(path: &Path) -> anyhow::Result<Option<ResultEvent>> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    let reader = std::io::BufReader::new(file);
     let mut last_result = None;
-    for line in contents.lines() {
-        if let Some(result) = parse_result_event(line) {
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(result) = parse_result_event(&line) {
             last_result = Some(result);
         }
     }

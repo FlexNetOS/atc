@@ -180,6 +180,23 @@ load helpers/common
     [[ "$output" == *"No dispatch records found"* ]]
 }
 
+@test "config with max_retries = 0 is rejected" {
+    local config="$TEST_TMPDIR/bad-retries.toml"
+    cat > "$config" <<EOF
+[dispatch]
+repo = "core"
+meta_workspace_root = "$TEST_TMPDIR/workspace"
+max_retries = 0
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
+EOF
+    mkdir -p "$TEST_TMPDIR/workspace"
+    run "$ATC_BIN" --config "$config" health
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"max_retries"* ]]
+}
+
 @test "config with signal_timeout_secs = 0 is rejected" {
     local config="$TEST_TMPDIR/bad-health.toml"
     cat > "$config" <<EOF

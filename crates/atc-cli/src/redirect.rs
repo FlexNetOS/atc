@@ -26,27 +26,37 @@ pub async fn run_redirect(registry: &dyn Registry, slug: &str, message: &str) ->
 
     let session_name = &record.session;
 
-    // 3. Check if tmux session exists
-    let has_session = tokio::process::Command::new("tmux")
-        .args(["has-session", "-t", session_name])
-        .status()
-        .await;
+    // 3. Check if tmux session exists (with timeout)
+    let has_session = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("tmux")
+            .args(["has-session", "-t", session_name])
+            .status(),
+    )
+    .await;
 
     match has_session {
-        Ok(s) if !s.success() => {
+        Ok(Ok(s)) if !s.success() => {
             anyhow::bail!("No active tmux session: {session_name}");
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             anyhow::bail!("tmux has-session failed: {e}");
+        }
+        Err(_) => {
+            anyhow::bail!("tmux has-session timed out after 10s");
         }
         _ => {}
     }
 
-    // 4. Send the message
-    let send = tokio::process::Command::new("tmux")
-        .args(["send-keys", "-t", session_name, message, "Enter"])
-        .status()
-        .await?;
+    // 4. Send the message (with timeout)
+    let send = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("tmux")
+            .args(["send-keys", "-t", session_name, message, "Enter"])
+            .status(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tmux send-keys timed out after 10s"))??;
 
     if !send.success() {
         anyhow::bail!("tmux send-keys failed (exit {:?})", send.code());
