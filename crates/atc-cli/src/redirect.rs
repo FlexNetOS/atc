@@ -3,6 +3,9 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::warn;
 
+/// Timeout for tmux subprocess calls.
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Execute the `atc redirect` command.
 pub async fn run_redirect(registry: &dyn Registry, slug: &str, message: &str) -> Result<()> {
     // 1. Get the record
@@ -26,37 +29,43 @@ pub async fn run_redirect(registry: &dyn Registry, slug: &str, message: &str) ->
 
     let session_name = &record.session;
 
-    // 3. Check if tmux session exists (with timeout)
-    let has_session = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tokio::process::Command::new("tmux")
+    // 3. Check if tmux session exists (with timeout, kill on drop)
+    {
+        let mut child = tokio::process::Command::new("tmux")
             .args(["has-session", "-t", session_name])
-            .status(),
-    )
-    .await;
+            .kill_on_drop(true)
+            .spawn()?;
+        match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
+            Ok(Ok(s)) if !s.success() => {
+                anyhow::bail!("No active tmux session: {session_name}");
+            }
+            Ok(Err(e)) => {
+                anyhow::bail!("tmux has-session failed: {e}");
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                anyhow::bail!("tmux has-session timed out after 10s");
+            }
+            _ => {} // success
+        }
+    };
 
-    match has_session {
-        Ok(Ok(s)) if !s.success() => {
-            anyhow::bail!("No active tmux session: {session_name}");
-        }
-        Ok(Err(e)) => {
-            anyhow::bail!("tmux has-session failed: {e}");
-        }
-        Err(_) => {
-            anyhow::bail!("tmux has-session timed out after 10s");
-        }
-        _ => {}
-    }
-
-    // 4. Send the message (with timeout)
-    let send = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tokio::process::Command::new("tmux")
+    // 4. Send the message (with timeout, kill on drop)
+    let send = {
+        let mut child = tokio::process::Command::new("tmux")
             .args(["send-keys", "-t", session_name, message, "Enter"])
-            .status(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("tmux send-keys timed out after 10s"))??;
+            .kill_on_drop(true)
+            .spawn()?;
+        match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
+            Ok(status) => status?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                anyhow::bail!("tmux send-keys timed out after 10s");
+            }
+        }
+    };
 
     if !send.success() {
         anyhow::bail!("tmux send-keys failed (exit {:?})", send.code());

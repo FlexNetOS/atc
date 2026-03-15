@@ -44,24 +44,22 @@ pub async fn run_close(
         .ok();
 
     if let Some(ref kb_root) = kb_root {
-        let status = tokio::time::timeout(
-            CMD_TIMEOUT,
+        let status = run_cmd_with_timeout(
             tokio::process::Command::new("git-kb")
                 .args(["set", slug, "status=completed"])
-                .env("GITKB_ROOT", kb_root)
-                .status(),
+                .env("GITKB_ROOT", kb_root),
         )
         .await;
 
         match status {
-            Ok(Ok(s)) if !s.success() => {
+            Ok(Some(s)) if !s.success() => {
                 warn!(slug, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
             }
-            Ok(Err(e)) => {
-                warn!(slug, error = %e, "git-kb set status=completed failed (non-fatal)");
-            }
-            Err(_) => {
+            Ok(None) => {
                 warn!(slug, "git-kb set status=completed timed out (non-fatal)");
+            }
+            Err(e) => {
+                warn!(slug, error = %e, "git-kb set status=completed failed (non-fatal)");
             }
             _ => {
                 info!(slug, "git-kb status set to completed");
@@ -100,34 +98,30 @@ pub async fn run_close(
 
             match repo_root {
                 Some(root) => {
-                    let result = tokio::time::timeout(
-                        CMD_TIMEOUT,
+                    let result = run_cmd_with_timeout(
                         tokio::process::Command::new("git")
-                            .args([
-                                "-C",
-                                &root.to_string_lossy(),
-                                "worktree",
-                                "remove",
-                                "--force",
-                                &worktree_path.to_string_lossy(),
-                            ])
-                            .status(),
+                            .arg("-C")
+                            .arg(&root)
+                            .arg("worktree")
+                            .arg("remove")
+                            .arg("--force")
+                            .arg(worktree_path),
                     )
                     .await;
 
                     match result {
-                        Ok(Ok(s)) if !s.success() => {
+                        Ok(Some(s)) if !s.success() => {
                             warn!(
                                 slug,
                                 exit_code = ?s.code(),
                                 "git worktree remove failed (non-fatal)"
                             );
                         }
-                        Ok(Err(e)) => {
-                            warn!(slug, error = %e, "git worktree remove failed (non-fatal)");
-                        }
-                        Err(_) => {
+                        Ok(None) => {
                             warn!(slug, "git worktree remove timed out (non-fatal)");
+                        }
+                        Err(e) => {
+                            warn!(slug, error = %e, "git worktree remove failed (non-fatal)");
                         }
                         _ => {
                             info!(slug, worktree = %worktree_path.display(), "worktree removed");
@@ -163,6 +157,22 @@ pub async fn run_close(
     println!("[{slug}] closed | pr={pr_display}");
 
     Ok(())
+}
+
+/// Run a command with a timeout, killing the child on timeout.
+/// Returns `Ok(Some(status))` on normal exit, `Ok(None)` on timeout, `Err` on spawn failure.
+async fn run_cmd_with_timeout(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let mut child = cmd.kill_on_drop(true).spawn()?;
+    match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
+        Ok(status) => status.map(Some),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Ok(None)
+        }
+    }
 }
 
 /// Derive the repo root path from config: meta_workspace_root + repo.

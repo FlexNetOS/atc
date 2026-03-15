@@ -44,7 +44,7 @@ pub async fn run_retry(
         anyhow::bail!("Task {slug} has reached max retries ({max_retries}). Marking needs-human.");
     }
 
-    // 3. Classify failure: read last result event
+    // 4. Classify failure: read last result event
     match stream_json::read_last_result(&record.log_file) {
         Ok(Some(event)) => {
             info!(
@@ -62,44 +62,42 @@ pub async fn run_retry(
         }
     }
 
-    // 4. Build new session and log file for retry
+    // 5. Build new session and log file for retry
     let new_session = crate::dispatch::build_session_name(slug, &record.mode);
     let log_dir = config.dispatch.resolved_log_dir();
     let new_log_file = log_dir.join(format!("{}.jsonl", new_session));
 
-    // 5. Increment retries in registry (atomic update)
+    // 6. Increment retries in registry (atomic update)
     let now = chrono::Utc::now();
     registry
         .increment_retries(slug, &new_session, &new_log_file, now)
         .await?;
 
-    // 6. Kill old tmux session (non-fatal, with timeout)
-    match tokio::time::timeout(
-        CMD_TIMEOUT,
+    // 7. Kill old tmux session (non-fatal, with timeout)
+    match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
-            .stderr(std::process::Stdio::null())
-            .status(),
+            .stderr(std::process::Stdio::null()),
     )
     .await
     {
-        Ok(Ok(s)) if !s.success() => {
+        Ok(Some(s)) if !s.success() => {
             tracing::debug!(slug, session = %record.session, "tmux kill-session exited non-zero (session may not exist)");
         }
-        Ok(Err(e)) => {
-            tracing::debug!(slug, error = %e, "tmux kill-session failed (non-fatal)");
-        }
-        Err(_) => {
+        Ok(None) => {
             tracing::debug!(slug, session = %record.session, "tmux kill-session timed out (non-fatal)");
+        }
+        Err(e) => {
+            tracing::debug!(slug, error = %e, "tmux kill-session failed (non-fatal)");
         }
         _ => {}
     }
 
-    // 7. Clear git-kb claim (non-fatal)
+    // 8. Clear git-kb claim (non-fatal)
     kb_unassign(slug, config).await;
     kb_set_status_draft(slug, config).await;
 
-    // 8. Re-dispatch
+    // 9. Re-dispatch
     let retry_num = record.retries + 1;
     println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
 
@@ -121,6 +119,22 @@ pub async fn run_retry(
     Ok(())
 }
 
+/// Run a command with a timeout, killing the child on timeout.
+/// Returns `Ok(Some(status))` on normal exit, `Ok(None)` on timeout, `Err` on spawn failure.
+async fn run_cmd_with_timeout(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let mut child = cmd.kill_on_drop(true).spawn()?;
+    match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
+        Ok(status) => status.map(Some),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Ok(None)
+        }
+    }
+}
+
 /// Non-fatal: unassign task in git-kb.
 async fn kb_unassign(slug: &str, config: &AtcConfig) {
     let kb_root = match config
@@ -131,24 +145,22 @@ async fn kb_unassign(slug: &str, config: &AtcConfig) {
         Err(_) => return,
     };
 
-    let status = tokio::time::timeout(
-        CMD_TIMEOUT,
+    let status = run_cmd_with_timeout(
         tokio::process::Command::new("git-kb")
             .args(["unassign", slug])
-            .env("GITKB_ROOT", &kb_root)
-            .status(),
+            .env("GITKB_ROOT", &kb_root),
     )
     .await;
 
     match status {
-        Ok(Ok(s)) if !s.success() => {
+        Ok(Some(s)) if !s.success() => {
             warn!(slug, "git-kb unassign failed (non-fatal)");
         }
-        Ok(Err(e)) => {
-            warn!(slug, error = %e, "git-kb unassign failed (non-fatal)");
-        }
-        Err(_) => {
+        Ok(None) => {
             warn!(slug, "git-kb unassign timed out (non-fatal)");
+        }
+        Err(e) => {
+            warn!(slug, error = %e, "git-kb unassign failed (non-fatal)");
         }
         _ => {}
     }
@@ -164,24 +176,22 @@ async fn kb_set_status_draft(slug: &str, config: &AtcConfig) {
         Err(_) => return,
     };
 
-    let status = tokio::time::timeout(
-        CMD_TIMEOUT,
+    let status = run_cmd_with_timeout(
         tokio::process::Command::new("git-kb")
             .args(["set", slug, "status=draft"])
-            .env("GITKB_ROOT", &kb_root)
-            .status(),
+            .env("GITKB_ROOT", &kb_root),
     )
     .await;
 
     match status {
-        Ok(Ok(s)) if !s.success() => {
+        Ok(Some(s)) if !s.success() => {
             warn!(slug, "git-kb set status=draft failed (non-fatal)");
         }
-        Ok(Err(e)) => {
-            warn!(slug, error = %e, "git-kb set status=draft failed (non-fatal)");
-        }
-        Err(_) => {
+        Ok(None) => {
             warn!(slug, "git-kb set status=draft timed out (non-fatal)");
+        }
+        Err(e) => {
+            warn!(slug, error = %e, "git-kb set status=draft failed (non-fatal)");
         }
         _ => {}
     }
@@ -401,6 +411,25 @@ mod tests {
         assert!(
             err.contains("cannot retry"),
             "expected status guard error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_accepts_needs_human_task() {
+        let mut record = sample_record("tasks/test-1", 0);
+        record.status = Status::NeedsHuman;
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let config = AtcConfig::default();
+
+        // Should pass the status guard (NeedsHuman is retryable).
+        // Will fail later in the dispatch flow, but NOT at the status check.
+        let result = run_retry(&config, &registry, &executor, "tasks/test-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("cannot retry"),
+            "NeedsHuman should be retryable, got: {err}"
         );
     }
 

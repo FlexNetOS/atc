@@ -171,6 +171,11 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
                 // Check for new content
                 let metadata = tokio::fs::metadata(path).await?;
                 let new_len = metadata.len();
+                if new_len < pos {
+                    // File was truncated or rotated; restart from beginning.
+                    pos = 0;
+                    pending.clear();
+                }
                 if new_len > pos {
                     // Seek to where we left off and read only new bytes
                     use tokio::io::{AsyncReadExt, AsyncSeekExt};
