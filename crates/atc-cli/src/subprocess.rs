@@ -1,4 +1,4 @@
-/// Shared subprocess utilities for running commands with timeouts.
+//! Shared subprocess utilities for running commands with timeouts.
 
 /// Default timeout for non-fatal subprocess calls.
 pub const DEFAULT_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
