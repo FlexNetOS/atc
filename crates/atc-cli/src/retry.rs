@@ -35,6 +35,12 @@ pub async fn run_retry(
     let max_retries = config.dispatch.max_retries;
 
     // 3. Check retry limit
+    // NOTE: This check-then-act is inherently racy (TOCTOU) — two concurrent
+    // `atc retry` calls could both pass the guard. This is acceptable because
+    // (a) the CLI is single-user, (b) the window is tiny, and (c) the
+    // consequence (one extra retry) is recoverable. A CAS-based
+    // `increment_retries_if_below_max` would eliminate the race but adds
+    // complexity to the Registry trait for minimal practical benefit.
     if record.retries >= max_retries {
         registry.update_status(slug, Status::NeedsHuman).await?;
 
@@ -108,7 +114,17 @@ pub async fn run_retry(
         inline: false,
     };
 
-    let outcome = crate::dispatch::dispatch(config, registry, executor, &opts).await?;
+    let outcome = match crate::dispatch::dispatch(config, registry, executor, &opts).await {
+        Ok(o) => o,
+        Err(e) => {
+            // Rollback: dispatch failed before an agent was spawned, so the task
+            // would be stranded in Running with no active agent. Reset to Failed
+            // so it can be retried again.
+            warn!(slug, error = %e, "dispatch failed during retry; rolling back to Failed");
+            let _ = registry.update_status(slug, Status::Failed).await;
+            return Err(e);
+        }
+    };
 
     if let Some(code) = outcome.inline_exit_code {
         if code != 0 {

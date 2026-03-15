@@ -85,13 +85,20 @@ fn render_event(event: &StreamEvent) {
 }
 
 /// Print all existing lines from a log file using buffered I/O.
+/// Uses lossy UTF-8 decoding so partially-written or binary-corrupted lines
+/// don't abort the replay.
 fn print_existing_lines(path: &std::path::Path) -> Result<()> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        for event in parse_stream_events(&line) {
+    for chunk in reader.split(b'\n') {
+        let bytes = chunk?;
+        let line = String::from_utf8_lossy(&bytes);
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        for event in parse_stream_events(line) {
             render_event(&event);
         }
     }
@@ -168,8 +175,18 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
     loop {
         tokio::select! {
             _ = rx.recv() => {
-                // Check for new content
-                let metadata = tokio::fs::metadata(path).await?;
+                // Check for new content.
+                // Handle transient NotFound (file rotation/recreation) by
+                // resetting position and waiting for the file to reappear.
+                let metadata = match tokio::fs::metadata(path).await {
+                    Ok(m) => m,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        pos = 0;
+                        pending.clear();
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 let new_len = metadata.len();
                 if new_len < pos {
                     // File was truncated or rotated; restart from beginning.
@@ -179,7 +196,15 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
                 if new_len > pos {
                     // Seek to where we left off and read only new bytes
                     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-                    let mut file = tokio::fs::File::open(path).await?;
+                    let mut file = match tokio::fs::File::open(path).await {
+                        Ok(f) => f,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            pos = 0;
+                            pending.clear();
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
                     file.seek(std::io::SeekFrom::Start(pos)).await?;
                     let mut buf = Vec::new();
                     file.read_to_end(&mut buf).await?;
