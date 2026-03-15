@@ -193,7 +193,8 @@ mod tests {
 
     #[test]
     fn test_parse_assistant_text() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
         let event = parse_stream_event(line).unwrap();
         assert_eq!(event, StreamEvent::AssistantText("Hello world".to_string()));
     }

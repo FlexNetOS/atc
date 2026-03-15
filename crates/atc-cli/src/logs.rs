@@ -142,8 +142,8 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
     // Set up file watcher with poll fallback
     let _watcher = {
         let tx = tx.clone();
-        let mut watcher: RecommendedWatcher = notify::recommended_watcher(
-            move |res: std::result::Result<Event, notify::Error>| {
+        let mut watcher: RecommendedWatcher =
+            notify::recommended_watcher(move |res: std::result::Result<Event, notify::Error>| {
                 if let Ok(event) = res {
                     if matches!(
                         event.kind,
@@ -152,12 +152,9 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
                         let _ = tx.blocking_send(());
                     }
                 }
-            },
-        )?;
+            })?;
         watcher.watch(
-            watched_path
-                .parent()
-                .unwrap_or(std::path::Path::new(".")),
+            watched_path.parent().unwrap_or(std::path::Path::new(".")),
             RecursiveMode::NonRecursive,
         )?;
         watcher

@@ -59,7 +59,10 @@ pub async fn run_close(
             }
         }
     } else {
-        warn!(slug, "could not resolve meta_workspace_root; skipping git-kb set");
+        warn!(
+            slug,
+            "could not resolve meta_workspace_root; skipping git-kb set"
+        );
     }
 
     // 6. Remove worktree
@@ -121,7 +124,10 @@ pub async fn run_close(
                     }
                 }
                 None => {
-                    warn!(slug, "could not derive repo_root; skipping worktree removal");
+                    warn!(
+                        slug,
+                        "could not derive repo_root; skipping worktree removal"
+                    );
                 }
             }
         }
@@ -134,9 +140,7 @@ pub async fn run_close(
     }
 
     // 7. Print result
-    let pr_display = effective_pr_url
-        .as_deref()
-        .unwrap_or("none");
+    let pr_display = effective_pr_url.as_deref().unwrap_or("none");
     println!("[{slug}] closed | pr={pr_display}");
 
     Ok(())

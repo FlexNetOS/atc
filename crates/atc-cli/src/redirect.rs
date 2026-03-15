@@ -49,10 +49,7 @@ pub async fn run_redirect(registry: &dyn Registry, slug: &str, message: &str) ->
         .await?;
 
     if !send.success() {
-        anyhow::bail!(
-            "tmux send-keys failed (exit {:?})",
-            send.code()
-        );
+        anyhow::bail!("tmux send-keys failed (exit {:?})", send.code());
     }
 
     // 5. Print result

@@ -28,9 +28,7 @@ pub async fn run_retry(
         // Unassign in git-kb (non-fatal)
         kb_unassign(slug, config).await;
 
-        anyhow::bail!(
-            "Task {slug} has reached max retries ({max_retries}). Marking needs-human."
-        );
+        anyhow::bail!("Task {slug} has reached max retries ({max_retries}). Marking needs-human.");
     }
 
     // 3. Classify failure: read last result event
@@ -84,8 +82,7 @@ pub async fn run_retry(
         inline: false,
     };
 
-    let outcome =
-        crate::dispatch::dispatch(config, registry, executor, &opts).await?;
+    let outcome = crate::dispatch::dispatch(config, registry, executor, &opts).await?;
 
     if let Some(code) = outcome.inline_exit_code {
         if code != 0 {
