@@ -4,6 +4,8 @@ use atc_core::registry::{Registry, StatusFilter};
 use atc_core::types::Status;
 use tracing::{info, warn};
 
+use crate::subprocess::run_cmd_with_timeout;
+
 /// Timeout for non-fatal subprocess calls (git-kb, git worktree).
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -48,6 +50,7 @@ pub async fn run_close(
             tokio::process::Command::new("git-kb")
                 .args(["set", slug, "status=completed"])
                 .env("GITKB_ROOT", kb_root),
+            CMD_TIMEOUT,
         )
         .await;
 
@@ -106,6 +109,7 @@ pub async fn run_close(
                             .arg("remove")
                             .arg("--force")
                             .arg(worktree_path),
+                        CMD_TIMEOUT,
                     )
                     .await;
 
@@ -157,22 +161,6 @@ pub async fn run_close(
     println!("[{slug}] closed | pr={pr_display}");
 
     Ok(())
-}
-
-/// Run a command with a timeout, killing the child on timeout.
-/// Returns `Ok(Some(status))` on normal exit, `Ok(None)` on timeout, `Err` on spawn failure.
-async fn run_cmd_with_timeout(
-    cmd: &mut tokio::process::Command,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let mut child = cmd.kill_on_drop(true).spawn()?;
-    match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
-        Ok(status) => status.map(Some),
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Ok(None)
-        }
-    }
 }
 
 /// Derive the repo root path from config: meta_workspace_root + repo.

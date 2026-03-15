@@ -6,6 +6,8 @@ use atc_core::stream_json;
 use atc_core::types::{DispatchOpts, Status};
 use tracing::{info, warn};
 
+use crate::subprocess::run_cmd_with_timeout;
+
 /// Timeout for non-fatal subprocess calls (tmux, git-kb).
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -84,6 +86,7 @@ pub async fn run_retry(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
             .stderr(std::process::Stdio::null()),
+        CMD_TIMEOUT,
     )
     .await
     {
@@ -121,7 +124,16 @@ pub async fn run_retry(
             // would be stranded in Running with no active agent. Reset to Failed
             // so it can be retried again.
             warn!(slug, error = %e, "dispatch failed during retry; rolling back to Failed");
-            let _ = registry.update_status(slug, Status::Failed).await;
+            if let Err(rollback_err) = registry.update_status(slug, Status::Failed).await {
+                warn!(
+                    slug,
+                    error = %rollback_err,
+                    "failed to rollback status to Failed after dispatch error"
+                );
+                anyhow::bail!(
+                    "dispatch failed during retry ({e}); additionally failed to rollback status: {rollback_err}"
+                );
+            }
             return Err(e);
         }
     };
@@ -133,22 +145,6 @@ pub async fn run_retry(
     }
 
     Ok(())
-}
-
-/// Run a command with a timeout, killing the child on timeout.
-/// Returns `Ok(Some(status))` on normal exit, `Ok(None)` on timeout, `Err` on spawn failure.
-async fn run_cmd_with_timeout(
-    cmd: &mut tokio::process::Command,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let mut child = cmd.kill_on_drop(true).spawn()?;
-    match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
-        Ok(status) => status.map(Some),
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Ok(None)
-        }
-    }
 }
 
 /// Non-fatal: unassign task in git-kb.
@@ -165,6 +161,7 @@ async fn kb_unassign(slug: &str, config: &AtcConfig) {
         tokio::process::Command::new("git-kb")
             .args(["unassign", slug])
             .env("GITKB_ROOT", &kb_root),
+        CMD_TIMEOUT,
     )
     .await;
 
@@ -196,6 +193,7 @@ async fn kb_set_status_draft(slug: &str, config: &AtcConfig) {
         tokio::process::Command::new("git-kb")
             .args(["set", slug, "status=draft"])
             .env("GITKB_ROOT", &kb_root),
+        CMD_TIMEOUT,
     )
     .await;
 

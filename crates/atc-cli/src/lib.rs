@@ -15,6 +15,7 @@ pub mod logs;
 pub mod redirect;
 pub mod retry;
 pub mod status;
+pub mod subprocess;
 
 mod args {
     use atc_core::types::Mode;

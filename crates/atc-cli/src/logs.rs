@@ -87,14 +87,22 @@ fn render_event(event: &StreamEvent) {
 /// Print all existing lines from a log file using buffered I/O.
 /// Uses lossy UTF-8 decoding so partially-written or binary-corrupted lines
 /// don't abort the replay.
-fn print_existing_lines(path: &std::path::Path) -> Result<()> {
+/// Returns the byte offset at end of file, so follow mode can continue from
+/// exactly where replay left off without skipping events.
+fn print_existing_lines(path: &std::path::Path) -> Result<u64> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
-    for chunk in reader.split(b'\n') {
-        let bytes = chunk?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut pos = 0u64;
+    loop {
+        let mut bytes = Vec::new();
+        let n = reader.read_until(b'\n', &mut bytes)?;
+        if n == 0 {
+            break;
+        }
+        pos += n as u64;
         let line = String::from_utf8_lossy(&bytes);
-        let line = line.trim_end_matches('\r');
+        let line = line.trim_end_matches('\n').trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
@@ -102,7 +110,7 @@ fn print_existing_lines(path: &std::path::Path) -> Result<()> {
             render_event(&event);
         }
     }
-    Ok(())
+    Ok(pos)
 }
 
 pub async fn run_logs(
@@ -117,24 +125,32 @@ pub async fn run_logs(
         anyhow::bail!("No log file: {}", log_path.display());
     }
 
-    // Print existing content
-    print_existing_lines(&log_path)?;
+    // Print existing content and get the byte offset where replay ended
+    let start_pos = print_existing_lines(&log_path)?;
 
     if !follow {
         return Ok(());
     }
 
     // Follow mode: use notify for file change events with poll fallback
-    follow_log(&log_path).await
+    follow_log(&log_path, start_pos).await
 }
 
 /// Follow a log file, printing new lines as they appear.
-async fn follow_log(path: &std::path::Path) -> Result<()> {
+/// `start_pos` is the byte offset where replay ended, so we don't skip events
+/// appended between replay and follow startup.
+async fn follow_log(path: &std::path::Path, start_pos: u64) -> Result<()> {
     use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
     use tokio::sync::mpsc;
 
-    // Start following from the current end of file — we already printed existing content.
-    let mut pos = tokio::fs::metadata(path).await?.len();
+    // Use the replay offset, but clamp to current file length in case the file
+    // was truncated between replay and follow startup.
+    let current_len = tokio::fs::metadata(path).await?.len();
+    let mut pos = if start_pos > current_len {
+        current_len
+    } else {
+        start_pos
+    };
     let mut pending = String::new();
 
     let (tx, mut rx) = mpsc::channel::<()>(16);
@@ -275,20 +291,55 @@ mod tests {
 "#,
         )
         .unwrap();
-        // Should not panic
-        print_existing_lines(&path).unwrap();
+        // Should not panic, and should return byte count
+        let pos = print_existing_lines(&path).unwrap();
+        assert!(pos > 0);
     }
 
     #[test]
     fn test_print_existing_lines_with_invalid_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
-        std::fs::write(
-            &path,
-            "not json\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n{broken\n",
-        )
-        .unwrap();
+        let content =
+            "not json\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n{broken\n";
+        std::fs::write(&path, content).unwrap();
         // Should not panic — invalid lines are silently skipped
-        print_existing_lines(&path).unwrap();
+        let pos = print_existing_lines(&path).unwrap();
+        assert_eq!(pos, content.len() as u64);
+    }
+
+    #[test]
+    fn test_print_existing_lines_returns_exact_byte_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let content = "line one\nline two\n";
+        std::fs::write(&path, content).unwrap();
+        let pos = print_existing_lines(&path).unwrap();
+        assert_eq!(pos, content.len() as u64);
+    }
+
+    #[test]
+    fn test_print_existing_lines_handles_partial_last_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        // No trailing newline — simulates a file still being written
+        let content = "line one\npartial";
+        std::fs::write(&path, content).unwrap();
+        let pos = print_existing_lines(&path).unwrap();
+        // Should read all bytes including the partial line
+        assert_eq!(pos, content.len() as u64);
+    }
+
+    #[test]
+    fn test_print_existing_lines_lossy_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        // Write invalid UTF-8 bytes followed by a valid line
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE, b'\n'];
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n");
+        std::fs::write(&path, &bytes).unwrap();
+        // Should not panic — lossy decoding handles invalid UTF-8
+        let pos = print_existing_lines(&path).unwrap();
+        assert_eq!(pos, bytes.len() as u64);
     }
 }
