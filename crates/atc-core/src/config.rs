@@ -42,6 +42,10 @@ impl AtcConfig {
             cfg.dispatch.max_budget_usd > 0.0 && cfg.dispatch.max_budget_usd.is_finite(),
             "dispatch.max_budget_usd must be a positive finite number"
         );
+        anyhow::ensure!(
+            cfg.dispatch.max_retries > 0,
+            "dispatch.max_retries must be >= 1"
+        );
         // Validate mode keys against known Mode variants
         for key in cfg.modes.keys() {
             key.parse::<crate::types::Mode>().map_err(|_| {
@@ -161,6 +165,9 @@ pub struct DispatchConfig {
     /// --max-budget-usd flag for claude. Default: 25.0.
     #[serde(default = "default_max_budget_usd")]
     pub max_budget_usd: f64,
+    /// Maximum number of retries before marking a task as needs-human. Default: 3.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 fn default_max_turns() -> u32 {
@@ -168,6 +175,9 @@ fn default_max_turns() -> u32 {
 }
 fn default_max_budget_usd() -> f64 {
     25.0
+}
+fn default_max_retries() -> u32 {
+    3
 }
 
 impl Default for DispatchConfig {
@@ -181,6 +191,7 @@ impl Default for DispatchConfig {
             sandbox: false,
             max_turns: default_max_turns(),
             max_budget_usd: default_max_budget_usd(),
+            max_retries: default_max_retries(),
         }
     }
 }
@@ -759,6 +770,7 @@ claude_bin = "/usr/bin/claude"
 sandbox = true
 max_turns = 500
 max_budget_usd = 5.0
+max_retries = 5
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
         assert_eq!(cfg.dispatch.repo.as_deref(), Some("core"));
@@ -773,6 +785,23 @@ max_budget_usd = 5.0
         assert!(cfg.dispatch.sandbox);
         assert_eq!(cfg.dispatch.max_turns, 500);
         assert_eq!(cfg.dispatch.max_budget_usd, 5.0);
+        assert_eq!(cfg.dispatch.max_retries, 5);
+    }
+
+    #[test]
+    fn test_max_retries_default() {
+        let cfg = AtcConfig::default();
+        assert_eq!(cfg.dispatch.max_retries, 3);
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_max_retries() {
+        let toml = "[dispatch]\nmax_retries = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_retries must be >= 1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

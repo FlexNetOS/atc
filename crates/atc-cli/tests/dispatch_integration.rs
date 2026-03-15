@@ -195,6 +195,7 @@ fn make_config(
             sandbox: false,
             max_turns: 10_000,
             max_budget_usd: 25.0,
+            max_retries: 3,
         },
         modes: test_modes(),
         ..Default::default()

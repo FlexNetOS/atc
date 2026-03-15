@@ -1,0 +1,283 @@
+//! `atc status` — table view of all dispatch records.
+
+use anyhow::Result;
+use atc_core::registry::{Registry, StatusFilter};
+use atc_core::types::{DispatchRecord, Status};
+use std::sync::Arc;
+
+/// Format duration_ms as human-friendly "Nm NNs".
+pub(crate) fn format_duration(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    if minutes > 0 {
+        format!("{}m {:02}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+/// Truncate a string to `max_len` chars, appending `...` if truncated.
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{truncated}\u{2026}")
+    }
+}
+
+/// Detect terminal width. Returns 120 if stdout is not a tty.
+fn terminal_width() -> u16 {
+    terminal_size::terminal_size()
+        .map(|(w, _)| w.0)
+        .unwrap_or(120)
+}
+
+/// Build the status table and summary.
+pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
+    use comfy_table::{presets::NOTHING, Table};
+
+    let narrow = width < 120;
+
+    let mut table = Table::new();
+    table.load_preset(NOTHING);
+    table.set_header(vec![
+        "dispatched_at",
+        "status",
+        "slug",
+        "mode",
+        "cost",
+        "turns",
+        "duration",
+        "worktree",
+    ]);
+
+    for r in records {
+        let dispatched = r.dispatched_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let status = r.status.as_str().to_string();
+        let slug = if narrow {
+            truncate(&r.slug, 40)
+        } else {
+            r.slug.clone()
+        };
+        let mode = r.mode.as_str().to_string();
+        let cost = r
+            .cost_usd
+            .map(|c| format!("${:.2}", c))
+            .unwrap_or_else(|| "-".to_string());
+        let turns = r
+            .num_turns
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let duration = r
+            .duration_ms
+            .map(format_duration)
+            .unwrap_or_else(|| "-".to_string());
+        let worktree_str = r.worktree_path.to_string_lossy();
+        let worktree = if narrow {
+            truncate(&worktree_str, 40)
+        } else {
+            worktree_str.to_string()
+        };
+
+        table.add_row(vec![
+            dispatched, status, slug, mode, cost, turns, duration, worktree,
+        ]);
+    }
+
+    table.to_string()
+}
+
+/// Build the summary line.
+pub fn build_summary(records: &[DispatchRecord]) -> String {
+    let mut running = 0u32;
+    let mut done = 0u32;
+    let mut failed = 0u32;
+    let mut needs_human = 0u32;
+    let mut total_cost = 0.0f64;
+
+    for r in records {
+        match r.status {
+            Status::Running => running += 1,
+            Status::Done => done += 1,
+            Status::Failed => failed += 1,
+            Status::NeedsHuman => needs_human += 1,
+            Status::NeedsReview => {} // not shown in summary
+        }
+        if let Some(c) = r.cost_usd {
+            total_cost += c;
+        }
+    }
+
+    format!(
+        "{running} running, {done} done, {failed} failed, {needs_human} needs-human (of {} total, ${:.2})",
+        records.len(),
+        total_cost,
+    )
+}
+
+pub async fn run_status(
+    registry: Arc<dyn Registry>,
+    status_filter: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let filter = match &status_filter {
+        Some(s) => {
+            let parsed: Status = s.to_lowercase().parse()?;
+            StatusFilter::One(parsed)
+        }
+        None => StatusFilter::All,
+    };
+
+    let records = registry.list(filter).await?;
+
+    if json {
+        let json_str = serde_json::to_string_pretty(&records)?;
+        println!("{json_str}");
+        return Ok(());
+    }
+
+    if records.is_empty() {
+        println!("No dispatch records found.");
+        return Ok(());
+    }
+
+    let width = terminal_width();
+    let table = build_table(&records, width);
+    println!("{table}");
+    println!("{}", build_summary(&records));
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atc_core::types::{HealthChecks, Mode};
+    use chrono::{DateTime, Utc};
+    use std::path::PathBuf;
+
+    fn sample_record(slug: &str, status: Status) -> DispatchRecord {
+        DispatchRecord {
+            slug: slug.to_string(),
+            branch: "branch".to_string(),
+            worktree_path: PathBuf::from("/tmp/worktrees/harmony/my-task/gitkb"),
+            session: "session@implement@123".to_string(),
+            log_file: PathBuf::from("/tmp/test.jsonl"),
+            status,
+            mode: Mode::Implement,
+            retries: 0,
+            pr_url: None,
+            checks: HealthChecks::default(),
+            cost_usd: Some(1.50),
+            num_turns: Some(10),
+            duration_ms: Some(592_000),
+            dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(592_000), "9m 52s");
+        assert_eq!(format_duration(60_000), "1m 00s");
+        assert_eq!(format_duration(5_000), "5s");
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(3_661_000), "61m 01s");
+    }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("short", 40), "short");
+        let long = "a".repeat(50);
+        let result = truncate(&long, 40);
+        assert_eq!(result.chars().count(), 41); // 40 + ellipsis
+        assert!(result.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn test_build_table_wide_terminal() {
+        let records = vec![sample_record("tasks/gitkb-42", Status::Running)];
+        let table = build_table(&records, 160);
+        assert!(table.contains("tasks/gitkb-42"));
+        assert!(table.contains("running"));
+        assert!(table.contains("$1.50"));
+        assert!(table.contains("9m 52s"));
+    }
+
+    #[test]
+    fn test_build_table_narrow_terminal_truncates() {
+        let long_slug = format!("tasks/{}", "a".repeat(50));
+        let records = vec![sample_record(&long_slug, Status::Done)];
+        let table = build_table(&records, 80);
+        // Should be truncated
+        assert!(table.contains("\u{2026}"));
+    }
+
+    #[test]
+    fn test_build_table_column_order() {
+        let records = vec![sample_record("tasks/gitkb-42", Status::Running)];
+        let table = build_table(&records, 160);
+        let lines: Vec<&str> = table.lines().collect();
+        // Header should have correct column order
+        let header = lines[0];
+        let dispatched_pos = header.find("dispatched_at").unwrap();
+        let status_pos = header.find("status").unwrap();
+        let slug_pos = header.find("slug").unwrap();
+        let mode_pos = header.find("mode").unwrap();
+        let cost_pos = header.find("cost").unwrap();
+        let turns_pos = header.find("turns").unwrap();
+        let duration_pos = header.find("duration").unwrap();
+        let worktree_pos = header.find("worktree").unwrap();
+        assert!(dispatched_pos < status_pos);
+        assert!(status_pos < slug_pos);
+        assert!(slug_pos < mode_pos);
+        assert!(mode_pos < cost_pos);
+        assert!(cost_pos < turns_pos);
+        assert!(turns_pos < duration_pos);
+        assert!(duration_pos < worktree_pos);
+    }
+
+    #[test]
+    fn test_build_summary() {
+        let records = vec![
+            sample_record("tasks/1", Status::Running),
+            sample_record("tasks/2", Status::Done),
+            sample_record("tasks/3", Status::Failed),
+            sample_record("tasks/4", Status::NeedsHuman),
+        ];
+        let summary = build_summary(&records);
+        assert!(summary.contains("1 running"));
+        assert!(summary.contains("1 done"));
+        assert!(summary.contains("1 failed"));
+        assert!(summary.contains("1 needs-human"));
+        assert!(summary.contains("of 4 total"));
+        assert!(summary.contains("$6.00"));
+    }
+
+    #[test]
+    fn test_build_summary_no_cost() {
+        let mut r = sample_record("tasks/1", Status::Running);
+        r.cost_usd = None;
+        let summary = build_summary(&[r]);
+        assert!(summary.contains("$0.00"));
+    }
+
+    #[test]
+    fn test_build_table_none_values() {
+        let mut r = sample_record("tasks/1", Status::Running);
+        r.cost_usd = None;
+        r.num_turns = None;
+        r.duration_ms = None;
+        let table = build_table(&[r], 160);
+        // Should show dashes for None values
+        // Check the data row contains "-" (not the header)
+        let lines: Vec<&str> = table.lines().collect();
+        let data_line = lines[1];
+        // The row should contain dashes for the None fields
+        assert!(data_line.contains('-'));
+    }
+}
