@@ -19,6 +19,9 @@ atc-core = { path = "../atc-core" }
 chrono.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+comfy-table = "7"
+notify = "7"
+terminal_size = "0.4"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true

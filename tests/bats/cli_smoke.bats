@@ -276,3 +276,70 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"no dispatch record found"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Status command
+# ---------------------------------------------------------------------------
+
+@test "atc status --help exits 0 and shows usage" {
+    run "$ATC_BIN" status --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--json"* ]]
+    [[ "$output" == *"--status"* ]]
+}
+
+@test "atc status with empty registry shows no records" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No dispatch records found"* ]]
+}
+
+@test "atc status --json with empty registry outputs empty array" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == "[]" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Info command
+# ---------------------------------------------------------------------------
+
+@test "atc info --help exits 0 and shows usage" {
+    run "$ATC_BIN" info --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SLUG"* ]]
+}
+
+@test "atc info with nonexistent slug fails cleanly" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" info tasks/nonexistent
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no dispatch record found"* ]]
+    if [[ "$output" == *"panicked"* ]]; then
+        echo "PANIC DETECTED: $output"
+        false
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Logs command
+# ---------------------------------------------------------------------------
+
+@test "atc logs --help exits 0 and shows usage" {
+    run "$ATC_BIN" logs --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARG"* ]] || [[ "$output" == *"arg"* ]] || [[ "$output" == *"slug"* ]] || [[ "$output" == *"session"* ]] || [[ "$output" == *"-f"* ]]
+}
+
+@test "atc logs with nonexistent slug fails cleanly" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" logs tasks/nonexistent
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No log file"* ]]
+    if [[ "$output" == *"panicked"* ]]; then
+        echo "PANIC DETECTED: $output"
+        false
+    fi
+}

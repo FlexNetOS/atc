@@ -1,0 +1,221 @@
+//! `atc info <slug>` — detailed view of a single dispatch record.
+
+use anyhow::Result;
+use atc_core::registry::Registry;
+use atc_core::types::DispatchRecord;
+use std::sync::Arc;
+
+use crate::status::format_duration;
+
+/// Format a dispatch record for display.
+pub fn format_info(record: &DispatchRecord) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let label_width = 16; // width for colon-aligned labels
+
+    let add_line = |lines: &mut Vec<String>, label: &str, value: &str| {
+        lines.push(format!("  {:<label_width$}{}", format!("{label}:"), value));
+    };
+
+    add_line(&mut lines, "slug", &record.slug);
+    add_line(&mut lines, "status", record.status.as_str());
+    add_line(&mut lines, "mode", record.mode.as_str());
+    add_line(&mut lines, "branch", &record.branch);
+
+    let worktree_str = record.worktree_path.to_string_lossy();
+    if !worktree_str.is_empty() {
+        add_line(&mut lines, "worktree_path", &worktree_str);
+    }
+
+    add_line(&mut lines, "session", &record.session);
+
+    if let Some(ref url) = record.pr_url {
+        add_line(&mut lines, "pr_url", url);
+    }
+
+    if let Some(cost) = record.cost_usd {
+        add_line(&mut lines, "cost_usd", &format!("${:.2}", cost));
+    }
+
+    if let Some(turns) = record.num_turns {
+        add_line(&mut lines, "num_turns", &turns.to_string());
+    }
+
+    if let Some(ms) = record.duration_ms {
+        add_line(&mut lines, "duration", &format_duration(ms));
+    }
+
+    if record.retries > 0 {
+        add_line(&mut lines, "retries", &record.retries.to_string());
+    }
+
+    add_line(
+        &mut lines,
+        "dispatched_at",
+        &record.dispatched_at.to_rfc3339(),
+    );
+    add_line(&mut lines, "updated_at", &record.updated_at.to_rfc3339());
+
+    // Health checks
+    let check = |b: bool| if b { "\u{2713}" } else { "\u{2717}" };
+    lines.push("  checks:".to_string());
+    lines.push(format!(
+        "    {:<23}{}",
+        "agent_exited_clean:",
+        check(record.checks.agent_exited_clean)
+    ));
+    lines.push(format!(
+        "    {:<23}{}",
+        "branch_pushed:",
+        check(record.checks.branch_pushed)
+    ));
+    lines.push(format!(
+        "    {:<23}{}",
+        "pr_created:",
+        check(record.checks.pr_created)
+    ));
+    lines.push(format!(
+        "    {:<23}{}",
+        "ci_passed:",
+        check(record.checks.ci_passed)
+    ));
+    lines.push(format!(
+        "    {:<23}{}",
+        "reviews_approved:",
+        check(record.checks.reviews_approved)
+    ));
+    lines.push(format!(
+        "    {:<23}{}",
+        "threads_resolved:",
+        check(record.checks.threads_resolved)
+    ));
+
+    lines.join("\n")
+}
+
+pub async fn run_info(registry: Arc<dyn Registry>, slug: &str) -> Result<()> {
+    let record = registry
+        .get(slug)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no dispatch record found for slug: {slug}"))?;
+
+    println!("{}", format_info(&record));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atc_core::types::{HealthChecks, Mode, Status};
+    use chrono::{DateTime, Utc};
+    use std::path::PathBuf;
+
+    fn full_record() -> DispatchRecord {
+        DispatchRecord {
+            slug: "tasks/gitkb-42".to_string(),
+            branch: "tasks-gitkb-42".to_string(),
+            worktree_path: PathBuf::from("/tmp/worktrees/harmony/tasks-gitkb-42/gitkb"),
+            session: "tasks-gitkb-42@implement@1773293500".to_string(),
+            log_file: PathBuf::from("/tmp/test.jsonl"),
+            status: Status::Done,
+            mode: Mode::Implement,
+            retries: 1,
+            pr_url: Some("https://github.com/harmony-labs/gitkb-core/pull/275".to_string()),
+            checks: HealthChecks {
+                agent_exited_clean: true,
+                branch_pushed: true,
+                pr_created: true,
+                ci_passed: true,
+                reviews_approved: true,
+                threads_resolved: true,
+            },
+            cost_usd: Some(8.59),
+            num_turns: Some(47),
+            duration_ms: Some(592_000),
+            dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41+00:00")
+                .unwrap()
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339("2026-03-12T07:45:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc),
+        }
+    }
+
+    #[test]
+    fn test_format_info_full_record() {
+        let output = format_info(&full_record());
+        assert!(output.contains("slug:"));
+        assert!(output.contains("tasks/gitkb-42"));
+        assert!(output.contains("status:"));
+        assert!(output.contains("done"));
+        assert!(output.contains("mode:"));
+        assert!(output.contains("implement"));
+        assert!(output.contains("branch:"));
+        assert!(output.contains("tasks-gitkb-42"));
+        assert!(output.contains("worktree_path:"));
+        assert!(output.contains("session:"));
+        assert!(output.contains("pr_url:"));
+        assert!(output.contains("pull/275"));
+        assert!(output.contains("cost_usd:"));
+        assert!(output.contains("$8.59"));
+        assert!(output.contains("num_turns:"));
+        assert!(output.contains("47"));
+        assert!(output.contains("duration:"));
+        assert!(output.contains("9m 52s"));
+        assert!(output.contains("retries:"));
+        assert!(output.contains("dispatched_at:"));
+        assert!(output.contains("updated_at:"));
+        assert!(output.contains("checks:"));
+        assert!(output.contains("\u{2713}")); // check mark
+    }
+
+    #[test]
+    fn test_format_info_omits_none_fields() {
+        let mut record = full_record();
+        record.pr_url = None;
+        record.cost_usd = None;
+        record.num_turns = None;
+        record.duration_ms = None;
+        record.retries = 0;
+        record.worktree_path = PathBuf::from("");
+
+        let output = format_info(&record);
+        assert!(!output.contains("pr_url:"));
+        assert!(!output.contains("cost_usd:"));
+        assert!(!output.contains("num_turns:"));
+        assert!(!output.contains("duration:"));
+        assert!(!output.contains("retries:"));
+        assert!(!output.contains("worktree_path:"));
+        // These should always be present
+        assert!(output.contains("slug:"));
+        assert!(output.contains("session:"));
+        assert!(output.contains("checks:"));
+    }
+
+    #[test]
+    fn test_format_info_checks_all_false() {
+        let mut record = full_record();
+        record.checks = HealthChecks::default();
+        let output = format_info(&record);
+        // All checks should show X mark
+        let x_count = output.matches('\u{2717}').count();
+        assert_eq!(x_count, 6);
+    }
+
+    #[test]
+    fn test_format_info_checks_mixed() {
+        let mut record = full_record();
+        record.checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: false,
+            ci_passed: false,
+            reviews_approved: false,
+            threads_resolved: false,
+        };
+        let output = format_info(&record);
+        let check_count = output.matches('\u{2713}').count();
+        let x_count = output.matches('\u{2717}').count();
+        assert_eq!(check_count, 2);
+        assert_eq!(x_count, 4);
+    }
+}
