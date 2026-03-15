@@ -4,6 +4,9 @@ use atc_core::registry::{Registry, StatusFilter};
 use atc_core::types::Status;
 use tracing::{info, warn};
 
+/// Timeout for non-fatal subprocess calls (git-kb, git worktree).
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Execute the `atc close` command.
 pub async fn run_close(
     config: &AtcConfig,
@@ -41,18 +44,24 @@ pub async fn run_close(
         .ok();
 
     if let Some(ref kb_root) = kb_root {
-        let status = tokio::process::Command::new("git-kb")
-            .args(["set", slug, "status=completed"])
-            .env("GITKB_ROOT", kb_root)
-            .status()
-            .await;
+        let status = tokio::time::timeout(
+            CMD_TIMEOUT,
+            tokio::process::Command::new("git-kb")
+                .args(["set", slug, "status=completed"])
+                .env("GITKB_ROOT", kb_root)
+                .status(),
+        )
+        .await;
 
         match status {
-            Ok(s) if !s.success() => {
+            Ok(Ok(s)) if !s.success() => {
                 warn!(slug, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(slug, error = %e, "git-kb set status=completed failed (non-fatal)");
+            }
+            Err(_) => {
+                warn!(slug, "git-kb set status=completed timed out (non-fatal)");
             }
             _ => {
                 info!(slug, "git-kb status set to completed");
@@ -91,28 +100,34 @@ pub async fn run_close(
 
             match repo_root {
                 Some(root) => {
-                    let result = tokio::process::Command::new("git")
-                        .args([
-                            "-C",
-                            &root.to_string_lossy(),
-                            "worktree",
-                            "remove",
-                            "--force",
-                            &worktree_path.to_string_lossy(),
-                        ])
-                        .status()
-                        .await;
+                    let result = tokio::time::timeout(
+                        CMD_TIMEOUT,
+                        tokio::process::Command::new("git")
+                            .args([
+                                "-C",
+                                &root.to_string_lossy(),
+                                "worktree",
+                                "remove",
+                                "--force",
+                                &worktree_path.to_string_lossy(),
+                            ])
+                            .status(),
+                    )
+                    .await;
 
                     match result {
-                        Ok(s) if !s.success() => {
+                        Ok(Ok(s)) if !s.success() => {
                             warn!(
                                 slug,
                                 exit_code = ?s.code(),
                                 "git worktree remove failed (non-fatal)"
                             );
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             warn!(slug, error = %e, "git worktree remove failed (non-fatal)");
+                        }
+                        Err(_) => {
+                            warn!(slug, "git worktree remove timed out (non-fatal)");
                         }
                         _ => {
                             info!(slug, worktree = %worktree_path.display(), "worktree removed");

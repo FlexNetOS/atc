@@ -6,7 +6,6 @@ use atc_core::registry::{Registry, StatusFilter};
 use atc_core::stream_json::{parse_stream_events, StreamEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncBufReadExt;
 
 /// Resolve the log file path from a slug-or-session argument.
 ///
@@ -127,20 +126,9 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
     use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
     use tokio::sync::mpsc;
 
-    let file = tokio::fs::File::open(path).await?;
-    let file_len = file.metadata().await?.len();
-    let reader = tokio::io::BufReader::new(file);
-    let mut lines = reader.lines();
-
-    // Skip to end — we already printed existing content
-    let mut pos = 0u64;
-    while let Some(line) = lines.next_line().await? {
-        pos += line.len() as u64 + 1; // +1 for newline
-    }
-    // Ensure we start from the right position if file was shorter
-    if pos < file_len {
-        pos = file_len;
-    }
+    // Start following from the current end of file — we already printed existing content.
+    let mut pos = tokio::fs::metadata(path).await?.len();
+    let mut pending = String::new();
 
     let (tx, mut rx) = mpsc::channel::<()>(16);
     let watched_path = path.to_path_buf();
@@ -185,18 +173,24 @@ async fn follow_log(path: &std::path::Path) -> Result<()> {
                 let new_len = metadata.len();
                 if new_len > pos {
                     // Seek to where we left off and read only new bytes
-                    use tokio::io::AsyncSeekExt;
+                    use tokio::io::{AsyncReadExt, AsyncSeekExt};
                     let mut file = tokio::fs::File::open(path).await?;
                     file.seek(std::io::SeekFrom::Start(pos)).await?;
-                    let reader = tokio::io::BufReader::new(file);
-                    let mut lines = reader.lines();
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    pos += buf.len() as u64;
 
-                    while let Some(line) = lines.next_line().await? {
-                        for event in parse_stream_events(&line) {
-                            render_event(&event);
+                    // Accumulate into pending buffer and process complete lines
+                    pending.push_str(&String::from_utf8_lossy(&buf));
+                    while let Some(i) = pending.find('\n') {
+                        let line: String = pending.drain(..=i).collect();
+                        let line = line.trim_end();
+                        if !line.is_empty() {
+                            for event in parse_stream_events(line) {
+                                render_event(&event);
+                            }
                         }
                     }
-                    pos = new_len;
                 }
             }
             _ = tokio::signal::ctrl_c() => {

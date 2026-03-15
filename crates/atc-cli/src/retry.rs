@@ -6,6 +6,9 @@ use atc_core::stream_json;
 use atc_core::types::{DispatchOpts, Status};
 use tracing::{info, warn};
 
+/// Timeout for non-fatal subprocess calls (tmux, git-kb).
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Execute the `atc retry` command.
 pub async fn run_retry(
     config: &AtcConfig,
@@ -70,18 +73,24 @@ pub async fn run_retry(
         .increment_retries(slug, &new_session, &new_log_file, now)
         .await?;
 
-    // 6. Kill old tmux session (non-fatal)
-    match tokio::process::Command::new("tmux")
-        .args(["kill-session", "-t", &record.session])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
+    // 6. Kill old tmux session (non-fatal, with timeout)
+    match tokio::time::timeout(
+        CMD_TIMEOUT,
+        tokio::process::Command::new("tmux")
+            .args(["kill-session", "-t", &record.session])
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await
     {
-        Ok(s) if !s.success() => {
+        Ok(Ok(s)) if !s.success() => {
             tracing::debug!(slug, session = %record.session, "tmux kill-session exited non-zero (session may not exist)");
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::debug!(slug, error = %e, "tmux kill-session failed (non-fatal)");
+        }
+        Err(_) => {
+            tracing::debug!(slug, session = %record.session, "tmux kill-session timed out (non-fatal)");
         }
         _ => {}
     }
@@ -122,18 +131,24 @@ async fn kb_unassign(slug: &str, config: &AtcConfig) {
         Err(_) => return,
     };
 
-    let status = tokio::process::Command::new("git-kb")
-        .args(["unassign", slug])
-        .env("GITKB_ROOT", &kb_root)
-        .status()
-        .await;
+    let status = tokio::time::timeout(
+        CMD_TIMEOUT,
+        tokio::process::Command::new("git-kb")
+            .args(["unassign", slug])
+            .env("GITKB_ROOT", &kb_root)
+            .status(),
+    )
+    .await;
 
     match status {
-        Ok(s) if !s.success() => {
+        Ok(Ok(s)) if !s.success() => {
             warn!(slug, "git-kb unassign failed (non-fatal)");
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(slug, error = %e, "git-kb unassign failed (non-fatal)");
+        }
+        Err(_) => {
+            warn!(slug, "git-kb unassign timed out (non-fatal)");
         }
         _ => {}
     }
@@ -149,18 +164,24 @@ async fn kb_set_status_draft(slug: &str, config: &AtcConfig) {
         Err(_) => return,
     };
 
-    let status = tokio::process::Command::new("git-kb")
-        .args(["set", slug, "status=draft"])
-        .env("GITKB_ROOT", &kb_root)
-        .status()
-        .await;
+    let status = tokio::time::timeout(
+        CMD_TIMEOUT,
+        tokio::process::Command::new("git-kb")
+            .args(["set", slug, "status=draft"])
+            .env("GITKB_ROOT", &kb_root)
+            .status(),
+    )
+    .await;
 
     match status {
-        Ok(s) if !s.success() => {
+        Ok(Ok(s)) if !s.success() => {
             warn!(slug, "git-kb set status=draft failed (non-fatal)");
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(slug, error = %e, "git-kb set status=draft failed (non-fatal)");
+        }
+        Err(_) => {
+            warn!(slug, "git-kb set status=draft timed out (non-fatal)");
         }
         _ => {}
     }
