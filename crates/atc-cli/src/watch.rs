@@ -307,41 +307,39 @@ pub async fn run_watch(
 
             // Check tmux session liveness
             let record = records.iter().find(|r| r.id == *id).unwrap();
-            if !tmux_session_alive(&record.session).await {
-                if !watcher.completed {
-                    // Wait a moment for final log lines to flush
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if !tmux_session_alive(&record.session).await && !watcher.completed {
+                // Wait a moment for final log lines to flush
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-                    // Final log poll
-                    let events = watcher.poll_log(cost_threshold);
-                    for event in events {
-                        emit_event(&event, &output_format, &tx_clone);
-                    }
-
-                    if !watcher.completed {
-                        // Session died without result event — run post-completion
-                        emit_event(
-                            &WatchEvent::SessionDied { id: id.clone() },
-                            &output_format,
-                            &tx_clone,
-                        );
-
-                        // Trigger post-completion
-                        let input = atc_core::post_completion::PostCompleteInput {
-                            dispatch_id: id.clone(),
-                            exit_code: None,
-                            log_file: Some(watcher.log_file.clone()),
-                        };
-                        if let Err(e) =
-                            post_completion::run_post_completion(&input, registry.as_ref(), config)
-                                .await
-                        {
-                            warn!(id = %id, error = %e, "post-completion failed for dead session");
-                        }
-                    }
-
-                    watcher.completed = true;
+                // Final log poll
+                let events = watcher.poll_log(cost_threshold);
+                for event in events {
+                    emit_event(&event, &output_format, &tx_clone);
                 }
+
+                if !watcher.completed {
+                    // Session died without result event — run post-completion
+                    emit_event(
+                        &WatchEvent::SessionDied { id: id.clone() },
+                        &output_format,
+                        &tx_clone,
+                    );
+
+                    // Trigger post-completion
+                    let input = atc_core::post_completion::PostCompleteInput {
+                        dispatch_id: id.clone(),
+                        exit_code: None,
+                        log_file: Some(watcher.log_file.clone()),
+                    };
+                    if let Err(e) =
+                        post_completion::run_post_completion(&input, registry.as_ref(), config)
+                            .await
+                    {
+                        warn!(id = %id, error = %e, "post-completion failed for dead session");
+                    }
+                }
+
+                watcher.completed = true;
             }
         }
 
