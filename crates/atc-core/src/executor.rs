@@ -129,10 +129,14 @@ impl ClaudeExecutor {
             cmd.arg("--settings").arg(sf.path());
         }
 
-        // 6. Set cwd and env
+        // 6. Set cwd and env (empty value = remove from inherited env)
         cmd.current_dir(&opts.worktree_path);
         for (k, v) in &opts.env {
-            cmd.env(k, v);
+            if v.is_empty() {
+                cmd.env_remove(k);
+            } else {
+                cmd.env(k, v);
+            }
         }
 
         // 7. Pipe task doc to stdin, merge stderr into stdout (2>&1 equivalent)
@@ -174,7 +178,9 @@ impl ClaudeExecutor {
 
         // Wait for all stream tasks and the child process
         for t in tasks {
-            let _ = t.await;
+            if let Err(e) = t.await {
+                tracing::warn!(slug = %opts.slug, error = %e, "log stream task failed");
+            }
         }
         let status = child.wait().await?;
 
@@ -229,9 +235,14 @@ impl ClaudeExecutor {
         let mut bash_parts = Vec::new();
 
         // Export env vars (keys are validated to prevent shell injection)
+        // Empty value = unset the variable from the inherited environment.
         for (k, v) in &opts.env {
             validate_env_key(k)?;
-            bash_parts.push(format!("export {}='{}'", k, shell_escape(v)?));
+            if v.is_empty() {
+                bash_parts.push(format!("unset {}", k));
+            } else {
+                bash_parts.push(format!("export {}='{}'", k, shell_escape(v)?));
+            }
         }
 
         // cd to worktree

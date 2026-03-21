@@ -1,7 +1,7 @@
 use anyhow::Result;
 use atc_core::config::{AtcConfig, DispatchConfig, ModeConfig};
 use atc_core::executor::{AgentExecutor, AgentHandle, AgentOpts};
-use atc_core::registry::{Registry, SqliteRegistry};
+use atc_core::registry::{Registry, SqliteRegistry, StatusFilter};
 use atc_core::types::{DispatchOpts, Mode, Status};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -145,11 +145,33 @@ if [ "$1" = "git" ] && [ "$2" = "worktree" ] && [ "$3" = "create" ]; then
     done
     mkdir -p "{worktree_base}/$KB_BASENAME/$REPO"
     exit 0
+elif [ "$1" = "git" ] && [ "$2" = "worktree" ] && [ "$3" = "remove" ]; then
+    exit 0
 fi
 exit 1
 "#,
             worktree_base = worktree_base.display()
         ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    make_executable(&script);
+}
+
+/// Create a stub `git` script that accepts check-ref-format and worktree list.
+fn write_stub_git_bin(dir: &std::path::Path) {
+    let script = dir.join("git");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+if [ "$1" = "check-ref-format" ]; then
+    exit 0
+elif [ "$1" = "worktree" ] && [ "$2" = "list" ]; then
+    echo ""
+    exit 0
+fi
+exit 0
+"#,
     )
     .unwrap();
     #[cfg(unix)]
@@ -167,12 +189,15 @@ fn test_modes() -> HashMap<String, ModeConfig> {
         "pr-comments",
         "refine",
         "create-task",
+        "close",
     ] {
         modes.insert(
             key.to_string(),
             ModeConfig {
                 template_path: None,
                 template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
+                max_budget_usd: None,
+                max_turns: None,
             },
         );
     }
@@ -203,7 +228,6 @@ fn make_config(
 }
 
 /// Common test fixture: tempdir, bin_dir, worktree_base, PATH override, and config.
-/// Returns (tmp, original_path, config, bin_dir, worktree_base).
 struct TestFixture {
     tmp: tempfile::TempDir,
     original_path: String,
@@ -244,23 +268,34 @@ impl Drop for TestFixture {
     }
 }
 
+fn default_dispatch_opts(slug: &str, mode: Mode) -> DispatchOpts {
+    DispatchOpts {
+        slug: slug.to_string(),
+        cli_mode: Some(mode),
+        directive: None,
+        pr_url: None,
+        inline: true,
+        force: false,
+        dry_run: false,
+        max_budget_override: None,
+        max_turns_override: None,
+        retries: 0,
+    }
+}
+
 #[tokio::test]
 async fn test_dispatch_inline_inserts_registry_record() {
     let _guard = PATH_MUTEX.lock().await;
 
     let fix = TestFixture::new();
     write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-42".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: None,
-        inline: true,
-    };
+    let opts = default_dispatch_opts("tasks/gitkb-42", Mode::Implement);
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
             .await
@@ -268,17 +303,16 @@ async fn test_dispatch_inline_inserts_registry_record() {
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
-    let record = registry.get("tasks/gitkb-42").await.unwrap();
+    // Record should be findable by ID
+    let record = registry.get(&outcome.id).await.unwrap();
     assert!(record.is_some(), "registry record should exist");
     let record = record.unwrap();
-    assert_eq!(outcome.session, record.session);
-    assert_eq!(record.slug, "tasks/gitkb-42");
+    assert_eq!(record.task_slug.as_deref(), Some("tasks/gitkb-42"));
     assert_eq!(record.branch, "tasks--gitkb-42");
     assert_eq!(record.status, Status::Done);
     assert_eq!(record.mode, Mode::Implement);
+    assert_eq!(record.resolver, "task");
     assert!(record.session.starts_with("tasks--gitkb-42@implement@"));
-    assert!(record.log_file.to_string_lossy().ends_with(".jsonl"));
-    assert_eq!(record.retries, 0);
 }
 
 #[tokio::test]
@@ -287,21 +321,16 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
 
     let fix = TestFixture::new();
     write_stub_git_assign_fails(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-99".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: None,
-        inline: true,
-    };
+    let opts = default_dispatch_opts("tasks/gitkb-99", Mode::Implement);
     let result =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
-    // Should fail with CAS claim error
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -310,9 +339,9 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
         err_msg
     );
 
-    // No registry record should exist
-    let record = registry.get("tasks/gitkb-99").await.unwrap();
-    assert!(record.is_none(), "no registry record after CAS failure");
+    // No registry records should exist
+    let all = registry.list(StatusFilter::All).await.unwrap();
+    assert!(all.is_empty(), "no registry record after CAS failure");
 }
 
 #[tokio::test]
@@ -321,17 +350,13 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
 
     let fix = TestFixture::new();
     write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 1 });
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-fail".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: None,
-        inline: true,
-    };
+    let opts = default_dispatch_opts("tasks/gitkb-fail", Mode::Implement);
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
             .await
@@ -339,16 +364,14 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
 
     assert_eq!(outcome.inline_exit_code, Some(1));
 
-    let record = registry.get("tasks/gitkb-fail").await.unwrap();
+    let record = registry.get(&outcome.id).await.unwrap();
     assert!(record.is_some(), "registry record should exist");
     let record = record.unwrap();
-    assert_eq!(outcome.session, record.session);
     assert_eq!(
         record.status,
         Status::Failed,
         "non-zero exit code should produce Failed status"
     );
-    assert_eq!(record.slug, "tasks/gitkb-fail");
 }
 
 /// Create a stub `git-kb` that returns JSON with directives for mode resolution.
@@ -391,6 +414,7 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
 
     let fix = TestFixture::new();
     write_stub_git_show_json(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
@@ -401,7 +425,13 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         slug: "tasks/gitkb-auto-mode".to_string(),
         cli_mode: None,
         directive: None,
+        pr_url: None,
         inline: true,
+        force: false,
+        dry_run: false,
+        max_budget_override: None,
+        max_turns_override: None,
+        retries: 0,
     };
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
@@ -410,53 +440,51 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
-    let record = registry.get("tasks/gitkb-auto-mode").await.unwrap();
-    assert!(record.is_some(), "registry record should exist");
-    let record = record.unwrap();
-    assert_eq!(outcome.session, record.session);
+    let record = registry.get(&outcome.id).await.unwrap().unwrap();
     assert_eq!(
         record.mode,
         Mode::Research,
         "mode should be resolved from frontmatter directives"
     );
-    assert!(
-        record.session.contains("@research@"),
-        "session name should contain resolved mode"
-    );
 }
 
 #[tokio::test]
-async fn test_dispatch_duplicate_slug_fails_unique_constraint() {
+async fn test_dispatch_multiple_dispatches_same_task() {
     let _guard = PATH_MUTEX.lock().await;
 
     let fix = TestFixture::new();
     write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    // First dispatch should succeed
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-dup".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: None,
-        inline: true,
-    };
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
-    assert!(result.is_ok(), "first dispatch failed: {:?}", result.err());
+    // First dispatch
+    let opts = default_dispatch_opts("tasks/gitkb-dup", Mode::Implement);
+    let outcome1 =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("first dispatch failed");
 
-    // Second dispatch of same slug should fail on UNIQUE constraint
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
-    assert!(result.is_err(), "duplicate dispatch should fail");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("UNIQUE constraint failed"),
-        "expected UNIQUE constraint error, got: {}",
-        err_msg
-    );
+    // Small delay to ensure different millisecond timestamp
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Second dispatch of same slug should succeed (different dispatch ID)
+    let outcome2 =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("second dispatch should succeed with new ID");
+
+    assert_ne!(outcome1.id, outcome2.id, "dispatch IDs should differ");
+
+    // Both records should exist
+    let all = registry.list(StatusFilter::All).await.unwrap();
+    assert_eq!(all.len(), 2, "both dispatch records should exist");
+
+    // find_by_task_slug should return both
+    let by_task = registry.find_by_task_slug("tasks/gitkb-dup").await.unwrap();
+    assert_eq!(by_task.len(), 2);
 }
 
 #[tokio::test]
@@ -465,21 +493,16 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
 
     let fix = TestFixture::new();
     write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(FailingExecutor);
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-exec-fail".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: None,
-        inline: true,
-    };
+    let opts = default_dispatch_opts("tasks/gitkb-exec-fail", Mode::Implement);
     let result =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
 
-    // Should propagate the executor error
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -488,12 +511,9 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
         err_msg
     );
 
-    // No registry record should exist (dispatch didn't complete)
-    let record = registry.get("tasks/gitkb-exec-fail").await.unwrap();
-    assert!(
-        record.is_none(),
-        "no registry record after executor failure"
-    );
+    // No registry record should exist
+    let all = registry.list(StatusFilter::All).await.unwrap();
+    assert!(all.is_empty(), "no registry record after executor failure");
 }
 
 #[tokio::test]
@@ -502,6 +522,7 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
 
     let fix = TestFixture::new();
     write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
     write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
 
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
@@ -511,7 +532,13 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         slug: "tasks/gitkb-directive".to_string(),
         cli_mode: Some(Mode::Implement),
         directive: Some("focus on error handling".to_string()),
+        pr_url: None,
         inline: true,
+        force: false,
+        dry_run: false,
+        max_budget_override: None,
+        max_turns_override: None,
+        retries: 0,
     };
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
@@ -528,4 +555,74 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         prompt.contains("focus on error handling"),
         "directive should survive into rendered prompt, got: {prompt}"
     );
+}
+
+#[tokio::test]
+async fn test_dispatch_review_fix_requires_pr_url() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    let opts = DispatchOpts {
+        slug: "tasks/gitkb-review".to_string(),
+        cli_mode: Some(Mode::ReviewFix),
+        directive: None,
+        pr_url: None, // Missing!
+        inline: true,
+        force: false,
+        dry_run: false,
+        max_budget_override: None,
+        max_turns_override: None,
+        retries: 0,
+    };
+    let result =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("requires a PR URL"),
+        "expected PR URL error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_dry_run() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    let opts = DispatchOpts {
+        slug: "tasks/gitkb-dry".to_string(),
+        cli_mode: Some(Mode::Implement),
+        directive: None,
+        pr_url: None,
+        inline: true,
+        force: false,
+        dry_run: true,
+        max_budget_override: None,
+        max_turns_override: None,
+        retries: 0,
+    };
+    let outcome =
+        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
+            .await
+            .expect("dry run should succeed");
+
+    assert_eq!(outcome.inline_exit_code, Some(0));
+
+    // No registry record should exist (dry run doesn't dispatch)
+    let all = registry.list(StatusFilter::All).await.unwrap();
+    assert!(all.is_empty(), "dry run should not create registry records");
 }

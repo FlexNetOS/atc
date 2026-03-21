@@ -3,27 +3,26 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::warn;
 
+use crate::resolve::resolve_record;
+
 /// Timeout for tmux subprocess calls.
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Execute the `atc redirect` command.
-pub async fn run_redirect(registry: &dyn Registry, slug: &str, message: &str) -> Result<()> {
+pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> Result<()> {
     // 1. Get the record
-    let record = registry
-        .get(slug)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no dispatch record found for slug: {slug}"))?;
+    let record = resolve_record(registry, arg).await?;
 
     // 2. Warn if not Running (but don't hard-error)
     if record.status != Status::Running {
         warn!(
-            slug,
+            id = %record.id,
             status = %record.status,
             "record status is not running; redirect may not reach the agent"
         );
         eprintln!(
-            "warning: [{slug}] status is '{}', not 'running'",
-            record.status
+            "warning: [{}] status is '{}', not 'running'",
+            record.id, record.status
         );
     }
 
@@ -72,7 +71,7 @@ pub async fn run_redirect(registry: &dyn Registry, slug: &str, message: &str) ->
     }
 
     // 5. Print result
-    println!("[{slug}] redirected | session={session_name}");
+    println!("[{}] redirected | session={session_name}", record.id);
 
     Ok(())
 }
@@ -84,7 +83,7 @@ mod tests {
     use atc_core::registry::StatusFilter;
     use atc_core::types::{DispatchRecord, HealthChecks, Mode};
     use chrono::Utc;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     struct MockRegistry {
@@ -105,25 +104,19 @@ mod tests {
             self.records.lock().unwrap().push(record.clone());
             Ok(())
         }
-        async fn update_status(&self, _slug: &str, _status: Status) -> Result<()> {
+        async fn update_status(&self, _id: &str, _status: Status) -> Result<()> {
             Ok(())
         }
-        async fn update_cost(
-            &self,
-            _slug: &str,
-            _cost: f64,
-            _turns: u32,
-            _duration_ms: u64,
-        ) -> Result<()> {
+        async fn update_cost(&self, _: &str, _: f64, _: u32, _: u64) -> Result<()> {
             Ok(())
         }
-        async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>> {
+        async fn get(&self, id: &str) -> Result<Option<DispatchRecord>> {
             Ok(self
                 .records
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|r| r.slug == slug)
+                .find(|r| r.id == id)
                 .cloned())
         }
         async fn list(&self, _filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
@@ -131,30 +124,56 @@ mod tests {
         }
         async fn update_health(
             &self,
-            _slug: &str,
-            _checks: &HealthChecks,
-            _status: Status,
-            _updated_at: chrono::DateTime<Utc>,
+            _: &str,
+            _: &HealthChecks,
+            _: Status,
+            _: chrono::DateTime<Utc>,
         ) -> Result<()> {
             Ok(())
         }
-        async fn set_pr_url(&self, _slug: &str, _url: &str) -> Result<()> {
+        async fn set_pr_url(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
         async fn increment_retries(
             &self,
-            _slug: &str,
-            _new_session: &str,
-            _new_log_file: &std::path::Path,
-            _new_dispatched_at: chrono::DateTime<Utc>,
+            _: &str,
+            _: &str,
+            _: &Path,
+            _: chrono::DateTime<Utc>,
         ) -> Result<()> {
             Ok(())
         }
+        async fn find_by_branch(&self, _: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_task_slug(&self, _: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_pr_url(&self, _: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.task_slug.as_deref() == Some(task_slug))
+                .max_by_key(|r| r.dispatched_at)
+                .cloned())
+        }
+        async fn find_running_on_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
     }
 
-    fn sample_record(slug: &str, status: Status) -> DispatchRecord {
+    fn sample_record(id: &str, status: Status) -> DispatchRecord {
         DispatchRecord {
-            slug: slug.to_string(),
+            id: id.to_string(),
+            task_slug: Some("tasks/test-1".to_string()),
             branch: "test-branch".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
             session: "test-session".to_string(),
@@ -162,6 +181,7 @@ mod tests {
             status,
             mode: Mode::Implement,
             retries: 0,
+            resolver: "task".to_string(),
             pr_url: None,
             checks: HealthChecks::default(),
             cost_usd: None,
@@ -173,9 +193,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redirect_unknown_slug_errors() {
+    async fn test_redirect_unknown_id_errors() {
         let registry = MockRegistry::new(vec![]);
-        let result = run_redirect(&registry, "tasks/nonexistent", "hello").await;
+        let result = run_redirect(&registry, "nonexistent", "hello").await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -183,19 +203,13 @@ mod tests {
             .contains("no dispatch record found"));
     }
 
-    // Note: testing tmux interaction requires a real tmux server,
-    // so we test the non-running status warning path only.
-    // The tmux send-keys would fail in CI, but the warning logic is testable.
     #[tokio::test]
     async fn test_redirect_non_running_proceeds_to_tmux_check() {
-        let record = sample_record("tasks/test-1", Status::Failed);
+        let record = sample_record("test-id-1", Status::Failed);
         let registry = MockRegistry::new(vec![record]);
 
-        // This will fail at the tmux has-session step (no real tmux),
-        // but it should NOT fail at the status check (warn only).
-        let result = run_redirect(&registry, "tasks/test-1", "hello").await;
+        let result = run_redirect(&registry, "test-id-1", "hello").await;
         assert!(result.is_err());
-        // Error should be about tmux, not about status
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("tmux") || err.contains("session"),

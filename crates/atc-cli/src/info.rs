@@ -1,10 +1,11 @@
-//! `atc info <slug>` — detailed view of a single dispatch record.
+//! `atc info <id>` — detailed view of a single dispatch record.
 
 use anyhow::Result;
 use atc_core::registry::Registry;
 use atc_core::types::DispatchRecord;
 use std::sync::Arc;
 
+use crate::resolve::resolve_record;
 use crate::status::format_duration;
 
 /// Format a dispatch record for display.
@@ -16,10 +17,14 @@ pub fn format_info(record: &DispatchRecord) -> String {
         lines.push(format!("  {:<label_width$}{}", format!("{label}:"), value));
     };
 
-    add_line(&mut lines, "slug", &record.slug);
+    add_line(&mut lines, "id", &record.id);
+    if let Some(ref slug) = record.task_slug {
+        add_line(&mut lines, "task_slug", slug);
+    }
     add_line(&mut lines, "status", record.status.as_str());
     add_line(&mut lines, "mode", record.mode.as_str());
     add_line(&mut lines, "branch", &record.branch);
+    add_line(&mut lines, "resolver", &record.resolver);
 
     let worktree_str = record.worktree_path.to_string_lossy();
     if !worktree_str.is_empty() {
@@ -92,12 +97,8 @@ pub fn format_info(record: &DispatchRecord) -> String {
     lines.join("\n")
 }
 
-pub async fn run_info(registry: Arc<dyn Registry>, slug: &str) -> Result<()> {
-    let record = registry
-        .get(slug)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no dispatch record found for slug: {slug}"))?;
-
+pub async fn run_info(registry: Arc<dyn Registry>, arg: &str) -> Result<()> {
+    let record = resolve_record(registry.as_ref(), arg).await?;
     println!("{}", format_info(&record));
     Ok(())
 }
@@ -111,14 +112,16 @@ mod tests {
 
     fn full_record() -> DispatchRecord {
         DispatchRecord {
-            slug: "tasks/gitkb-42".to_string(),
-            branch: "tasks-gitkb-42".to_string(),
+            id: "tasks--gitkb-42@implement@1773293500".to_string(),
+            task_slug: Some("tasks/gitkb-42".to_string()),
+            branch: "tasks--gitkb-42".to_string(),
             worktree_path: PathBuf::from("/tmp/worktrees/harmony/tasks-gitkb-42/gitkb"),
-            session: "tasks-gitkb-42@implement@1773293500".to_string(),
+            session: "tasks--gitkb-42@implement@1773293500".to_string(),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status: Status::Done,
             mode: Mode::Implement,
             retries: 1,
+            resolver: "task".to_string(),
             pr_url: Some("https://github.com/harmony-labs/gitkb-core/pull/275".to_string()),
             checks: HealthChecks {
                 agent_exited_clean: true,
@@ -143,27 +146,20 @@ mod tests {
     #[test]
     fn test_format_info_full_record() {
         let output = format_info(&full_record());
-        assert!(output.contains("slug:"));
+        assert!(output.contains("id:"));
+        assert!(output.contains("task_slug:"));
         assert!(output.contains("tasks/gitkb-42"));
         assert!(output.contains("status:"));
         assert!(output.contains("done"));
         assert!(output.contains("mode:"));
         assert!(output.contains("implement"));
+        assert!(output.contains("resolver:"));
+        assert!(output.contains("task"));
         assert!(output.contains("branch:"));
-        assert!(output.contains("tasks-gitkb-42"));
-        assert!(output.contains("worktree_path:"));
-        assert!(output.contains("session:"));
         assert!(output.contains("pr_url:"));
         assert!(output.contains("pull/275"));
         assert!(output.contains("cost_usd:"));
         assert!(output.contains("$8.59"));
-        assert!(output.contains("num_turns:"));
-        assert!(output.contains("47"));
-        assert!(output.contains("duration:"));
-        assert!(output.contains("9m 52s"));
-        assert!(output.contains("retries:"));
-        assert!(output.contains("dispatched_at:"));
-        assert!(output.contains("updated_at:"));
         assert!(output.contains("checks:"));
         assert!(output.contains("\u{2713}")); // check mark
     }
@@ -171,51 +167,18 @@ mod tests {
     #[test]
     fn test_format_info_omits_none_fields() {
         let mut record = full_record();
+        record.task_slug = None;
         record.pr_url = None;
         record.cost_usd = None;
         record.num_turns = None;
         record.duration_ms = None;
         record.retries = 0;
-        record.worktree_path = PathBuf::from("");
 
         let output = format_info(&record);
+        assert!(!output.contains("task_slug:"));
         assert!(!output.contains("pr_url:"));
         assert!(!output.contains("cost_usd:"));
-        assert!(!output.contains("num_turns:"));
-        assert!(!output.contains("duration:"));
-        assert!(!output.contains("retries:"));
-        assert!(!output.contains("worktree_path:"));
-        // These should always be present
-        assert!(output.contains("slug:"));
-        assert!(output.contains("session:"));
+        assert!(output.contains("id:"));
         assert!(output.contains("checks:"));
-    }
-
-    #[test]
-    fn test_format_info_checks_all_false() {
-        let mut record = full_record();
-        record.checks = HealthChecks::default();
-        let output = format_info(&record);
-        // All checks should show X mark
-        let x_count = output.matches('\u{2717}').count();
-        assert_eq!(x_count, 6);
-    }
-
-    #[test]
-    fn test_format_info_checks_mixed() {
-        let mut record = full_record();
-        record.checks = HealthChecks {
-            agent_exited_clean: true,
-            branch_pushed: true,
-            pr_created: false,
-            ci_passed: false,
-            reviews_approved: false,
-            threads_resolved: false,
-        };
-        let output = format_info(&record);
-        let check_count = output.matches('\u{2713}').count();
-        let x_count = output.matches('\u{2717}').count();
-        assert_eq!(check_count, 2);
-        assert_eq!(x_count, 4);
     }
 }

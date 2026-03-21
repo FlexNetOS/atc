@@ -59,7 +59,7 @@ fn print_table(records: &[DispatchRecord]) {
     // Header
     println!(
         "{:<25} {:<14} {:<14} {:<15} {:<12} {:<11} {:<18} {:<16}",
-        "slug",
+        "id",
         "status",
         "agent_exited",
         "branch_pushed",
@@ -73,7 +73,7 @@ fn print_table(records: &[DispatchRecord]) {
         let signals = signal_values(record);
         println!(
             "{:<25} {:<14} {:<14} {:<15} {:<12} {:<11} {:<18} {:<16}",
-            record.slug,
+            record.id,
             record.status.as_str(),
             signal_display(signals[0]),
             signal_display(signals[1]),
@@ -112,18 +112,23 @@ pub async fn run_health(
         .await?;
     display_records.extend(needs_human);
 
-    // If --all, also include done and failed (excluding already-collected slugs
-    // to avoid duplicates when a record transitioned to terminal status this run)
+    // If --all, also include terminal and non-active records (excluding
+    // already-collected IDs to avoid duplicates when a record transitioned this run)
     if all {
-        let existing_slugs: std::collections::HashSet<String> =
-            display_records.iter().map(|r| r.slug.clone()).collect();
+        let existing_ids: std::collections::HashSet<String> =
+            display_records.iter().map(|r| r.id.clone()).collect();
         let terminal = registry
-            .list(StatusFilter::any(vec![Status::Done, Status::Failed]))
+            .list(StatusFilter::any(vec![
+                Status::Done,
+                Status::Failed,
+                Status::Stopped,
+                Status::Retrying,
+            ]))
             .await?;
         display_records.extend(
             terminal
                 .into_iter()
-                .filter(|r| !existing_slugs.contains(&r.slug)),
+                .filter(|r| !existing_ids.contains(&r.id)),
         );
     }
 
@@ -150,7 +155,8 @@ mod tests {
 
     fn make_record(status: Status, checks: HealthChecks) -> DispatchRecord {
         DispatchRecord {
-            slug: "test".to_string(),
+            id: "test@implement@1234567890".to_string(),
+            task_slug: Some("test".to_string()),
             branch: "test-branch".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
             session: "test-session".to_string(),
@@ -158,6 +164,7 @@ mod tests {
             status,
             mode: Mode::Implement,
             retries: 0,
+            resolver: "task".to_string(),
             pr_url: None,
             checks,
             cost_usd: None,

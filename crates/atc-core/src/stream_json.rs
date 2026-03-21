@@ -168,6 +168,130 @@ pub fn parse_result_event(line: &str) -> Option<ResultEvent> {
     }
 }
 
+/// Artifacts extracted from a stream-json log.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Artifacts {
+    /// PR URLs found in tool_use outputs (gh pr create, etc.)
+    pub pr_urls: Vec<String>,
+    /// Commit SHAs mentioned in output.
+    /// TODO(phase-2): populate via commit SHA extraction from assistant text.
+    pub commits: Vec<String>,
+    /// The last result event, if any
+    pub result: Option<ResultEvent>,
+    /// Agent summary text (last assistant text block before result)
+    pub summary: Option<String>,
+}
+
+/// Extract GitHub PR URLs from a text string.
+///
+/// Handles plain URLs, markdown links like `[text](url)`, and URLs with
+/// trailing punctuation. Searches for the URL prefix within each token
+/// rather than requiring it at the start, which catches URLs embedded in
+/// surrounding syntax.
+fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
+    const PREFIX: &str = "https://github.com/";
+    const MARKER: &str = "/pull/";
+
+    for token in text.split_whitespace() {
+        // Strip quotes (for JSON-encoded tool inputs)
+        let token = token.trim_matches('"');
+
+        // Find the URL prefix anywhere in the token (handles markdown links, parens, etc.)
+        let Some(start) = token.find(PREFIX) else {
+            continue;
+        };
+        let candidate = &token[start..];
+        if !candidate.contains(MARKER) {
+            continue;
+        }
+        // Trim trailing punctuation (but preserve `/`, `#`, `?`, `=`, `&` which are valid URL chars)
+        let url = candidate.trim_end_matches(|c: char| {
+            c.is_ascii_punctuation() && !matches!(c, '/' | '#' | '?' | '=' | '&')
+        });
+        if !urls.iter().any(|u| u == url) {
+            urls.push(url.to_string());
+        }
+    }
+}
+
+/// Extract artifacts from parsed stream events.
+/// Used by post-completion (Phase 2A) and stale record recovery (Phase 7D).
+pub fn extract_artifacts(log_path: &Path) -> Artifacts {
+    use std::io::BufRead;
+    let mut artifacts = Artifacts::default();
+
+    let file = match std::fs::File::open(log_path) {
+        Ok(f) => f,
+        Err(_) => return artifacts,
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut last_text: Option<String> = None;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        for event in parse_stream_events(&line) {
+            match &event {
+                StreamEvent::AssistantText(text) => {
+                    extract_pr_urls(text, &mut artifacts.pr_urls);
+                    last_text = Some(text.clone());
+                }
+                StreamEvent::ToolUse { input, .. } => {
+                    extract_pr_urls(input, &mut artifacts.pr_urls);
+                }
+                StreamEvent::Result(r) => {
+                    artifacts.result = Some(r.clone());
+                }
+                StreamEvent::Skip => {}
+            }
+        }
+    }
+
+    artifacts.summary = last_text;
+    artifacts
+}
+
+/// Format a single stream event for human-readable display.
+/// Used by logs viewer (Phase 1C).
+pub fn format_event(event: &StreamEvent) -> Vec<String> {
+    match event {
+        StreamEvent::AssistantText(text) => text.lines().map(|l| format!(">>> {l}")).collect(),
+        StreamEvent::ToolUse { name, input } => {
+            let display_input = if input.chars().count() > 120 {
+                let truncated: String = input.chars().take(120).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                input.clone()
+            };
+            vec![format!("  [tool] {name}: {display_input}")]
+        }
+        StreamEvent::Result(r) => {
+            let cost = r
+                .total_cost_usd
+                .map(|c| format!("${c}"))
+                .unwrap_or_else(|| "-".to_string());
+            let turns = r
+                .num_turns
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let duration = r
+                .duration_ms
+                .map(|ms| format!("{}s", ms / 1000))
+                .unwrap_or_else(|| "-".to_string());
+            vec![
+                String::new(),
+                format!(
+                    "=== RESULT: {} | cost={} | turns={} | duration={} ===",
+                    r.subtype, cost, turns, duration
+                ),
+            ]
+        }
+        StreamEvent::Skip => vec![],
+    }
+}
+
 /// Read the last result event from a JSONL log file.
 ///
 /// Scans the file line by line, keeping the last matching result event.
@@ -311,6 +435,68 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_artifacts_from_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Creating PR at https://github.com/org/repo/pull/42"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done with the implementation."}]}}
+{"type":"result","subtype":"success","total_cost_usd":2.50,"num_turns":5,"duration_ms":30000}
+"#;
+        std::fs::write(&path, content).unwrap();
+        let artifacts = extract_artifacts(&path);
+        assert_eq!(
+            artifacts.pr_urls,
+            vec!["https://github.com/org/repo/pull/42"]
+        );
+        assert!(artifacts.result.is_some());
+        assert_eq!(artifacts.result.unwrap().subtype, "success");
+        assert_eq!(
+            artifacts.summary.as_deref(),
+            Some("Done with the implementation.")
+        );
+    }
+
+    #[test]
+    fn test_extract_artifacts_missing_file() {
+        let artifacts = extract_artifacts(Path::new("/tmp/nonexistent-atc-test.jsonl"));
+        assert!(artifacts.pr_urls.is_empty());
+        assert!(artifacts.result.is_none());
+    }
+
+    #[test]
+    fn test_format_event_text() {
+        let lines = format_event(&StreamEvent::AssistantText("Hello\nWorld".to_string()));
+        assert_eq!(lines, vec![">>> Hello", ">>> World"]);
+    }
+
+    #[test]
+    fn test_format_event_tool_use() {
+        let lines = format_event(&StreamEvent::ToolUse {
+            name: "Bash".to_string(),
+            input: "ls -la".to_string(),
+        });
+        assert_eq!(lines, vec!["  [tool] Bash: ls -la"]);
+    }
+
+    #[test]
+    fn test_format_event_result() {
+        let lines = format_event(&StreamEvent::Result(ResultEvent {
+            subtype: "success".to_string(),
+            total_cost_usd: Some(1.23),
+            num_turns: Some(10),
+            duration_ms: Some(60_000),
+        }));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("RESULT: success"));
+    }
+
+    #[test]
+    fn test_format_event_skip() {
+        let lines = format_event(&StreamEvent::Skip);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
     fn test_result_with_missing_optional_fields() {
         let line = r#"{"type":"result","subtype":"success"}"#;
         let result = parse_result_event(line).unwrap();
@@ -318,5 +504,57 @@ mod tests {
         assert_eq!(result.total_cost_usd, None);
         assert_eq!(result.num_turns, None);
         assert_eq!(result.duration_ms, None);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_plain() {
+        let mut urls = Vec::new();
+        extract_pr_urls(
+            "See https://github.com/org/repo/pull/42 for details",
+            &mut urls,
+        );
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_markdown_link() {
+        let mut urls = Vec::new();
+        extract_pr_urls("[PR](https://github.com/org/repo/pull/42)", &mut urls);
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_angle_brackets() {
+        let mut urls = Vec::new();
+        extract_pr_urls("<https://github.com/org/repo/pull/42>", &mut urls);
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_deduplicates() {
+        let mut urls = Vec::new();
+        extract_pr_urls(
+            "https://github.com/org/repo/pull/42 and https://github.com/org/repo/pull/42",
+            &mut urls,
+        );
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_artifacts_strips_trailing_punctuation_from_pr_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        // PR URL followed by period and comma in prose
+        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Created https://github.com/org/repo/pull/42. Also see https://github.com/org/repo/pull/43,"}]}}
+"#;
+        std::fs::write(&path, content).unwrap();
+        let artifacts = extract_artifacts(&path);
+        assert_eq!(
+            artifacts.pr_urls,
+            vec![
+                "https://github.com/org/repo/pull/42",
+                "https://github.com/org/repo/pull/43",
+            ]
+        );
     }
 }

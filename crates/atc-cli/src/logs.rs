@@ -7,23 +7,29 @@ use atc_core::stream_json::{parse_stream_events, StreamEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Resolve the log file path from a slug-or-session argument.
+/// Resolve the log file path from an id-or-session argument.
 ///
 /// Lookup priority:
-/// 1. Try registry.get(arg) by slug (PRIMARY KEY)
-/// 2. If not found: scan all records for record.session == arg
-/// 3. If still not found: attempt <log_dir>/<arg>.jsonl as path fallback
+/// 1. Try registry.get(arg) by ID (PRIMARY KEY)
+/// 2. Try registry.find_latest_for_task(arg) by task slug
+/// 3. If not found: scan all records for record.session == arg
+/// 4. If still not found: attempt <log_dir>/<arg>.jsonl as path fallback
 async fn resolve_log_path(
     registry: &dyn Registry,
     config: &AtcConfig,
     arg: &str,
 ) -> Result<PathBuf> {
-    // 1. Try by slug
+    // 1. Try by ID
     if let Some(record) = registry.get(arg).await? {
         return Ok(record.log_file);
     }
 
-    // 2. Scan for session match
+    // 2. Try by task slug
+    if let Some(record) = registry.find_latest_for_task(arg).await? {
+        return Ok(record.log_file);
+    }
+
+    // 3. Scan for session match
     let all_records = registry.list(StatusFilter::All).await?;
     for record in &all_records {
         if record.session == arg {
