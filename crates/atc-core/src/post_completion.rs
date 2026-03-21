@@ -68,7 +68,7 @@ pub async fn run_post_completion(
         && artifacts
             .result
             .as_ref()
-            .map_or(false, |r| r.subtype == "success")
+            .is_some_and(|r| r.subtype == "success")
     {
         Status::Done
     } else {
@@ -453,7 +453,7 @@ mod tests {
             && artifacts
                 .result
                 .as_ref()
-                .map_or(false, |r| r.subtype == "success")
+                .is_some_and(|r| r.subtype == "success")
         {
             Status::Done
         } else {
@@ -478,7 +478,7 @@ mod tests {
             && artifacts
                 .result
                 .as_ref()
-                .map_or(false, |r| r.subtype == "success")
+                .is_some_and(|r| r.subtype == "success")
         {
             Status::Done
         } else {
@@ -503,7 +503,7 @@ mod tests {
             && artifacts
                 .result
                 .as_ref()
-                .map_or(false, |r| r.subtype == "success")
+                .is_some_and(|r| r.subtype == "success")
         {
             Status::Done
         } else {
