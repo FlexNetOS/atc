@@ -375,18 +375,30 @@ async fn check_worktree_collision(
     Ok(())
 }
 
-/// Ensure a worktree exists for the given branch. Reuses existing worktrees.
-#[tracing::instrument(skip(meta_workspace_root, kb_root, registry))]
-async fn ensure_worktree(
-    worktree_base: &Path,
-    kb_basename: &str,
-    repo: Option<&str>,
-    branch: &str,
-    meta_workspace_root: &Path,
-    kb_root: &Path,
-    registry: &dyn Registry,
+/// Parameters for worktree creation/reuse.
+struct WorktreeOpts<'a> {
+    worktree_base: &'a Path,
+    kb_basename: &'a str,
+    repo: Option<&'a str>,
+    branch: &'a str,
+    meta_workspace_root: &'a Path,
+    kb_root: &'a Path,
     force: bool,
+}
+
+/// Ensure a worktree exists for the given branch. Reuses existing worktrees.
+#[tracing::instrument(skip(opts, registry), fields(branch = opts.branch))]
+async fn ensure_worktree(
+    opts: &WorktreeOpts<'_>,
+    registry: &dyn Registry,
 ) -> Result<PathBuf> {
+    let worktree_base = opts.worktree_base;
+    let kb_basename = opts.kb_basename;
+    let repo = opts.repo;
+    let branch = opts.branch;
+    let meta_workspace_root = opts.meta_workspace_root;
+    let kb_root = opts.kb_root;
+    let force = opts.force;
     // Compute expected worktree path.
     // For meta repos: <worktree_base>/<kb_basename>/<repo_alias>
     // For plain git:  <worktree_base>/<kb_basename>/<branch>
@@ -649,18 +661,16 @@ pub async fn dispatch(
         .to_string_lossy()
         .into_owned();
 
-    let worktree_path = match ensure_worktree(
-        &worktree_base,
-        &kb_basename,
-        repo.as_deref(),
-        &branch,
-        &meta_workspace_root,
+    let wt_opts = WorktreeOpts {
+        worktree_base: &worktree_base,
+        kb_basename: &kb_basename,
+        repo: repo.as_deref(),
+        branch: &branch,
+        meta_workspace_root: &meta_workspace_root,
         kb_root,
-        registry,
-        opts.force,
-    )
-    .await
-    {
+        force: opts.force,
+    };
+    let worktree_path = match ensure_worktree(&wt_opts, registry).await {
         Ok(path) => path,
         Err(e) => {
             unassign_task(slug, kb_root).await;
