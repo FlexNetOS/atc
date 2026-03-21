@@ -103,6 +103,9 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
     let mut done = 0u32;
     let mut failed = 0u32;
     let mut needs_human = 0u32;
+    let mut needs_review = 0u32;
+    let mut stopped = 0u32;
+    let mut retrying = 0u32;
     let mut total_cost = 0.0f64;
 
     for r in records {
@@ -111,15 +114,44 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
             Status::Done => done += 1,
             Status::Failed => failed += 1,
             Status::NeedsHuman => needs_human += 1,
-            Status::NeedsReview | Status::Stopped | Status::Retrying => {}
+            Status::NeedsReview => needs_review += 1,
+            Status::Stopped => stopped += 1,
+            Status::Retrying => retrying += 1,
         }
         if let Some(c) = r.cost_usd {
             total_cost += c;
         }
     }
 
+    let mut parts = Vec::new();
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if done > 0 {
+        parts.push(format!("{done} done"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    if needs_human > 0 {
+        parts.push(format!("{needs_human} needs-human"));
+    }
+    if needs_review > 0 {
+        parts.push(format!("{needs_review} needs-review"));
+    }
+    if stopped > 0 {
+        parts.push(format!("{stopped} stopped"));
+    }
+    if retrying > 0 {
+        parts.push(format!("{retrying} retrying"));
+    }
+    if parts.is_empty() {
+        parts.push("0 records".to_string());
+    }
+
     format!(
-        "{running} running, {done} done, {failed} failed, {needs_human} needs-human (of {} total, ${:.2})",
+        "{} (of {} total, ${:.2})",
+        parts.join(", "),
         records.len(),
         total_cost,
     )
@@ -233,5 +265,30 @@ mod tests {
         assert!(summary.contains("1 needs-human"));
         assert!(summary.contains("of 4 total"));
         assert!(summary.contains("$6.00"));
+    }
+
+    #[test]
+    fn test_build_summary_includes_all_statuses() {
+        let records = vec![
+            sample_record("id-1", Status::Running),
+            sample_record("id-2", Status::NeedsReview),
+            sample_record("id-3", Status::Stopped),
+            sample_record("id-4", Status::Retrying),
+        ];
+        let summary = build_summary(&records);
+        assert!(summary.contains("1 running"));
+        assert!(summary.contains("1 needs-review"));
+        assert!(summary.contains("1 stopped"));
+        assert!(summary.contains("1 retrying"));
+        assert!(summary.contains("of 4 total"));
+    }
+
+    #[test]
+    fn test_build_summary_omits_zero_counts() {
+        let records = vec![sample_record("id-1", Status::Done)];
+        let summary = build_summary(&records);
+        assert!(summary.contains("1 done"));
+        assert!(!summary.contains("running"));
+        assert!(!summary.contains("failed"));
     }
 }

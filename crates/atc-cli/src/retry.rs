@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use crate::subprocess::run_cmd_with_timeout;
 
 /// Timeout for non-fatal subprocess calls (tmux, git-kb).
-const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolve a dispatch record by ID or task slug.
 async fn resolve_record(

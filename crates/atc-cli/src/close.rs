@@ -54,13 +54,22 @@ pub async fn run_close(
     // still have a live tmux session if the agent process crashed but tmux
     // survived, or a NeedsHuman record had its status set externally.
     if record.status != Status::Done {
-        let _ = run_cmd_with_timeout(
+        match run_cmd_with_timeout(
             tokio::process::Command::new("tmux")
                 .args(["kill-session", "-t", &record.session])
                 .stderr(std::process::Stdio::null()),
             CMD_TIMEOUT,
         )
-        .await;
+        .await
+        {
+            Ok(Some(s)) if !s.success() => {
+                tracing::debug!(id, session = %record.session, "tmux kill-session exited non-zero (may already be gone)");
+            }
+            Err(e) => {
+                tracing::debug!(id, session = %record.session, error = %e, "tmux kill-session failed");
+            }
+            _ => {}
+        }
     }
 
     // 5. Update status to Done

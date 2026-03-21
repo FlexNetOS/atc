@@ -178,7 +178,9 @@ impl ClaudeExecutor {
 
         // Wait for all stream tasks and the child process
         for t in tasks {
-            let _ = t.await;
+            if let Err(e) = t.await {
+                tracing::warn!(slug = %opts.slug, error = %e, "log stream task failed");
+            }
         }
         let status = child.wait().await?;
 
