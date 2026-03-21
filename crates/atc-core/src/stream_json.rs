@@ -215,14 +215,21 @@ fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
     }
 }
 
-/// Extract commit SHAs (7-40 hex chars) from text.
-/// Only extracts SHAs that appear as standalone tokens (not embedded in longer hex strings).
+/// Extract commit SHAs from text.
+/// Full 40-char SHAs match unconditionally; shorter SHAs (7-39 chars) require
+/// a preceding git-context word (commit, committed, HEAD, merge, etc.) to
+/// reduce false positives from arbitrary hex tokens.
 fn extract_commit_shas(text: &str, commits: &mut Vec<String>) {
     use regex::Regex;
     use std::sync::LazyLock;
-    static SHA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").unwrap());
+    static SHA_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i:commit(?:ted)?|HEAD|merged?|cherry-pick(?:ed)?)\s+([0-9a-f]{7,40})\b|\b([0-9a-f]{40})\b",
+        )
+        .unwrap()
+    });
     for cap in SHA_RE.captures_iter(text) {
-        let sha = cap[1].to_string();
+        let sha = cap.get(1).or(cap.get(2)).unwrap().as_str().to_string();
         if !commits.contains(&sha) {
             commits.push(sha);
         }
@@ -588,8 +595,15 @@ mod tests {
     #[test]
     fn test_extract_commit_shas_deduplicates() {
         let mut commits = Vec::new();
-        extract_commit_shas("abc1234 and abc1234 again", &mut commits);
+        extract_commit_shas("commit abc1234 and commit abc1234 again", &mut commits);
         assert_eq!(commits, vec!["abc1234"]);
+    }
+
+    #[test]
+    fn test_extract_commit_shas_rejects_bare_short_hex() {
+        let mut commits = Vec::new();
+        extract_commit_shas("error code deadbee and id 550e8400", &mut commits);
+        assert!(commits.is_empty(), "bare short hex tokens should not match");
     }
 
     #[test]
