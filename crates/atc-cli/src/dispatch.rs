@@ -6,6 +6,7 @@ use atc_core::types::{DispatchOpts, DispatchOutcome, DispatchRecord, HealthCheck
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info, warn};
 
 /// Derive branch name from slug: replace `/` with `--`.
@@ -18,25 +19,29 @@ pub fn derive_branch(slug: &str) -> String {
     slug.replace('/', "--")
 }
 
+/// Process-local counter to guarantee unique dispatch IDs even when two
+/// calls occur within the same millisecond (e.g. scripted/CI environments).
+static DISPATCH_SEQ: AtomicU32 = AtomicU32::new(0);
+
 /// Build dispatch ID: `<branch>@<mode>@<unix-ms>-<rand>`.
 ///
-/// The 4-hex-digit random suffix prevents collisions when two dispatches
-/// are launched within the same millisecond (e.g. scripted/CI environments).
+/// The 4-hex-digit suffix mixes a monotonic counter with the PID and
+/// sub-millisecond time, guaranteeing uniqueness within a process and
+/// making cross-process collisions effectively impossible.
 pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
     let ts = Utc::now().timestamp_millis();
-    // Use system nanos XORed with PID for a lightweight random suffix
-    // without adding a rand crate dependency.
+    let seq = DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    let rand_suffix = nanos ^ (std::process::id() as u32);
+    let suffix = nanos ^ std::process::id() ^ seq;
     format!(
         "{}@{}@{}-{:04x}",
         branch,
         mode.as_str(),
         ts,
-        rand_suffix & 0xffff
+        suffix & 0xffff
     )
 }
 
@@ -107,6 +112,12 @@ async fn write_envrc(worktree_path: &Path, env_overrides: &HashMap<String, Strin
     }
     let mut content = String::new();
     for (k, v) in env_overrides {
+        // Validate key is a safe shell identifier (letters, digits, underscore; not starting with digit)
+        if !k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            anyhow::bail!("invalid env key: {:?}", k);
+        }
         // Single-quote values with interior single-quote escaping to prevent
         // shell injection via $(), backticks, or double-quote expansion.
         let escaped = v.replace('\'', "'\\''");
@@ -325,6 +336,37 @@ async fn unassign_task(slug: &str, kb_root: &Path) {
     }
 }
 
+/// Check running dispatches on a worktree path: mark stale records as Failed,
+/// bail on live sessions unless `force` is set.
+///
+/// Checks each record exactly once to avoid TOCTOU races from calling
+/// `tmux_session_alive` twice on the same session.
+async fn check_worktree_collision(
+    running: &[DispatchRecord],
+    worktree_path: &Path,
+    registry: &dyn Registry,
+    force: bool,
+) -> Result<()> {
+    for r in running {
+        let alive = tmux_session_alive(&r.session).await;
+        if alive && !force {
+            anyhow::bail!(
+                "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
+                worktree_path.display(),
+                r.id,
+                r.session,
+            );
+        }
+        if !alive {
+            info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
+            if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
+                warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Ensure a worktree exists for the given branch. Reuses existing worktrees.
 #[tracing::instrument(skip(meta_workspace_root, kb_root, registry))]
 async fn ensure_worktree(
@@ -349,34 +391,7 @@ async fn ensure_worktree(
 
     // Collision detection: check if another dispatch is running on this worktree
     let running = registry.find_running_on_worktree(&worktree_path).await?;
-
-    if !running.is_empty() {
-        // Always mark stale records as Failed, regardless of --force.
-        // This prevents phantom Running records that the health-check loop
-        // would poll indefinitely.
-        for r in &running {
-            if !tmux_session_alive(&r.session).await {
-                info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
-                if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                    warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
-                }
-            }
-        }
-
-        // Only block on live sessions when not forcing
-        if !force {
-            for r in &running {
-                if tmux_session_alive(&r.session).await {
-                    anyhow::bail!(
-                        "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
-                        worktree_path.display(),
-                        r.id,
-                        r.session,
-                    );
-                }
-            }
-        }
-    }
+    check_worktree_collision(&running, &worktree_path, registry, force).await?;
 
     // Check if worktree already exists for this branch.
     // In meta workspaces, the meta root may not itself be a git checkout,
@@ -415,27 +430,13 @@ async fn ensure_worktree(
                         if reused_path != worktree_path {
                             let reused_running =
                                 registry.find_running_on_worktree(&reused_path).await?;
-                            if !force {
-                                for r in &reused_running {
-                                    if tmux_session_alive(&r.session).await {
-                                        anyhow::bail!(
-                                            "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
-                                            reused_path.display(),
-                                            r.id,
-                                            r.session,
-                                        );
-                                    }
-                                }
-                            }
-                            // Mark stale records on the reused path
-                            for r in &reused_running {
-                                if !tmux_session_alive(&r.session).await {
-                                    info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
-                                    if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                                        warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
-                                    }
-                                }
-                            }
+                            check_worktree_collision(
+                                &reused_running,
+                                &reused_path,
+                                registry,
+                                force,
+                            )
+                            .await?;
                         }
                         info!(branch, path = %existing, "reusing existing worktree");
                         // Fetch latest from origin
