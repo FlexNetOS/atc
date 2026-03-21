@@ -87,6 +87,14 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) -> any
 /// - It starts with a known base (`/tmp/worktrees/`), OR
 /// - It contains `/.worktrees/` somewhere in the path
 pub fn is_safe_worktree_path(worktree_path: &Path, worktree_base: &Path) -> bool {
+    // Reject any path containing ".." components to prevent traversal attacks
+    if worktree_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+
     let path_str = worktree_path.to_string_lossy();
 
     // Under configured worktree_base
@@ -160,20 +168,26 @@ mod tests {
     }
 
     #[test]
-    fn test_unsafe_path_traversal_not_under_base() {
+    fn test_unsafe_path_traversal_under_known_base() {
         let base = PathBuf::from("/home/user/worktrees");
         let path = PathBuf::from("/tmp/worktrees/../../../etc/passwd");
-        // Not under base, and the KNOWN_BASES string check catches the /tmp/worktrees prefix
-        // but the OS would resolve this outside /tmp/worktrees. This documents that
-        // Path::starts_with is component-based and matches the literal prefix.
-        // The KNOWN_BASES check uses string prefix matching.
-        assert!(is_safe_worktree_path(&path, &base));
+        // Even though the string starts with /tmp/worktrees/, the ".." components
+        // cause early rejection to prevent traversal attacks.
+        assert!(!is_safe_worktree_path(&path, &base));
     }
 
     #[test]
     fn test_unsafe_path_traversal_outside_all_bases() {
         let base = PathBuf::from("/home/user/worktrees");
         let path = PathBuf::from("/opt/../../../etc/passwd");
+        assert!(!is_safe_worktree_path(&path, &base));
+    }
+
+    #[test]
+    fn test_unsafe_dot_worktrees_with_traversal() {
+        let base = PathBuf::from("/some/base");
+        let path = PathBuf::from("/home/project/.worktrees/../../important-dir");
+        // ".." components are rejected even when .worktrees is present
         assert!(!is_safe_worktree_path(&path, &base));
     }
 
