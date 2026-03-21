@@ -16,15 +16,17 @@ path = "src/main.rs"
 
 [dependencies]
 atc-core = { path = "../atc-core" }
+atty = "0.2"
 chrono.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 comfy-table = "7"
 notify = "7"
+serde.workspace = true
 terminal_size = "0.4"
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 serde_json.workspace = true
 
 [dev-dependencies]

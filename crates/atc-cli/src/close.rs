@@ -277,6 +277,10 @@ mod tests {
             anyhow::bail!("no dispatch record found for id: {id}")
         }
 
+        async fn set_artifacts(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn increment_retries(
             &self,
             id: &str,

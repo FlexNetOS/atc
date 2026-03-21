@@ -287,8 +287,17 @@ impl ClaudeExecutor {
 
         bash_parts.push(claude_cmd);
 
-        // Cleanup temp files
+        // Capture exit code for post-completion
         bash_parts.push("EXIT_CODE=$?".to_string());
+
+        // Run post-completion pipeline (fire and forget — errors logged but don't fail the session)
+        bash_parts.push(format!(
+            "atc post-complete --id '{}' --exit-code $EXIT_CODE --log '{}' 2>/dev/null || true",
+            shell_escape(&opts.session_name)?,
+            shell_escape(&log_file_str)?,
+        ));
+
+        // Cleanup temp files
         bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)?));
         bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)?));
         if let Some(ref sp) = sandbox_path {

@@ -279,6 +279,9 @@ mod tests {
         async fn set_pr_url(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
+        async fn set_artifacts(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn increment_retries(
             &self,
             id: &str,

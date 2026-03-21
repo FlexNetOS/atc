@@ -18,6 +18,10 @@ pub struct AtcConfig {
     pub batch: BatchConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    #[serde(default)]
+    pub notifications: Option<NotificationsConfig>,
+    #[serde(default)]
+    pub watch: WatchConfig,
     /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
@@ -331,6 +335,47 @@ pub struct ModeConfig {
     pub max_budget_usd: Option<f64>,
     /// Per-mode turns override. Takes precedence over global dispatch.max_turns.
     pub max_turns: Option<u32>,
+}
+
+/// `[notifications]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NotificationsConfig {
+    /// Enable macOS notifications. Default: true.
+    #[serde(default = "default_true")]
+    pub macos: bool,
+    /// Webhook URL for POST notifications. Empty = disabled.
+    pub webhook_url: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `[watch]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WatchConfig {
+    /// Tmux session check interval in seconds. Default: 5.
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Emit CostThreshold event at this USD level. Default: 10.0.
+    #[serde(default = "default_cost_threshold")]
+    pub cost_threshold: f64,
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+fn default_cost_threshold() -> f64 {
+    10.0
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_poll_interval_secs(),
+            cost_threshold: default_cost_threshold(),
+        }
+    }
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
