@@ -18,16 +18,31 @@ pub fn derive_branch(slug: &str) -> String {
     slug.replace('/', "--")
 }
 
-/// Build dispatch ID: `<branch>@<mode>@<unix-ms>`.
+/// Build dispatch ID: `<branch>@<mode>@<unix-ms>-<rand>`.
+///
+/// The 4-hex-digit random suffix prevents collisions when two dispatches
+/// are launched within the same millisecond (e.g. scripted/CI environments).
 pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
     let ts = Utc::now().timestamp_millis();
-    format!("{}@{}@{}", branch, mode.as_str(), ts)
+    // Use system nanos XORed with PID for a lightweight random suffix
+    // without adding a rand crate dependency.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let rand_suffix = nanos ^ (std::process::id() as u32);
+    format!(
+        "{}@{}@{}-{:04x}",
+        branch,
+        mode.as_str(),
+        ts,
+        rand_suffix & 0xffff
+    )
 }
 
-/// Build session name (same as dispatch ID for simplicity).
+/// Build session name (same format as dispatch ID for simplicity).
 pub fn build_session_name(slug: &str, mode: &Mode) -> String {
-    let ts = Utc::now().timestamp_millis();
-    format!("{}@{}@{}", derive_branch(slug), mode.as_str(), ts)
+    build_dispatch_id(&derive_branch(slug), mode)
 }
 
 /// Validate a branch name via `git check-ref-format`.
@@ -393,6 +408,35 @@ async fn ensure_worktree(
             } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
                 if b == branch {
                     if let Some(ref existing) = current_path {
+                        let reused_path = PathBuf::from(existing);
+                        // Re-check collision against the actual on-disk path, which
+                        // may differ from the computed worktree_path (e.g. if
+                        // worktree_base changed between dispatches).
+                        if reused_path != worktree_path {
+                            let reused_running =
+                                registry.find_running_on_worktree(&reused_path).await?;
+                            if !force {
+                                for r in &reused_running {
+                                    if tmux_session_alive(&r.session).await {
+                                        anyhow::bail!(
+                                            "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
+                                            reused_path.display(),
+                                            r.id,
+                                            r.session,
+                                        );
+                                    }
+                                }
+                            }
+                            // Mark stale records on the reused path
+                            for r in &reused_running {
+                                if !tmux_session_alive(&r.session).await {
+                                    info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
+                                    if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
+                                        warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+                                    }
+                                }
+                            }
+                        }
                         info!(branch, path = %existing, "reusing existing worktree");
                         // Fetch latest from origin
                         let _ = tokio::process::Command::new("git")
@@ -401,7 +445,7 @@ async fn ensure_worktree(
                             .stderr(std::process::Stdio::null())
                             .status()
                             .await;
-                        return Ok(PathBuf::from(existing));
+                        return Ok(reused_path);
                     }
                 }
             } else if line.is_empty() {
@@ -555,21 +599,22 @@ pub async fn dispatch(
 
     // Dry-run: print config and exit
     if opts.dry_run {
+        let kb_basename = meta_workspace_root
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let dry_run_worktree = match repo.as_deref() {
+            Some(r) => worktree_base.join(&kb_basename).join(r),
+            None => worktree_base.join(&kb_basename).join(&branch),
+        };
         println!("=== DRY RUN ===");
         println!("Task:        {}", slug);
         println!("Mode:        {}", mode.as_str());
         println!("Branch:      {}", branch);
         println!("ID:          {}", dispatch_id);
         println!("Repo:        {}", repo.as_deref().unwrap_or("(plain git)"));
-        println!(
-            "Worktree:    {}/{}{}",
-            worktree_base.display(),
-            meta_workspace_root
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
-            repo.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
-        );
+        println!("Worktree:    {}", dry_run_worktree.display());
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!(
@@ -798,8 +843,24 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], "tasks--gitkb-42");
         assert_eq!(parts[1], "implement");
-        let ts: i64 = parts[2].parse().expect("timestamp should be a number");
+        // Third part is "timestamp-hexrand"
+        let ts_rand: Vec<&str> = parts[2].split('-').collect();
+        assert_eq!(ts_rand.len(), 2, "expected ts-rand format, got: {}", parts[2]);
+        let ts: i64 = ts_rand[0].parse().expect("timestamp should be a number");
         assert!(ts > 0);
+        // Hex suffix should be 4 chars
+        assert_eq!(ts_rand[1].len(), 4);
+        u16::from_str_radix(ts_rand[1], 16).expect("suffix should be valid hex");
+    }
+
+    #[test]
+    fn test_build_dispatch_id_uniqueness() {
+        // Two IDs built in quick succession should differ (random suffix)
+        let id1 = build_dispatch_id("tasks--foo", &Mode::Implement);
+        let id2 = build_dispatch_id("tasks--foo", &Mode::Implement);
+        // They *may* share a timestamp but the full ID should almost certainly differ
+        // (same PID but nanos will have advanced)
+        assert_ne!(id1, id2, "consecutive dispatch IDs should differ");
     }
 
     #[test]
@@ -809,7 +870,10 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], "tasks--gitkb-42");
         assert_eq!(parts[1], "implement");
-        let ts: i64 = parts[2].parse().expect("timestamp should be a number");
+        // Third part is "timestamp-hexrand"
+        let ts_rand: Vec<&str> = parts[2].split('-').collect();
+        assert_eq!(ts_rand.len(), 2);
+        let ts: i64 = ts_rand[0].parse().expect("timestamp should be a number");
         assert!(ts > 0);
     }
 
