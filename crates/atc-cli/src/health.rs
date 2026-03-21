@@ -112,8 +112,8 @@ pub async fn run_health(
         .await?;
     display_records.extend(needs_human);
 
-    // If --all, also include done and failed (excluding already-collected IDs
-    // to avoid duplicates when a record transitioned to terminal status this run)
+    // If --all, also include terminal and non-active records (excluding
+    // already-collected IDs to avoid duplicates when a record transitioned this run)
     if all {
         let existing_ids: std::collections::HashSet<String> =
             display_records.iter().map(|r| r.id.clone()).collect();
