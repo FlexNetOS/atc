@@ -49,10 +49,21 @@ pub async fn run_close(
         record.pr_url.clone()
     };
 
-    // 4. Update status to Done
+    // 4. Kill running tmux session (non-fatal)
+    if record.status == Status::Running {
+        let _ = run_cmd_with_timeout(
+            tokio::process::Command::new("tmux")
+                .args(["kill-session", "-t", &record.session])
+                .stderr(std::process::Stdio::null()),
+            CMD_TIMEOUT,
+        )
+        .await;
+    }
+
+    // 5. Update status to Done
     registry.update_status(id, Status::Done).await?;
 
-    // 5. git-kb set status=completed (non-fatal)
+    // 6. git-kb set status=completed (non-fatal)
     let kb_root = config
         .dispatch
         .resolved_meta_workspace_root(config.config_dir.as_deref())
@@ -90,7 +101,7 @@ pub async fn run_close(
         );
     }
 
-    // 6. Remove worktree
+    // 7. Remove worktree
     let worktree_path = &record.worktree_path;
 
     if worktree_path.exists() {
@@ -162,7 +173,7 @@ pub async fn run_close(
         );
     }
 
-    // 7. Print result
+    // 8. Print result
     let pr_display = effective_pr_url.as_deref().unwrap_or("none");
     let slug_display = record.task_slug.as_deref().unwrap_or(id);
     println!("[{slug_display}] closed | pr={pr_display}");

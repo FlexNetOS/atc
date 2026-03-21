@@ -118,7 +118,12 @@ pub async fn run_health(
         let existing_ids: std::collections::HashSet<String> =
             display_records.iter().map(|r| r.id.clone()).collect();
         let terminal = registry
-            .list(StatusFilter::any(vec![Status::Done, Status::Failed]))
+            .list(StatusFilter::any(vec![
+                Status::Done,
+                Status::Failed,
+                Status::Stopped,
+                Status::Retrying,
+            ]))
             .await?;
         display_records.extend(
             terminal

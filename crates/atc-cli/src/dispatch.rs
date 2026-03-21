@@ -69,10 +69,14 @@ async fn validate_branch_name(branch: &str) -> Result<()> {
 /// Resolve GH_TOKEN via env vars → `gh auth token` fallback.
 async fn resolve_gh_token() -> Result<String> {
     if let Ok(t) = std::env::var("GH_TOKEN") {
-        return Ok(t);
+        if !t.trim().is_empty() {
+            return Ok(t);
+        }
     }
     if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        return Ok(t);
+        if !t.trim().is_empty() {
+            return Ok(t);
+        }
     }
     // fallback: gh auth token
     let out = tokio::process::Command::new("gh")
@@ -85,7 +89,11 @@ async fn resolve_gh_token() -> Result<String> {
             out.status.code()
         );
     }
-    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+    let token = String::from_utf8(out.stdout)?.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!("could not resolve GH_TOKEN: gh auth token returned an empty token");
+    }
+    Ok(token)
 }
 
 /// Compute AGENT_ALLOWED_PATHS for agent sandbox.
