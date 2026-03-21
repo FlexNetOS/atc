@@ -150,10 +150,7 @@ pub async fn run_close(
                     }
                 }
                 None => {
-                    warn!(
-                        id,
-                        "could not derive repo_root; skipping worktree removal"
-                    );
+                    warn!(id, "could not derive repo_root; skipping worktree removal");
                 }
             }
         }
@@ -302,10 +299,7 @@ mod tests {
         async fn find_by_worktree(&self, _worktree_path: &Path) -> Result<Vec<DispatchRecord>> {
             Ok(vec![])
         }
-        async fn find_latest_for_task(
-            &self,
-            task_slug: &str,
-        ) -> Result<Option<DispatchRecord>> {
+        async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
             Ok(self
                 .records
                 .lock()

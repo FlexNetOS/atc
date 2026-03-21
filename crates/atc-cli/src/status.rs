@@ -83,7 +83,14 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
         };
 
         table.add_row(vec![
-            dispatched, status, task_display, mode, cost, turns, duration, worktree,
+            dispatched,
+            status,
+            task_display,
+            mode,
+            cost,
+            turns,
+            duration,
+            worktree,
         ]);
     }
 

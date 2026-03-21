@@ -185,12 +185,7 @@ impl HealthChecker {
 
             // Persist checks + status atomically in a single UPDATE
             self.registry
-                .update_health(
-                    &record.id,
-                    &record.checks,
-                    record.status,
-                    record.updated_at,
-                )
+                .update_health(&record.id, &record.checks, record.status, record.updated_at)
                 .await?;
 
             info!(

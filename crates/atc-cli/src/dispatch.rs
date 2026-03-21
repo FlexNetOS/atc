@@ -100,7 +100,10 @@ async fn write_envrc(worktree_path: &Path, env_overrides: &HashMap<String, Strin
 /// Write diagnostic `.diag` file alongside log.
 async fn write_diag_file(log_dir: &Path, dispatch_id: &str, gh_token_present: bool) {
     let diag_path = log_dir.join(format!("{}.diag", dispatch_id));
-    let mut content = format!("GH_TOKEN set: {}\n", if gh_token_present { "yes" } else { "no" });
+    let mut content = format!(
+        "GH_TOKEN set: {}\n",
+        if gh_token_present { "yes" } else { "no" }
+    );
 
     // gh auth status (best effort)
     if let Ok(output) = tokio::process::Command::new("gh")
@@ -160,7 +163,10 @@ async fn discover_repo(meta_root: &Path) -> Result<String> {
         // Check for .meta (alternate name)
         let meta_alt = meta_root.join(".meta");
         if !meta_alt.exists() {
-            anyhow::bail!("not a meta workspace: no .meta.yaml found at {}", meta_root.display());
+            anyhow::bail!(
+                "not a meta workspace: no .meta.yaml found at {}",
+                meta_root.display()
+            );
         }
     }
 
@@ -318,9 +324,7 @@ async fn ensure_worktree(
     };
 
     // Collision detection: check if another dispatch is running on this worktree
-    let running = registry
-        .find_running_on_worktree(&worktree_path)
-        .await?;
+    let running = registry.find_running_on_worktree(&worktree_path).await?;
 
     if !running.is_empty() && !force {
         // Check if any tmux sessions are actually alive
@@ -506,12 +510,7 @@ pub async fn dispatch(
     let mode_key = mode.as_str();
     let budget = opts
         .max_budget_override
-        .or_else(|| {
-            config
-                .modes
-                .get(mode_key)
-                .and_then(|m| m.max_budget_usd)
-        })
+        .or_else(|| config.modes.get(mode_key).and_then(|m| m.max_budget_usd))
         .unwrap_or(dispatch_cfg.max_budget_usd);
     let turns = opts
         .max_turns_override
@@ -534,12 +533,21 @@ pub async fn dispatch(
         println!("Branch:      {}", branch);
         println!("ID:          {}", dispatch_id);
         println!("Repo:        {}", repo.as_deref().unwrap_or("(plain git)"));
-        println!("Worktree:    {}/{}{}", worktree_base.display(),
-            meta_workspace_root.file_name().unwrap_or_default().to_string_lossy(),
-            repo.as_ref().map(|r| format!("/{r}")).unwrap_or_default());
+        println!(
+            "Worktree:    {}/{}{}",
+            worktree_base.display(),
+            meta_workspace_root
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            repo.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
+        );
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
-        println!("PR URL:      {}", opts.pr_url.as_deref().unwrap_or("(none)"));
+        println!(
+            "PR URL:      {}",
+            opts.pr_url.as_deref().unwrap_or("(none)")
+        );
         return Ok(DispatchOutcome {
             id: dispatch_id,
             session: session_name,
@@ -624,11 +632,7 @@ pub async fn dispatch(
     // "Agent starting" PR comment for review-fix/pr-comments modes
     if matches!(mode, Mode::ReviewFix | Mode::PrComments) {
         if let Some(ref url) = opts.pr_url {
-            let comment = format!(
-                "\u{1f916} Agent starting: {} on {}",
-                mode.as_str(),
-                branch
-            );
+            let comment = format!("\u{1f916} Agent starting: {} on {}", mode.as_str(), branch);
             post_pr_comment(url, &comment).await;
         }
     }
@@ -797,10 +801,7 @@ mod tests {
         assert!(result.contains("/tmp"));
         assert!(result.contains("/private/tmp"));
 
-        let result = compute_allowed_paths(
-            Path::new("/tmp/wt"),
-            &["/extra/path".to_string()],
-        );
+        let result = compute_allowed_paths(Path::new("/tmp/wt"), &["/extra/path".to_string()]);
         assert!(result.contains("/extra/path"));
     }
 

@@ -8,10 +8,7 @@ use std::sync::Arc;
 use crate::status::format_duration;
 
 /// Resolve a dispatch record by ID or task slug.
-async fn resolve_record(
-    registry: &dyn Registry,
-    arg: &str,
-) -> Result<DispatchRecord> {
+async fn resolve_record(registry: &dyn Registry, arg: &str) -> Result<DispatchRecord> {
     if let Some(record) = registry.get(arg).await? {
         return Ok(record);
     }

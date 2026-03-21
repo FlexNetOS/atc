@@ -471,12 +471,11 @@ impl Registry for SqliteRegistry {
     }
 
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>> {
-        let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC",
-        )
-        .bind(branch)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query("SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC")
+                .bind(branch)
+                .fetch_all(&self.pool)
+                .await?;
         rows.iter().map(Self::row_to_record).collect()
     }
 
@@ -491,12 +490,11 @@ impl Registry for SqliteRegistry {
     }
 
     async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>> {
-        let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC",
-        )
-        .bind(pr_url)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query("SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC")
+                .bind(pr_url)
+                .fetch_all(&self.pool)
+                .await?;
         rows.iter().map(Self::row_to_record).collect()
     }
 
@@ -609,10 +607,7 @@ mod tests {
         assert_eq!(all.len(), 3);
 
         // find_by_task_slug should return all 3
-        let by_slug = registry
-            .find_by_task_slug("tasks/gitkb-42")
-            .await
-            .unwrap();
+        let by_slug = registry.find_by_task_slug("tasks/gitkb-42").await.unwrap();
         assert_eq!(by_slug.len(), 3);
     }
 
@@ -641,18 +636,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_with_filter() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("id-1"))
-            .await
-            .unwrap();
-        registry
-            .insert(&sample_record("id-2"))
-            .await
-            .unwrap();
-        registry
-            .update_status("id-2", Status::Done)
-            .await
-            .unwrap();
+        registry.insert(&sample_record("id-1")).await.unwrap();
+        registry.insert(&sample_record("id-2")).await.unwrap();
+        registry.update_status("id-2", Status::Done).await.unwrap();
 
         let all = registry.list(StatusFilter::all()).await.unwrap();
         assert_eq!(all.len(), 2);
@@ -937,15 +923,9 @@ mod tests {
             registry.insert(r).await.unwrap();
         }
 
-        let results = registry
-            .find_by_task_slug("tasks/gitkb-42")
-            .await
-            .unwrap();
+        let results = registry.find_by_task_slug("tasks/gitkb-42").await.unwrap();
         assert_eq!(results.len(), 2);
-        let results = registry
-            .find_by_task_slug("tasks/gitkb-99")
-            .await
-            .unwrap();
+        let results = registry.find_by_task_slug("tasks/gitkb-99").await.unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -1127,10 +1107,7 @@ mod tests {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let id = "retry-test";
         registry.insert(&sample_record(id)).await.unwrap();
-        registry
-            .update_status(id, Status::Failed)
-            .await
-            .unwrap();
+        registry.update_status(id, Status::Failed).await.unwrap();
 
         let new_time = Utc::now();
         registry

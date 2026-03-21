@@ -123,31 +123,63 @@ mod tests {
             Ok(())
         }
         async fn get(&self, id: &str) -> Result<Option<DispatchRecord>> {
-            Ok(self.records.lock().unwrap().iter().find(|r| r.id == id).cloned())
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
         }
         async fn list(&self, _filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
             Ok(self.records.lock().unwrap().clone())
         }
-        async fn update_health(&self, _: &str, _: &HealthChecks, _: Status, _: chrono::DateTime<Utc>) -> Result<()> {
+        async fn update_health(
+            &self,
+            _: &str,
+            _: &HealthChecks,
+            _: Status,
+            _: chrono::DateTime<Utc>,
+        ) -> Result<()> {
             Ok(())
         }
         async fn set_pr_url(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
-        async fn increment_retries(&self, _: &str, _: &str, _: &Path, _: chrono::DateTime<Utc>) -> Result<()> {
+        async fn increment_retries(
+            &self,
+            _: &str,
+            _: &str,
+            _: &Path,
+            _: chrono::DateTime<Utc>,
+        ) -> Result<()> {
             Ok(())
         }
-        async fn find_by_branch(&self, _: &str) -> Result<Vec<DispatchRecord>> { Ok(vec![]) }
-        async fn find_by_task_slug(&self, _: &str) -> Result<Vec<DispatchRecord>> { Ok(vec![]) }
-        async fn find_by_pr_url(&self, _: &str) -> Result<Vec<DispatchRecord>> { Ok(vec![]) }
-        async fn find_by_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> { Ok(vec![]) }
+        async fn find_by_branch(&self, _: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_task_slug(&self, _: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_pr_url(&self, _: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
         async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
-            Ok(self.records.lock().unwrap().iter()
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
                 .filter(|r| r.task_slug.as_deref() == Some(task_slug))
                 .max_by_key(|r| r.dispatched_at)
                 .cloned())
         }
-        async fn find_running_on_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> { Ok(vec![]) }
+        async fn find_running_on_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
     }
 
     fn sample_record(id: &str, status: Status) -> DispatchRecord {
@@ -177,7 +209,10 @@ mod tests {
         let registry = MockRegistry::new(vec![]);
         let result = run_redirect(&registry, "nonexistent", "hello").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no dispatch record found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no dispatch record found"));
     }
 
     #[tokio::test]

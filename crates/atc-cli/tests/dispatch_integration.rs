@@ -481,10 +481,7 @@ async fn test_dispatch_multiple_dispatches_same_task() {
     assert_eq!(all.len(), 2, "both dispatch records should exist");
 
     // find_by_task_slug should return both
-    let by_task = registry
-        .find_by_task_slug("tasks/gitkb-dup")
-        .await
-        .unwrap();
+    let by_task = registry.find_by_task_slug("tasks/gitkb-dup").await.unwrap();
     assert_eq!(by_task.len(), 2);
 }
 
@@ -584,7 +581,10 @@ async fn test_dispatch_review_fix_requires_pr_url() {
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("requires a PR URL"), "expected PR URL error, got: {err}");
+    assert!(
+        err.contains("requires a PR URL"),
+        "expected PR URL error, got: {err}"
+    );
 }
 
 #[tokio::test]

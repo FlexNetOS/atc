@@ -241,9 +241,7 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
 /// Used by logs viewer (Phase 1C).
 pub fn format_event(event: &StreamEvent) -> Vec<String> {
     match event {
-        StreamEvent::AssistantText(text) => {
-            text.lines().map(|l| format!(">>> {l}")).collect()
-        }
+        StreamEvent::AssistantText(text) => text.lines().map(|l| format!(">>> {l}")).collect(),
         StreamEvent::ToolUse { name, input } => {
             let display_input = if input.chars().count() > 120 {
                 let truncated: String = input.chars().take(120).collect();
