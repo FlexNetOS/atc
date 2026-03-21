@@ -104,7 +104,10 @@ async fn kill_tmux_session(session: &str) {
     .await
     {
         Ok(Some(s)) if !s.success() => {
-            tracing::debug!(session, "tmux kill-session exited non-zero (may already be gone)");
+            tracing::debug!(
+                session,
+                "tmux kill-session exited non-zero (may already be gone)"
+            );
         }
         Ok(None) => {
             tracing::debug!(session, "tmux kill-session timed out");
@@ -201,9 +204,11 @@ mod tests {
             let records = self.records.lock().unwrap();
             Ok(match filter {
                 StatusFilter::All => records.clone(),
-                StatusFilter::One(status) => {
-                    records.iter().filter(|r| r.status == status).cloned().collect()
-                }
+                StatusFilter::One(status) => records
+                    .iter()
+                    .filter(|r| r.status == status)
+                    .cloned()
+                    .collect(),
                 StatusFilter::Any(ref statuses) => records
                     .iter()
                     .filter(|r| statuses.contains(&r.status))
