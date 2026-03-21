@@ -92,7 +92,10 @@ async fn write_envrc(worktree_path: &Path, env_overrides: &HashMap<String, Strin
     }
     let mut content = String::new();
     for (k, v) in env_overrides {
-        content.push_str(&format!("export {}=\"{}\"\n", k, v));
+        // Single-quote values with interior single-quote escaping to prevent
+        // shell injection via $(), backticks, or double-quote expansion.
+        let escaped = v.replace('\'', "'\\''");
+        content.push_str(&format!("export {}='{}'\n", k, escaped));
     }
     let envrc_path = worktree_path.join(".envrc");
     tokio::fs::write(&envrc_path, &content).await?;
