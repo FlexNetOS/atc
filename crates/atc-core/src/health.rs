@@ -165,7 +165,7 @@ impl HealthChecker {
         // stranding the record due to a transient failure.
         if Self::should_skip_transition(had_error, new_status) {
             warn!(
-                slug = %record.id,
+                id = %record.id,
                 proposed_status = %new_status,
                 "health check: skipping terminal transition due to transient signal error"
             );
@@ -189,13 +189,13 @@ impl HealthChecker {
                 .await?;
 
             info!(
-                slug = %record.id,
+                id = %record.id,
                 status = %record.status,
                 "health check: status transitioned"
             );
         } else {
             debug!(
-                slug = %record.id,
+                id = %record.id,
                 status = %record.status,
                 "health check: no change"
             );
@@ -221,20 +221,20 @@ impl HealthChecker {
             Ok(Ok(status)) => {
                 if status.success() {
                     // Session exists — agent still running
-                    debug!(slug = %record.id, "signal 1: tmux session exists, agent running");
+                    debug!(id = %record.id, "signal 1: tmux session exists, agent running");
                     SignalResult::False
                 } else {
                     // Session gone — agent finished
-                    debug!(slug = %record.id, "signal 1: tmux session gone, agent exited");
+                    debug!(id = %record.id, "signal 1: tmux session gone, agent exited");
                     SignalResult::True
                 }
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.id, error = %e, "signal 1: tmux command failed");
+                warn!(id = %record.id, error = %e, "signal 1: tmux command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(slug = %record.id, "signal 1: tmux command timed out");
+                warn!(id = %record.id, "signal 1: tmux command timed out");
                 SignalResult::Error
             }
         }
@@ -263,27 +263,27 @@ impl HealthChecker {
                 let code = status.code().unwrap_or(-1);
                 match code {
                     0 => {
-                        debug!(slug = %record.id, "signal 2: branch exists on remote");
+                        debug!(id = %record.id, "signal 2: branch exists on remote");
                         SignalResult::True
                     }
                     2 => {
                         // Exit code 2 = definitive "not found"
-                        debug!(slug = %record.id, "signal 2: branch not found on remote");
+                        debug!(id = %record.id, "signal 2: branch not found on remote");
                         SignalResult::False
                     }
                     other => {
                         // Unexpected exit code — could be auth/network error
-                        warn!(slug = %record.id, exit_code = other, "signal 2: git ls-remote unexpected exit code");
+                        warn!(id = %record.id, exit_code = other, "signal 2: git ls-remote unexpected exit code");
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.id, error = %e, "signal 2: git ls-remote failed");
+                warn!(id = %record.id, error = %e, "signal 2: git ls-remote failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(slug = %record.id, "signal 2: git ls-remote timed out");
+                warn!(id = %record.id, "signal 2: git ls-remote timed out");
                 SignalResult::Error
             }
         }
@@ -293,7 +293,7 @@ impl HealthChecker {
     async fn eval_signal_3(&self, record: &mut DispatchRecord) -> SignalResult {
         // If pr_url already known, skip the gh call
         if record.pr_url.is_some() {
-            debug!(slug = %record.id, "signal 3: pr_url already known, skipping gh call");
+            debug!(id = %record.id, "signal 3: pr_url already known, skipping gh call");
             return SignalResult::True;
         }
 
@@ -319,37 +319,37 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(slug = %record.id, "signal 3: gh pr list failed");
+                    warn!(id = %record.id, "signal 3: gh pr list failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 if trimmed.is_empty() || trimmed == "null" {
                     // gh succeeded but returned no results — definitively no PR
-                    debug!(slug = %record.id, "signal 3: no PR found");
+                    debug!(id = %record.id, "signal 3: no PR found");
                     return SignalResult::False;
                 }
                 // Parse JSON to extract url
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
                     if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
-                        info!(slug = %record.id, url = %url, "signal 3: PR discovered");
+                        info!(id = %record.id, url = %url, "signal 3: PR discovered");
                         // Store in registry
                         if let Err(e) = self.registry.set_pr_url(&record.id, url).await {
-                            warn!(slug = %record.id, error = %e, "signal 3: failed to store pr_url");
+                            warn!(id = %record.id, error = %e, "signal 3: failed to store pr_url");
                         }
                         record.pr_url = Some(url.to_string());
                         return SignalResult::True;
                     }
                 }
-                warn!(slug = %record.id, output = %trimmed, "signal 3: could not parse PR URL from gh output");
+                warn!(id = %record.id, output = %trimmed, "signal 3: could not parse PR URL from gh output");
                 SignalResult::Error
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.id, error = %e, "signal 3: gh pr list command failed");
+                warn!(id = %record.id, error = %e, "signal 3: gh pr list command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(slug = %record.id, "signal 3: gh pr list timed out");
+                warn!(id = %record.id, "signal 3: gh pr list timed out");
                 SignalResult::Error
             }
         }
@@ -389,32 +389,32 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(slug = %record.id, "signal 4: gh pr checks failed");
+                    warn!(id = %record.id, "signal 4: gh pr checks failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 match trimmed.parse::<u64>() {
                     Ok(0) => {
-                        debug!(slug = %record.id, "signal 4: all CI checks passed");
+                        debug!(id = %record.id, "signal 4: all CI checks passed");
                         SignalResult::True
                     }
                     Ok(n) => {
-                        debug!(slug = %record.id, failing = n, "signal 4: CI checks failing");
+                        debug!(id = %record.id, failing = n, "signal 4: CI checks failing");
                         SignalResult::False
                     }
                     Err(_) => {
-                        warn!(slug = %record.id, output = %trimmed, "signal 4: could not parse gh pr checks output");
+                        warn!(id = %record.id, output = %trimmed, "signal 4: could not parse gh pr checks output");
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.id, error = %e, "signal 4: gh pr checks command failed");
+                warn!(id = %record.id, error = %e, "signal 4: gh pr checks command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(slug = %record.id, "signal 4: gh pr checks timed out");
+                warn!(id = %record.id, "signal 4: gh pr checks timed out");
                 SignalResult::Error
             }
         }
@@ -446,14 +446,14 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(slug = %record.id, "signal 5: gh pr view failed");
+                    warn!(id = %record.id, "signal 5: gh pr view failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 match trimmed {
                     "APPROVED" => {
-                        debug!(slug = %record.id, "signal 5: reviews approved");
+                        debug!(id = %record.id, "signal 5: reviews approved");
                         SignalResult::True
                     }
                     "" | "null" => {
@@ -466,21 +466,21 @@ impl HealthChecker {
                         // If the repo does require reviews, this signal will flip to
                         // CHANGES_REQUESTED or REVIEW_REQUIRED once a reviewer acts,
                         // and the next health check cycle will pick up the change.
-                        debug!(slug = %record.id, "signal 5: no review policy or no reviews yet, treating as approved");
+                        debug!(id = %record.id, "signal 5: no review policy or no reviews yet, treating as approved");
                         SignalResult::True
                     }
                     other => {
-                        debug!(slug = %record.id, decision = %other, "signal 5: reviews not approved");
+                        debug!(id = %record.id, decision = %other, "signal 5: reviews not approved");
                         SignalResult::False
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.id, error = %e, "signal 5: gh pr view command failed");
+                warn!(id = %record.id, error = %e, "signal 5: gh pr view command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(slug = %record.id, "signal 5: gh pr view timed out");
+                warn!(id = %record.id, "signal 5: gh pr view timed out");
                 SignalResult::Error
             }
         }
@@ -501,7 +501,7 @@ impl HealthChecker {
         let (owner, repo, number) = match Self::parse_pr_url(pr_url) {
             Some(parts) => parts,
             None => {
-                warn!(slug = %record.id, url = %pr_url, "signal 6: could not parse PR URL");
+                warn!(id = %record.id, url = %pr_url, "signal 6: could not parse PR URL");
                 return SignalResult::Error;
             }
         };
@@ -531,7 +531,7 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(slug = %record.id, "signal 6: gh api graphql failed");
+                    warn!(id = %record.id, "signal 6: gh api graphql failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -540,7 +540,7 @@ impl HealthChecker {
                     Ok(json) => {
                         // Check for GraphQL-level errors
                         if json.get("errors").is_some() {
-                            warn!(slug = %record.id, "signal 6: GraphQL response contains errors");
+                            warn!(id = %record.id, "signal 6: GraphQL response contains errors");
                             return SignalResult::Error;
                         }
 
@@ -554,7 +554,7 @@ impl HealthChecker {
                             .and_then(|v| v.as_bool())
                         {
                             if has_next {
-                                warn!(slug = %record.id, "signal 6: >100 review threads, result truncated — treating as unresolved");
+                                warn!(id = %record.id, "signal 6: >100 review threads, result truncated — treating as unresolved");
                                 return SignalResult::False;
                             }
                         }
@@ -572,33 +572,33 @@ impl HealthChecker {
                                     })
                                     .count();
                                 if unresolved == 0 {
-                                    debug!(slug = %record.id, "signal 6: all threads resolved");
+                                    debug!(id = %record.id, "signal 6: all threads resolved");
                                     SignalResult::True
                                 } else {
-                                    debug!(slug = %record.id, unresolved = unresolved, "signal 6: unresolved threads remain");
+                                    debug!(id = %record.id, unresolved = unresolved, "signal 6: unresolved threads remain");
                                     SignalResult::False
                                 }
                             }
                             None => {
                                 // nodes is null or missing — could be a field-level
                                 // GraphQL error, treat as error rather than resolved
-                                warn!(slug = %record.id, "signal 6: reviewThreads nodes is null/missing");
+                                warn!(id = %record.id, "signal 6: reviewThreads nodes is null/missing");
                                 SignalResult::Error
                             }
                         }
                     }
                     Err(e) => {
-                        warn!(slug = %record.id, error = %e, "signal 6: could not parse GraphQL response");
+                        warn!(id = %record.id, error = %e, "signal 6: could not parse GraphQL response");
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(slug = %record.id, error = %e, "signal 6: gh api graphql command failed");
+                warn!(id = %record.id, error = %e, "signal 6: gh api graphql command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(slug = %record.id, "signal 6: gh api graphql timed out");
+                warn!(id = %record.id, "signal 6: gh api graphql timed out");
                 SignalResult::Error
             }
         }
