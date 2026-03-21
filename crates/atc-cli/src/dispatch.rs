@@ -191,61 +191,61 @@ async fn post_pr_comment(pr_url: &str, body: &str) {
     }
 }
 
-/// Discover the primary repo alias in a meta workspace.
-async fn discover_repo(meta_root: &Path) -> Result<String> {
-    // Check if .meta.yaml exists
-    let meta_yaml = meta_root.join(".meta.yaml");
-    if !meta_yaml.exists() {
-        // Check for .meta (alternate name)
-        let meta_alt = meta_root.join(".meta");
-        if !meta_alt.exists() {
-            anyhow::bail!(
-                "not a meta workspace: no .meta.yaml found at {}",
-                meta_root.display()
-            );
-        }
-    }
+/// Result of meta workspace discovery.
+struct MetaDiscovery {
+    /// Primary repo alias (e.g., "core")
+    repo: String,
+    /// Workspace root directory (where meta manages sub-repos)
+    workspace_root: PathBuf,
+}
 
+/// Discover meta workspace info using `meta project list --recursive --json`.
+/// Never inspects .meta.yaml — meta's CLI is the only interface to meta's internals.
+/// Returns None if `meta` is not in PATH or fails (i.e., not a meta workspace).
+async fn discover_meta(cwd: &Path) -> Option<MetaDiscovery> {
     let output = tokio::process::Command::new("meta")
         .args(["project", "list", "--recursive", "--json"])
-        .current_dir(meta_root)
+        .current_dir(cwd)
         .output()
-        .await;
+        .await
+        .ok()?;
 
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // Parse JSON output: object with project names as keys
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-                if let Some(obj) = json.as_object() {
-                    // Look for a project with "provides" key, or use first project
-                    for (name, value) in obj {
-                        if value.get("provides").is_some() {
-                            return Ok(name.clone());
-                        }
-                    }
-                    // Fall back to first project — note: BTreeMap iteration is alphabetical,
-                    // not insertion order from `meta project list`. Users with multi-repo
-                    // workspaces should configure `dispatch.repo` explicitly.
-                    if let Some(name) = obj.keys().next() {
-                        tracing::debug!("auto-discovered repo '{name}' (alphabetically first); set dispatch.repo to override");
-                        return Ok(name.clone());
-                    }
-                }
-            }
-            anyhow::bail!("meta project list returned no projects")
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let obj = json.as_object()?;
+
+    if obj.is_empty() {
+        return None;
+    }
+
+    // Determine workspace root from the "." project's path, or fall back to cwd
+    let workspace_root = obj
+        .get(".")
+        .and_then(|v| v.get("path"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    // Find primary repo: project with "provides" key, or first non-root project
+    let repo = obj
+        .iter()
+        .find(|(_, v)| v.get("provides").is_some())
+        .or_else(|| obj.iter().find(|(k, _)| k.as_str() != "."))
+        .map(|(name, _)| name.clone());
+
+    match repo {
+        Some(repo) => {
+            debug!(repo = %repo, root = %workspace_root.display(), "meta workspace discovered");
+            Some(MetaDiscovery {
+                repo,
+                workspace_root,
+            })
         }
-        Ok(out) => {
-            anyhow::bail!(
-                "meta project list failed (exit {:?}): {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Err(e) => {
-            // meta not available — fall back to plain git (no --repo needed)
-            anyhow::bail!("meta command not available: {e}");
-        }
+        None => None,
     }
 }
 
@@ -602,22 +602,23 @@ pub async fn dispatch(
     let dispatch_cfg = &config.dispatch;
 
     // Resolve config paths
-    let meta_workspace_root =
-        dispatch_cfg.resolved_meta_workspace_root(config.config_dir.as_deref())?;
-    let kb_root = &meta_workspace_root;
     let worktree_base = dispatch_cfg.resolved_worktree_base();
     let log_dir = dispatch_cfg.resolved_log_dir();
 
-    // Resolve repo: config > auto-discovery
+    // Resolve meta workspace: config overrides > auto-discovery via `meta` CLI
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let meta = discover_meta(&cwd).await;
+
+    let workspace_root = dispatch_cfg
+        .resolved_meta_workspace_root(config.config_dir.as_deref())
+        .ok()
+        .or_else(|| meta.as_ref().map(|m| m.workspace_root.clone()))
+        .unwrap_or_else(|| cwd.clone());
+    let kb_root = &workspace_root;
+
     let repo = match dispatch_cfg.resolved_repo() {
         Some(r) => Some(r.to_string()),
-        None => match discover_repo(&meta_workspace_root).await {
-            Ok(r) => Some(r),
-            Err(e) => {
-                debug!(error = %e, "meta discovery failed, using plain git");
-                None
-            }
-        },
+        None => meta.as_ref().map(|m| m.repo.clone()),
     };
 
     // 1. Resolve mode
@@ -662,10 +663,10 @@ pub async fn dispatch(
     }
 
     // Compute kb_basename once, with proper validation for both dry-run and real paths
-    let kb_basename = meta_workspace_root
+    let kb_basename = workspace_root
         .file_name()
         .ok_or_else(|| {
-            anyhow::anyhow!("meta_workspace_root has no basename (is it the filesystem root?)")
+            anyhow::anyhow!("workspace_root has no basename (is it the filesystem root?)")
         })?
         .to_string_lossy()
         .into_owned();
@@ -704,7 +705,7 @@ pub async fn dispatch(
         kb_basename: &kb_basename,
         repo: repo.as_deref(),
         branch: &branch,
-        meta_workspace_root: &meta_workspace_root,
+        meta_workspace_root: &workspace_root,
         kb_root,
         force: opts.force,
     };
@@ -793,7 +794,7 @@ pub async fn dispatch(
                             "--force",
                             &worktree_path.to_string_lossy(),
                         ])
-                        .current_dir(&meta_workspace_root)
+                        .current_dir(&workspace_root)
                         .status()
                         .await;
                 } else {
@@ -804,7 +805,7 @@ pub async fn dispatch(
                             "--force",
                             &worktree_path.to_string_lossy(),
                         ])
-                        .current_dir(&meta_workspace_root)
+                        .current_dir(&workspace_root)
                         .status()
                         .await;
                 }
