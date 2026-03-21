@@ -337,13 +337,13 @@ impl Registry for SqliteRegistry {
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
         let rows = match &filter {
             StatusFilter::All => {
-                sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC")
+                sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC, id DESC")
                     .fetch_all(&self.pool)
                     .await?
             }
             StatusFilter::One(status) => {
                 sqlx::query(
-                    "SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC",
+                    "SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC, id DESC",
                 )
                 .bind(status.as_str())
                 .fetch_all(&self.pool)
@@ -357,7 +357,7 @@ impl Registry for SqliteRegistry {
                 let placeholders: Vec<String> =
                     (1..=statuses.len()).map(|i| format!("?{i}")).collect();
                 let sql = format!(
-                    "SELECT * FROM dispatches WHERE status IN ({}) ORDER BY dispatched_at DESC",
+                    "SELECT * FROM dispatches WHERE status IN ({}) ORDER BY dispatched_at DESC, id DESC",
                     placeholders.join(", ")
                 );
                 let mut query = sqlx::query(&sql);
@@ -472,7 +472,7 @@ impl Registry for SqliteRegistry {
 
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>> {
         let rows =
-            sqlx::query("SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC")
+            sqlx::query("SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC, id DESC")
                 .bind(branch)
                 .fetch_all(&self.pool)
                 .await?;
@@ -481,7 +481,7 @@ impl Registry for SqliteRegistry {
 
     async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>> {
         let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE task_slug = ?1 ORDER BY dispatched_at DESC",
+            "SELECT * FROM dispatches WHERE task_slug = ?1 ORDER BY dispatched_at DESC, id DESC",
         )
         .bind(task_slug)
         .fetch_all(&self.pool)
@@ -491,7 +491,7 @@ impl Registry for SqliteRegistry {
 
     async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>> {
         let rows =
-            sqlx::query("SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC")
+            sqlx::query("SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC, id DESC")
                 .bind(pr_url)
                 .fetch_all(&self.pool)
                 .await?;
@@ -503,7 +503,7 @@ impl Registry for SqliteRegistry {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
         let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE worktree_path = ?1 ORDER BY dispatched_at DESC",
+            "SELECT * FROM dispatches WHERE worktree_path = ?1 ORDER BY dispatched_at DESC, id DESC",
         )
         .bind(path_str)
         .fetch_all(&self.pool)
@@ -513,7 +513,7 @@ impl Registry for SqliteRegistry {
 
     async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
         let row = sqlx::query(
-            "SELECT * FROM dispatches WHERE task_slug = ?1 ORDER BY dispatched_at DESC LIMIT 1",
+            "SELECT * FROM dispatches WHERE task_slug = ?1 ORDER BY dispatched_at DESC, id DESC LIMIT 1",
         )
         .bind(task_slug)
         .fetch_optional(&self.pool)
@@ -530,7 +530,7 @@ impl Registry for SqliteRegistry {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
         let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE worktree_path = ?1 AND status = 'running' ORDER BY dispatched_at DESC",
+            "SELECT * FROM dispatches WHERE worktree_path = ?1 AND status = 'running' ORDER BY dispatched_at DESC, id DESC",
         )
         .bind(path_str)
         .fetch_all(&self.pool)
