@@ -84,6 +84,8 @@ fn compute_allowed_paths(worktree_root: &Path, extra_paths: &[String]) -> String
 }
 
 /// Write `.envrc` file to worktree with env overrides.
+/// Currently unused — will be called once InputResolver provides per-task overrides (phase-1).
+#[allow(dead_code)]
 async fn write_envrc(worktree_path: &Path, env_overrides: &HashMap<String, String>) -> Result<()> {
     if env_overrides.is_empty() {
         return Ok(());
@@ -611,11 +613,12 @@ pub async fn dispatch(
     // Unset CLAUDECODE in agent environment
     env.insert("CLAUDECODE".to_string(), String::new());
 
-    // Write .envrc to worktree (resolver env_overrides would be added here)
-    let envrc_vars: HashMap<String, String> = HashMap::new();
-    if let Err(e) = write_envrc(&worktree_path, &envrc_vars).await {
-        warn!(error = %e, "failed to write .envrc (non-fatal)");
-    }
+    // TODO(phase-1): Write .envrc to worktree with resolver env_overrides once
+    // InputResolver provides per-task overrides.
+    // let envrc_vars: HashMap<String, String> = HashMap::new();
+    // if let Err(e) = write_envrc(&worktree_path, &envrc_vars).await {
+    //     warn!(error = %e, "failed to write .envrc (non-fatal)");
+    // }
 
     // 5. Setup log file
     tokio::fs::create_dir_all(&log_dir).await?;
