@@ -128,11 +128,12 @@ pub async fn run_retry(
         retries: record.retries + 1,
     };
 
+    let original_status = record.status;
     let outcome = match crate::dispatch::dispatch(config, registry, executor, &opts).await {
         Ok(o) => o,
         Err(e) => {
-            warn!(id, error = %e, "dispatch failed during retry; rolling back to Failed");
-            if let Err(rollback_err) = registry.update_status(id, Status::Failed).await {
+            warn!(id, error = %e, "dispatch failed during retry; rolling back to {original_status}");
+            if let Err(rollback_err) = registry.update_status(id, original_status).await {
                 warn!(
                     id,
                     error = %rollback_err,

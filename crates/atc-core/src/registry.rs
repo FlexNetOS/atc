@@ -530,9 +530,10 @@ impl Registry for SqliteRegistry {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
         let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE worktree_path = ?1 AND status = 'running' ORDER BY dispatched_at DESC, id DESC",
+            "SELECT * FROM dispatches WHERE worktree_path = ?1 AND status = ?2 ORDER BY dispatched_at DESC, id DESC",
         )
         .bind(path_str)
+        .bind(Status::Running.as_str())
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(Self::row_to_record).collect()

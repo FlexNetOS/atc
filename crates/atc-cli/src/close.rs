@@ -65,6 +65,9 @@ pub async fn run_close(
             Ok(Some(s)) if !s.success() => {
                 tracing::debug!(id, session = %record.session, "tmux kill-session exited non-zero (may already be gone)");
             }
+            Ok(None) => {
+                tracing::debug!(id, session = %record.session, "tmux kill-session timed out");
+            }
             Err(e) => {
                 tracing::debug!(id, session = %record.session, error = %e, "tmux kill-session failed");
             }

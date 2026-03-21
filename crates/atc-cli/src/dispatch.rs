@@ -242,9 +242,9 @@ async fn discover_repo(meta_root: &Path) -> Result<String> {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        Err(_) => {
+        Err(e) => {
             // meta not available — fall back to plain git (no --repo needed)
-            anyhow::bail!("meta command not found");
+            anyhow::bail!("meta command not available: {e}");
         }
     }
 }
