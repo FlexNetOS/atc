@@ -155,6 +155,8 @@ pub struct DispatchOpts {
     pub dry_run: bool,
     pub max_budget_override: Option<f64>,
     pub max_turns_override: Option<u32>,
+    /// Retry count to propagate into the new dispatch record (default 0).
+    pub retries: u32,
 }
 
 /// Outcome of a successful dispatch.

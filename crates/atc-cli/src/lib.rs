@@ -164,6 +164,7 @@ pub async fn run(
                 dry_run: *dry_run,
                 max_budget_override: *max_budget_usd,
                 max_turns_override: *max_turns,
+                retries: 0,
             };
             let outcome =
                 dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await?;

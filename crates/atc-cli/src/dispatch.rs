@@ -689,7 +689,7 @@ pub async fn dispatch(
         log_file: log_file.clone(),
         status,
         mode: mode.clone(),
-        retries: 0,
+        retries: opts.retries,
         resolver: "task".to_string(),
         pr_url: opts.pr_url.clone(),
         checks: HealthChecks::default(),

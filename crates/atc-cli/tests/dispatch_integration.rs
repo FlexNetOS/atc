@@ -279,6 +279,7 @@ fn default_dispatch_opts(slug: &str, mode: Mode) -> DispatchOpts {
         dry_run: false,
         max_budget_override: None,
         max_turns_override: None,
+        retries: 0,
     }
 }
 
@@ -430,6 +431,7 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         dry_run: false,
         max_budget_override: None,
         max_turns_override: None,
+        retries: 0,
     };
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
@@ -536,6 +538,7 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         dry_run: false,
         max_budget_override: None,
         max_turns_override: None,
+        retries: 0,
     };
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
@@ -576,6 +579,7 @@ async fn test_dispatch_review_fix_requires_pr_url() {
         dry_run: false,
         max_budget_override: None,
         max_turns_override: None,
+        retries: 0,
     };
     let result =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
@@ -609,6 +613,7 @@ async fn test_dispatch_dry_run() {
         dry_run: true,
         max_budget_override: None,
         max_turns_override: None,
+        retries: 0,
     };
     let outcome =
         atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)

@@ -80,19 +80,9 @@ pub async fn run_retry(
         }
     }
 
-    // 5. Build new session and log file for retry
     let slug = record.task_slug.as_deref().unwrap_or(id);
-    let new_session = crate::dispatch::build_session_name(slug, &record.mode);
-    let log_dir = config.dispatch.resolved_log_dir();
-    let new_log_file = log_dir.join(format!("{}.jsonl", new_session));
 
-    // 6. Increment retries in registry (atomic update)
-    let now = chrono::Utc::now();
-    registry
-        .increment_retries(id, &new_session, &new_log_file, now)
-        .await?;
-
-    // 7. Kill old tmux session (non-fatal, with timeout)
+    // 5. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
@@ -113,13 +103,13 @@ pub async fn run_retry(
         _ => {}
     }
 
-    // 8. Clear git-kb claim (non-fatal)
+    // 6. Clear git-kb claim (non-fatal)
     if let Some(ref task_slug) = record.task_slug {
         kb_unassign(task_slug, config).await;
         kb_set_status_draft(task_slug, config).await;
     }
 
-    // 9. Re-dispatch
+    // 7. Re-dispatch
     let retry_num = record.retries + 1;
     println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
 
@@ -133,6 +123,7 @@ pub async fn run_retry(
         dry_run: false,
         max_budget_override: None,
         max_turns_override: None,
+        retries: record.retries + 1,
     };
 
     let outcome = match crate::dispatch::dispatch(config, registry, executor, &opts).await {
