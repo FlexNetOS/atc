@@ -3,22 +3,10 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::warn;
 
+use crate::resolve::resolve_record;
+
 /// Timeout for tmux subprocess calls.
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Resolve a dispatch record by ID or task slug.
-async fn resolve_record(
-    registry: &dyn Registry,
-    arg: &str,
-) -> Result<atc_core::types::DispatchRecord> {
-    if let Some(record) = registry.get(arg).await? {
-        return Ok(record);
-    }
-    if let Some(record) = registry.find_latest_for_task(arg).await? {
-        return Ok(record);
-    }
-    anyhow::bail!("no dispatch record found for: {arg}")
-}
 
 /// Execute the `atc redirect` command.
 pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> Result<()> {

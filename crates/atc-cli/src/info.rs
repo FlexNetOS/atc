@@ -5,18 +5,8 @@ use atc_core::registry::Registry;
 use atc_core::types::DispatchRecord;
 use std::sync::Arc;
 
+use crate::resolve::resolve_record;
 use crate::status::format_duration;
-
-/// Resolve a dispatch record by ID or task slug.
-async fn resolve_record(registry: &dyn Registry, arg: &str) -> Result<DispatchRecord> {
-    if let Some(record) = registry.get(arg).await? {
-        return Ok(record);
-    }
-    if let Some(record) = registry.find_latest_for_task(arg).await? {
-        return Ok(record);
-    }
-    anyhow::bail!("no dispatch record found for: {arg}")
-}
 
 /// Format a dispatch record for display.
 pub fn format_info(record: &DispatchRecord) -> String {

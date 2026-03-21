@@ -13,6 +13,7 @@ pub mod health;
 pub mod info;
 pub mod logs;
 pub mod redirect;
+pub mod resolve;
 pub mod retry;
 pub mod status;
 pub mod subprocess;

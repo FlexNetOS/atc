@@ -204,8 +204,9 @@ fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
         if !candidate.contains(MARKER) {
             continue;
         }
-        // Trim trailing punctuation (but not `/`)
-        let url = candidate.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '/');
+        // Trim trailing punctuation (but preserve `/`, `#`, `?`, `=`, `&` which are valid URL chars)
+        let url = candidate
+            .trim_end_matches(|c: char| c.is_ascii_punctuation() && !matches!(c, '/' | '#' | '?' | '=' | '&'));
         if !urls.iter().any(|u| u == url) {
             urls.push(url.to_string());
         }

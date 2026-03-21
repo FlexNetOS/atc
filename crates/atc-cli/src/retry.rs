@@ -6,24 +6,11 @@ use atc_core::stream_json;
 use atc_core::types::{DispatchOpts, Status};
 use tracing::{info, warn};
 
+use crate::resolve::resolve_record;
 use crate::subprocess::run_cmd_with_timeout;
 
 /// Timeout for non-fatal subprocess calls (tmux, git-kb).
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Resolve a dispatch record by ID or task slug.
-async fn resolve_record(
-    registry: &dyn Registry,
-    arg: &str,
-) -> Result<atc_core::types::DispatchRecord> {
-    if let Some(record) = registry.get(arg).await? {
-        return Ok(record);
-    }
-    if let Some(record) = registry.find_latest_for_task(arg).await? {
-        return Ok(record);
-    }
-    anyhow::bail!("no dispatch record found for: {arg}")
-}
 
 /// Execute the `atc retry` command.
 pub async fn run_retry(
@@ -137,7 +124,7 @@ pub async fn run_retry(
                 warn!(
                     id,
                     error = %rollback_err,
-                    "failed to rollback status to Failed after dispatch error"
+                    "failed to rollback status to {original_status} after dispatch error"
                 );
                 anyhow::bail!(
                     "dispatch failed during retry ({e}); additionally failed to rollback status: {rollback_err}"

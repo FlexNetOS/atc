@@ -4,25 +4,11 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::{info, warn};
 
+use crate::resolve::resolve_record;
 use crate::subprocess::run_cmd_with_timeout;
 
 /// Timeout for non-fatal subprocess calls (git-kb, git worktree).
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Resolve a dispatch record by ID or task slug.
-/// Tries get(arg) first (by ID), then find_latest_for_task(arg) (by slug).
-async fn resolve_record(
-    registry: &dyn Registry,
-    arg: &str,
-) -> Result<atc_core::types::DispatchRecord> {
-    if let Some(record) = registry.get(arg).await? {
-        return Ok(record);
-    }
-    if let Some(record) = registry.find_latest_for_task(arg).await? {
-        return Ok(record);
-    }
-    anyhow::bail!("no dispatch record found for: {arg}")
-}
 
 /// Execute the `atc close` command.
 pub async fn run_close(
@@ -53,26 +39,25 @@ pub async fn run_close(
     // Sessions can survive beyond Running/Stopped — e.g. a Failed record may
     // still have a live tmux session if the agent process crashed but tmux
     // survived, or a NeedsHuman record had its status set externally.
-    if record.status != Status::Done {
-        match run_cmd_with_timeout(
-            tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", &record.session])
-                .stderr(std::process::Stdio::null()),
-            CMD_TIMEOUT,
-        )
-        .await
-        {
-            Ok(Some(s)) if !s.success() => {
-                tracing::debug!(id, session = %record.session, "tmux kill-session exited non-zero (may already be gone)");
-            }
-            Ok(None) => {
-                tracing::debug!(id, session = %record.session, "tmux kill-session timed out");
-            }
-            Err(e) => {
-                tracing::debug!(id, session = %record.session, error = %e, "tmux kill-session failed");
-            }
-            _ => {}
+    // Note: Status::Done is already handled above (early return), so this always runs.
+    match run_cmd_with_timeout(
+        tokio::process::Command::new("tmux")
+            .args(["kill-session", "-t", &record.session])
+            .stderr(std::process::Stdio::null()),
+        CMD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(Some(s)) if !s.success() => {
+            tracing::debug!(id, session = %record.session, "tmux kill-session exited non-zero (may already be gone)");
         }
+        Ok(None) => {
+            tracing::debug!(id, session = %record.session, "tmux kill-session timed out");
+        }
+        Err(e) => {
+            tracing::debug!(id, session = %record.session, error = %e, "tmux kill-session failed");
+        }
+        _ => {}
     }
 
     // 5. Update status to Done
