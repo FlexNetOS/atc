@@ -521,14 +521,26 @@ async fn ensure_worktree(
         }
     } else {
         // Plain git worktree (non-meta repo)
+        // Check if the branch already exists locally to avoid `-b` failing
+        let branch_exists = tokio::process::Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{}", branch)])
+            .current_dir(meta_workspace_root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let wt_path_str = worktree_path.to_string_lossy();
+        let mut args = vec!["worktree", "add", &wt_path_str];
+        if !branch_exists {
+            args.push("-b");
+        }
+        args.push(branch);
+
         let output = tokio::process::Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                &worktree_path.to_string_lossy(),
-                "-b",
-                branch,
-            ])
+            .args(&args)
             .current_dir(meta_workspace_root)
             .output()
             .await?;
