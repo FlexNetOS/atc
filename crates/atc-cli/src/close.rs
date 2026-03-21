@@ -49,8 +49,10 @@ pub async fn run_close(
         record.pr_url.clone()
     };
 
-    // 4. Kill running tmux session (non-fatal)
-    if record.status == Status::Running {
+    // 4. Kill running/stopped tmux session (non-fatal)
+    // A Stopped record may still have a live tmux session (e.g. operator set
+    // status manually without killing the session).
+    if record.status == Status::Running || record.status == Status::Stopped {
         let _ = run_cmd_with_timeout(
             tokio::process::Command::new("tmux")
                 .args(["kill-session", "-t", &record.session])

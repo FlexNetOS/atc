@@ -45,11 +45,6 @@ pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
     )
 }
 
-/// Build session name (same format as dispatch ID for simplicity).
-pub fn build_session_name(slug: &str, mode: &Mode) -> String {
-    build_dispatch_id(&derive_branch(slug), mode)
-}
-
 /// Validate a branch name via `git check-ref-format`.
 async fn validate_branch_name(branch: &str) -> Result<()> {
     let output = tokio::process::Command::new("git")
@@ -386,9 +381,22 @@ struct WorktreeOpts<'a> {
     force: bool,
 }
 
+/// Result of worktree creation/reuse, carrying metadata needed for safe rollback.
+struct WorktreeResult {
+    /// The filesystem path of the worktree.
+    path: PathBuf,
+    /// Whether this worktree was newly created by this call (vs reused).
+    created: bool,
+    /// Whether the worktree was created via `meta` (true) or plain `git` (false).
+    is_meta: bool,
+}
+
 /// Ensure a worktree exists for the given branch. Reuses existing worktrees.
 #[tracing::instrument(skip(opts, registry), fields(branch = opts.branch))]
-async fn ensure_worktree(opts: &WorktreeOpts<'_>, registry: &dyn Registry) -> Result<PathBuf> {
+async fn ensure_worktree(
+    opts: &WorktreeOpts<'_>,
+    registry: &dyn Registry,
+) -> Result<WorktreeResult> {
     let worktree_base = opts.worktree_base;
     let kb_basename = opts.kb_basename;
     let repo = opts.repo;
@@ -463,7 +471,11 @@ async fn ensure_worktree(opts: &WorktreeOpts<'_>, registry: &dyn Registry) -> Re
                             .stderr(std::process::Stdio::null())
                             .status()
                             .await;
-                        return Ok(reused_path);
+                        return Ok(WorktreeResult {
+                            path: reused_path,
+                            created: false,
+                            is_meta: repo.is_some(),
+                        });
                     }
                 }
             } else if line.is_empty() {
@@ -521,7 +533,11 @@ async fn ensure_worktree(opts: &WorktreeOpts<'_>, registry: &dyn Registry) -> Re
         }
     }
 
-    Ok(worktree_path)
+    Ok(WorktreeResult {
+        path: worktree_path,
+        created: true,
+        is_meta: repo.is_some(),
+    })
 }
 
 /// Print post-dispatch confirmation block.
@@ -667,13 +683,14 @@ pub async fn dispatch(
         kb_root,
         force: opts.force,
     };
-    let worktree_path = match ensure_worktree(&wt_opts, registry).await {
-        Ok(path) => path,
+    let wt_result = match ensure_worktree(&wt_opts, registry).await {
+        Ok(r) => r,
         Err(e) => {
             unassign_task(slug, kb_root).await;
             return Err(e);
         }
     };
+    let worktree_path = wt_result.path;
 
     // 4. Resolve GH_TOKEN and agent env
     let mut env = HashMap::new();
@@ -739,18 +756,34 @@ pub async fn dispatch(
         Ok(h) => h,
         Err(e) => {
             unassign_task(slug, kb_root).await;
-            // Best-effort worktree cleanup; ignore errors
-            let _ = tokio::process::Command::new("meta")
-                .args([
-                    "git",
-                    "worktree",
-                    "remove",
-                    "--force",
-                    &worktree_path.to_string_lossy(),
-                ])
-                .current_dir(&meta_workspace_root)
-                .status()
-                .await;
+            // Only tear down worktrees we created; reused checkouts may have
+            // local changes or be shared with other dispatches.
+            if wt_result.created {
+                if wt_result.is_meta {
+                    let _ = tokio::process::Command::new("meta")
+                        .args([
+                            "git",
+                            "worktree",
+                            "remove",
+                            "--force",
+                            &worktree_path.to_string_lossy(),
+                        ])
+                        .current_dir(&meta_workspace_root)
+                        .status()
+                        .await;
+                } else {
+                    let _ = tokio::process::Command::new("git")
+                        .args([
+                            "worktree",
+                            "remove",
+                            "--force",
+                            &worktree_path.to_string_lossy(),
+                        ])
+                        .current_dir(&meta_workspace_root)
+                        .status()
+                        .await;
+                }
+            }
             return Err(e);
         }
     };
@@ -782,7 +815,18 @@ pub async fn dispatch(
         dispatched_at: now,
         updated_at: now,
     };
-    registry.insert(&record).await?;
+    if let Err(e) = registry.insert(&record).await {
+        // Insert failed — there's a live tmux session with no durable record.
+        // Kill it non-fatally so we don't leak resources.
+        warn!(id = %dispatch_id, error = %e, "registry insert failed; killing orphan session");
+        let _ = tokio::process::Command::new("tmux")
+            .args(["kill-session", "-t", &handle.session])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        unassign_task(slug, kb_root).await;
+        return Err(e);
+    }
 
     // "Agent starting" PR comment — posted after spawn + insert so the dispatch
     // is durable before we emit a non-idempotent GitHub write.
@@ -882,32 +926,6 @@ mod tests {
         // They *may* share a timestamp but the full ID should almost certainly differ
         // (same PID but nanos will have advanced)
         assert_ne!(id1, id2, "consecutive dispatch IDs should differ");
-    }
-
-    #[test]
-    fn test_build_session_name_format() {
-        let name = build_session_name("tasks/gitkb-42", &Mode::Implement);
-        let parts: Vec<&str> = name.split('@').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "tasks--gitkb-42");
-        assert_eq!(parts[1], "implement");
-        // Third part is "timestamp-hexrand"
-        let ts_rand: Vec<&str> = parts[2].split('-').collect();
-        assert_eq!(ts_rand.len(), 2);
-        let ts: i64 = ts_rand[0].parse().expect("timestamp should be a number");
-        assert!(ts > 0);
-    }
-
-    #[test]
-    fn test_build_session_name_different_modes() {
-        let name = build_session_name("tasks/gitkb-264", &Mode::Research);
-        assert!(name.starts_with("tasks--gitkb-264@research@"));
-
-        let name = build_session_name("tasks/gitkb-264", &Mode::ReviewFix);
-        assert!(name.starts_with("tasks--gitkb-264@review-fix@"));
-
-        let name = build_session_name("tasks/gitkb-264", &Mode::Close);
-        assert!(name.starts_with("tasks--gitkb-264@close@"));
     }
 
     #[test]
