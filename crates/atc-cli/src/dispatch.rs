@@ -846,7 +846,12 @@ mod tests {
         assert_eq!(parts[1], "implement");
         // Third part is "timestamp-hexrand"
         let ts_rand: Vec<&str> = parts[2].split('-').collect();
-        assert_eq!(ts_rand.len(), 2, "expected ts-rand format, got: {}", parts[2]);
+        assert_eq!(
+            ts_rand.len(),
+            2,
+            "expected ts-rand format, got: {}",
+            parts[2]
+        );
         let ts: i64 = ts_rand[0].parse().expect("timestamp should be a number");
         assert!(ts > 0);
         // Hex suffix should be 4 chars
