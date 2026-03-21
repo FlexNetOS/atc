@@ -224,8 +224,11 @@ async fn discover_repo(meta_root: &Path) -> Result<String> {
                             return Ok(name.clone());
                         }
                     }
-                    // Fall back to first project
+                    // Fall back to first project — note: BTreeMap iteration is alphabetical,
+                    // not insertion order from `meta project list`. Users with multi-repo
+                    // workspaces should configure `dispatch.repo` explicitly.
                     if let Some(name) = obj.keys().next() {
+                        tracing::debug!("auto-discovered repo '{name}' (alphabetically first); set dispatch.repo to override");
                         return Ok(name.clone());
                     }
                 }
