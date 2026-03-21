@@ -5,11 +5,9 @@ use atc_core::types::Status;
 use atc_core::worktree::cleanup_worktree;
 use tracing::warn;
 
+use crate::kb::{kb_unassign, CMD_TIMEOUT};
 use crate::resolve::resolve_record;
 use crate::subprocess::run_cmd_with_timeout;
-
-/// Timeout for non-fatal subprocess calls (tmux, git-kb).
-const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Execute the `atc cleanup` command.
 pub async fn run_cleanup(
@@ -59,6 +57,11 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
     // 3. Unassign task in git-kb (best-effort)
     if let Some(ref slug) = record.task_slug {
         kb_unassign(slug, config).await;
+    }
+
+    // 4. Update status to Stopped if still running (cleanup implies shutdown)
+    if !record.status.is_terminal() {
+        registry.update_status(id, Status::Stopped).await?;
     }
 
     Ok(removed)
@@ -114,38 +117,6 @@ async fn kill_tmux_session(session: &str) {
         }
         Err(e) => {
             tracing::debug!(session, error = %e, "tmux kill-session failed");
-        }
-        _ => {}
-    }
-}
-
-/// Non-fatal: unassign task in git-kb.
-async fn kb_unassign(slug: &str, config: &AtcConfig) {
-    let kb_root = match config
-        .dispatch
-        .resolved_meta_workspace_root(config.config_dir.as_deref())
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let status = run_cmd_with_timeout(
-        tokio::process::Command::new("git-kb")
-            .args(["unassign", slug])
-            .env("GITKB_ROOT", &kb_root),
-        CMD_TIMEOUT,
-    )
-    .await;
-
-    match status {
-        Ok(Some(s)) if !s.success() => {
-            warn!(slug, "git-kb unassign failed (non-fatal)");
-        }
-        Ok(None) => {
-            warn!(slug, "git-kb unassign timed out (non-fatal)");
-        }
-        Err(e) => {
-            warn!(slug, error = %e, "git-kb unassign failed (non-fatal)");
         }
         _ => {}
     }

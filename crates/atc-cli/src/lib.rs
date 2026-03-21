@@ -12,6 +12,7 @@ pub mod close;
 pub mod dispatch;
 pub mod health;
 pub mod info;
+pub mod kb;
 pub mod logs;
 pub mod redirect;
 pub mod resolve;
