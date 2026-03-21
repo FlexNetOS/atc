@@ -341,14 +341,12 @@ impl Registry for SqliteRegistry {
                     .fetch_all(&self.pool)
                     .await?
             }
-            StatusFilter::One(status) => {
-                sqlx::query(
-                    "SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC, id DESC",
-                )
-                .bind(status.as_str())
-                .fetch_all(&self.pool)
-                .await?
-            }
+            StatusFilter::One(status) => sqlx::query(
+                "SELECT * FROM dispatches WHERE status = ?1 ORDER BY dispatched_at DESC, id DESC",
+            )
+            .bind(status.as_str())
+            .fetch_all(&self.pool)
+            .await?,
             StatusFilter::Any(statuses) => {
                 if statuses.is_empty() {
                     return Ok(Vec::new());
@@ -471,11 +469,12 @@ impl Registry for SqliteRegistry {
     }
 
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>> {
-        let rows =
-            sqlx::query("SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC, id DESC")
-                .bind(branch)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC, id DESC",
+        )
+        .bind(branch)
+        .fetch_all(&self.pool)
+        .await?;
         rows.iter().map(Self::row_to_record).collect()
     }
 
@@ -490,11 +489,12 @@ impl Registry for SqliteRegistry {
     }
 
     async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>> {
-        let rows =
-            sqlx::query("SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC, id DESC")
-                .bind(pr_url)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC, id DESC",
+        )
+        .bind(pr_url)
+        .fetch_all(&self.pool)
+        .await?;
         rows.iter().map(Self::row_to_record).collect()
     }
 
