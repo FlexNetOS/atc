@@ -388,10 +388,7 @@ struct WorktreeOpts<'a> {
 
 /// Ensure a worktree exists for the given branch. Reuses existing worktrees.
 #[tracing::instrument(skip(opts, registry), fields(branch = opts.branch))]
-async fn ensure_worktree(
-    opts: &WorktreeOpts<'_>,
-    registry: &dyn Registry,
-) -> Result<PathBuf> {
+async fn ensure_worktree(opts: &WorktreeOpts<'_>, registry: &dyn Registry) -> Result<PathBuf> {
     let worktree_base = opts.worktree_base;
     let kb_basename = opts.kb_basename;
     let repo = opts.repo;
