@@ -507,7 +507,10 @@ mod tests {
     #[test]
     fn test_extract_pr_urls_plain() {
         let mut urls = Vec::new();
-        extract_pr_urls("See https://github.com/org/repo/pull/42 for details", &mut urls);
+        extract_pr_urls(
+            "See https://github.com/org/repo/pull/42 for details",
+            &mut urls,
+        );
         assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
     }
 
