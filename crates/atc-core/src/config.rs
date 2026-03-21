@@ -46,7 +46,7 @@ impl AtcConfig {
             cfg.dispatch.max_retries > 0,
             "dispatch.max_retries must be >= 1"
         );
-        // Validate mode keys against known Mode variants
+        // Validate mode keys against known Mode variants + per-mode overrides
         for key in cfg.modes.keys() {
             key.parse::<crate::types::Mode>().map_err(|_| {
                 anyhow::anyhow!(
@@ -54,6 +54,21 @@ impl AtcConfig {
                     key, key,
                 )
             })?;
+            let mode_cfg = cfg.modes.get(key).unwrap();
+            if let Some(budget) = mode_cfg.max_budget_usd {
+                anyhow::ensure!(
+                    budget > 0.0 && budget.is_finite(),
+                    "modes.{}.max_budget_usd must be a positive finite number",
+                    key
+                );
+            }
+            if let Some(turns) = mode_cfg.max_turns {
+                anyhow::ensure!(
+                    turns > 0,
+                    "modes.{}.max_turns must be >= 1",
+                    key
+                );
+            }
         }
         Ok(cfg)
     }
@@ -885,5 +900,51 @@ max_retries = 5
                 .contains("max_budget_usd must be a positive finite number"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_per_mode_rejects_zero_budget() {
+        let toml = "[modes.implement]\nmax_budget_usd = 0.0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("modes.implement.max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_per_mode_rejects_negative_budget() {
+        let toml = "[modes.implement]\nmax_budget_usd = -5.0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("modes.implement.max_budget_usd must be a positive finite number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_per_mode_rejects_zero_turns() {
+        let toml = "[modes.research]\nmax_turns = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("modes.research.max_turns must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_per_mode_valid_overrides_accepted() {
+        let toml = r#"
+[modes.implement]
+max_budget_usd = 10.0
+max_turns = 500
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        let mode = cfg.modes.get("implement").unwrap();
+        assert_eq!(mode.max_budget_usd, Some(10.0));
+        assert_eq!(mode.max_turns, Some(500));
     }
 }

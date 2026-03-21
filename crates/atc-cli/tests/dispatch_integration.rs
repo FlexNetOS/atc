@@ -467,8 +467,8 @@ async fn test_dispatch_multiple_dispatches_same_task() {
             .await
             .expect("first dispatch failed");
 
-    // Small delay to ensure different timestamp
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // Small delay to ensure different millisecond timestamp
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // Second dispatch of same slug should succeed (different dispatch ID)
     let outcome2 =

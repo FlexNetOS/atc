@@ -18,15 +18,15 @@ pub fn derive_branch(slug: &str) -> String {
     slug.replace('/', "--")
 }
 
-/// Build dispatch ID: `<branch>@<mode>@<unix-ts>`.
+/// Build dispatch ID: `<branch>@<mode>@<unix-ms>`.
 pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
-    let ts = Utc::now().timestamp();
+    let ts = Utc::now().timestamp_millis();
     format!("{}@{}@{}", branch, mode.as_str(), ts)
 }
 
 /// Build session name (same as dispatch ID for simplicity).
 pub fn build_session_name(slug: &str, mode: &Mode) -> String {
-    let ts = Utc::now().timestamp();
+    let ts = Utc::now().timestamp_millis();
     format!("{}@{}@{}", derive_branch(slug), mode.as_str(), ts)
 }
 
@@ -322,41 +322,64 @@ async fn ensure_worktree(
     registry: &dyn Registry,
     force: bool,
 ) -> Result<PathBuf> {
-    // Compute expected worktree path
+    // Compute expected worktree path.
+    // For meta repos: <worktree_base>/<kb_basename>/<repo_alias>
+    // For plain git:  <worktree_base>/<kb_basename>/<branch>
+    // Including branch in the plain-git path prevents collisions when multiple
+    // branches are dispatched in the same workspace.
     let worktree_path = match repo {
         Some(r) => worktree_base.join(kb_basename).join(r),
-        None => worktree_base.join(kb_basename),
+        None => worktree_base.join(kb_basename).join(branch),
     };
 
     // Collision detection: check if another dispatch is running on this worktree
     let running = registry.find_running_on_worktree(&worktree_path).await?;
 
-    if !running.is_empty() && !force {
-        // Check if any tmux sessions are actually alive
+    if !running.is_empty() {
+        // Always mark stale records as Failed, regardless of --force.
+        // This prevents phantom Running records that the health-check loop
+        // would poll indefinitely.
         for r in &running {
-            if tmux_session_alive(&r.session).await {
-                anyhow::bail!(
-                    "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
-                    worktree_path.display(),
-                    r.id,
-                    r.session,
-                );
+            if !tmux_session_alive(&r.session).await {
+                info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
+                if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
+                    warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+                }
             }
         }
 
-        // All sessions are dead — mark stale records as Failed
-        for r in &running {
-            info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
-            if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+        // Only block on live sessions when not forcing
+        if !force {
+            for r in &running {
+                if tmux_session_alive(&r.session).await {
+                    anyhow::bail!(
+                        "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
+                        worktree_path.display(),
+                        r.id,
+                        r.session,
+                    );
+                }
             }
         }
     }
 
-    // Check if worktree already exists for this branch
+    // Check if worktree already exists for this branch.
+    // In meta workspaces, the meta root may not itself be a git checkout,
+    // so we probe the resolved repo directory instead (if it exists).
+    let probe_dir = match repo {
+        Some(r) => {
+            let repo_dir = meta_workspace_root.join(r);
+            if repo_dir.exists() {
+                repo_dir
+            } else {
+                meta_workspace_root.to_path_buf()
+            }
+        }
+        None => meta_workspace_root.to_path_buf(),
+    };
     let output = tokio::process::Command::new("git")
         .args(["worktree", "list", "--porcelain"])
-        .current_dir(meta_workspace_root)
+        .current_dir(&probe_dir)
         .output()
         .await?;
 
@@ -609,8 +632,11 @@ pub async fn dispatch(
         }
     }
 
-    // AGENT_ALLOWED_PATHS
-    let allowed_paths = compute_allowed_paths(&worktree_path, &[]);
+    // AGENT_ALLOWED_PATHS — include GITKB_ROOT so git-kb reads/writes succeed under sandbox
+    let allowed_paths = compute_allowed_paths(
+        &worktree_path,
+        &[kb_root.to_string_lossy().into_owned()],
+    );
     env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
 
     // Unset CLAUDECODE in agent environment
@@ -634,14 +660,6 @@ pub async fn dispatch(
     // Render system prompt from mode template + config overrides
     let directive = opts.directive.as_deref().unwrap_or("");
     let prompt = atc_core::templates::render_prompt(&mode, slug, config, directive).await?;
-
-    // "Agent starting" PR comment for review-fix/pr-comments modes
-    if matches!(mode, Mode::ReviewFix | Mode::PrComments) {
-        if let Some(ref url) = opts.pr_url {
-            let comment = format!("\u{1f916} Agent starting: {} on {}", mode.as_str(), branch);
-            post_pr_comment(url, &comment).await;
-        }
-    }
 
     // 6. Build agent opts and spawn
     let agent_opts = AgentOpts {
@@ -706,6 +724,15 @@ pub async fn dispatch(
         updated_at: now,
     };
     registry.insert(&record).await?;
+
+    // "Agent starting" PR comment — posted after spawn + insert so the dispatch
+    // is durable before we emit a non-idempotent GitHub write.
+    if matches!(mode, Mode::ReviewFix | Mode::PrComments) {
+        if let Some(ref url) = opts.pr_url {
+            let comment = format!("\u{1f916} Agent starting: {} on {}", mode.as_str(), branch);
+            post_pr_comment(url, &comment).await;
+        }
+    }
 
     let outcome = DispatchOutcome {
         id: dispatch_id.clone(),

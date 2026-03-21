@@ -80,7 +80,9 @@ pub async fn run_retry(
         }
     }
 
-    let slug = record.task_slug.as_deref().unwrap_or(id);
+    let slug = record.task_slug.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("cannot retry dispatch {id}: this dispatch has no task slug")
+    })?;
 
     // 5. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
@@ -425,6 +427,62 @@ mod tests {
         assert!(
             err.contains("cannot retry"),
             "expected status guard error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_accepts_needs_human_status() {
+        let mut record = sample_record("test-id-1", 0);
+        record.status = Status::NeedsHuman;
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let config = AtcConfig::default();
+
+        // NeedsHuman should be accepted as retryable (not rejected by status guard).
+        // It will fail later at dispatch (mock executor), but crucially does NOT
+        // fail with "cannot retry".
+        let result = run_retry(&config, &registry, &executor, "test-id-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("cannot retry"),
+            "NeedsHuman should be retryable, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_configurable_max_retries() {
+        // With max_retries=5 and retries=3, the retry should proceed (not hit the limit)
+        let record = sample_record("test-id-1", 3);
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let mut config = AtcConfig::default();
+        config.dispatch.max_retries = 5;
+
+        let result = run_retry(&config, &registry, &executor, "test-id-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should NOT hit max retries — should fail at dispatch (mock executor) instead
+        assert!(
+            !err.contains("max retries"),
+            "expected dispatch error (not max retries), got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_rejects_no_task_slug() {
+        let mut record = sample_record("test-id-1", 0);
+        record.task_slug = None;
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let config = AtcConfig::default();
+
+        let result = run_retry(&config, &registry, &executor, "test-id-1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no task slug"),
+            "expected no-task-slug error, got: {err}"
         );
     }
 }

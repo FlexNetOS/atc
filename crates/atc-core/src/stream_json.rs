@@ -173,7 +173,8 @@ pub fn parse_result_event(line: &str) -> Option<ResultEvent> {
 pub struct Artifacts {
     /// PR URLs found in tool_use outputs (gh pr create, etc.)
     pub pr_urls: Vec<String>,
-    /// Commit SHAs mentioned in output
+    /// Commit SHAs mentioned in output.
+    /// TODO(phase-2): populate via commit SHA extraction from assistant text.
     pub commits: Vec<String>,
     /// The last result event, if any
     pub result: Option<ResultEvent>,
@@ -204,6 +205,7 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
                 StreamEvent::AssistantText(text) => {
                     // Look for PR URLs in text
                     for word in text.split_whitespace() {
+                        let word = word.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '/');
                         if word.starts_with("https://github.com/")
                             && word.contains("/pull/")
                             && !artifacts.pr_urls.contains(&word.to_string())
@@ -214,9 +216,9 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
                     last_text = Some(text.clone());
                 }
                 StreamEvent::ToolUse { input, .. } => {
-                    // Look for PR URLs in tool inputs
+                    // Look for PR URLs in tool inputs (JSON-encoded, so strip quotes + punctuation)
                     for word in input.split_whitespace() {
-                        let word = word.trim_matches('"');
+                        let word = word.trim_matches(|c: char| c == '"' || (c.is_ascii_punctuation() && c != '/'));
                         if word.starts_with("https://github.com/")
                             && word.contains("/pull/")
                             && !artifacts.pr_urls.contains(&word.to_string())
@@ -488,5 +490,23 @@ mod tests {
         assert_eq!(result.total_cost_usd, None);
         assert_eq!(result.num_turns, None);
         assert_eq!(result.duration_ms, None);
+    }
+
+    #[test]
+    fn test_extract_artifacts_strips_trailing_punctuation_from_pr_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        // PR URL followed by period and comma in prose
+        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Created https://github.com/org/repo/pull/42. Also see https://github.com/org/repo/pull/43,"}]}}
+"#;
+        std::fs::write(&path, content).unwrap();
+        let artifacts = extract_artifacts(&path);
+        assert_eq!(
+            artifacts.pr_urls,
+            vec![
+                "https://github.com/org/repo/pull/42",
+                "https://github.com/org/repo/pull/43",
+            ]
+        );
     }
 }
