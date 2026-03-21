@@ -633,10 +633,8 @@ pub async fn dispatch(
     }
 
     // AGENT_ALLOWED_PATHS — include GITKB_ROOT so git-kb reads/writes succeed under sandbox
-    let allowed_paths = compute_allowed_paths(
-        &worktree_path,
-        &[kb_root.to_string_lossy().into_owned()],
-    );
+    let allowed_paths =
+        compute_allowed_paths(&worktree_path, &[kb_root.to_string_lossy().into_owned()]);
     env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
 
     // Unset CLAUDECODE in agent environment

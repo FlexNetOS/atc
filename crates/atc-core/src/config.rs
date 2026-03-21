@@ -63,11 +63,7 @@ impl AtcConfig {
                 );
             }
             if let Some(turns) = mode_cfg.max_turns {
-                anyhow::ensure!(
-                    turns > 0,
-                    "modes.{}.max_turns must be >= 1",
-                    key
-                );
+                anyhow::ensure!(turns > 0, "modes.{}.max_turns must be >= 1", key);
             }
         }
         Ok(cfg)
