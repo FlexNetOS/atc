@@ -124,6 +124,19 @@ impl DispatchWatcher {
                     }
                     stream_json::StreamEvent::Result(r) => {
                         self.completed = true;
+
+                        // Emit cost threshold before completion so consumers see it first
+                        if let Some(cost) = r.total_cost_usd {
+                            if cost > cost_threshold && !self.cost_threshold_fired {
+                                self.cost_threshold_fired = true;
+                                events.push(WatchEvent::CostThreshold {
+                                    id: self.id.clone(),
+                                    cost_usd: cost,
+                                    threshold: cost_threshold,
+                                });
+                            }
+                        }
+
                         if r.subtype == "success" {
                             events.push(WatchEvent::Completed {
                                 id: self.id.clone(),
@@ -139,18 +152,6 @@ impl DispatchWatcher {
                                 subtype: r.subtype.clone(),
                             });
                         }
-
-                        // Check cost threshold
-                        if let Some(cost) = r.total_cost_usd {
-                            if cost > cost_threshold && !self.cost_threshold_fired {
-                                self.cost_threshold_fired = true;
-                                events.push(WatchEvent::CostThreshold {
-                                    id: self.id.clone(),
-                                    cost_usd: cost,
-                                    threshold: cost_threshold,
-                                });
-                            }
-                        }
                     }
                     stream_json::StreamEvent::Skip => {}
                 }
@@ -162,11 +163,9 @@ impl DispatchWatcher {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{truncated}…")
+    match s.char_indices().nth(max) {
+        Some((byte_idx, _)) => format!("{}…", &s[..byte_idx]),
+        None => s.to_string(),
     }
 }
 
@@ -201,7 +200,7 @@ pub async fn run_watch(
         "ndjson" => OutputFormat::Ndjson,
         "human" => OutputFormat::Human,
         "auto" => {
-            if atty::is(atty::Stream::Stdout) {
+            if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
                 OutputFormat::Human
             } else {
                 OutputFormat::Ndjson

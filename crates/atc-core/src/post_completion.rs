@@ -181,12 +181,7 @@ fn save_review_artifact(
     artifacts: &Artifacts,
     _mode: &Mode,
 ) -> Result<()> {
-    let head_commit = artifacts
-        .commits
-        .iter()
-        .max_by_key(|c| c.len())
-        .cloned()
-        .unwrap_or_default();
+    let head_commit = artifacts.commits.last().cloned().unwrap_or_default();
 
     let pr_url = artifacts.pr_urls.first().cloned().unwrap_or_default();
 
@@ -352,11 +347,17 @@ async fn get_pr_state(pr_url: &str) -> Option<String> {
 /// Remove a git worktree and its empty parent directory.
 /// Safety: only removes if path matches known worktree patterns.
 pub fn cleanup_worktree(worktree_path: &Path) {
-    let path_str = worktree_path.to_string_lossy();
+    // Canonicalize to resolve symlinks and ".." before safety checks
+    let canonical = match worktree_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return, // path doesn't exist, nothing to clean
+    };
+    let path_str = canonical.to_string_lossy();
 
     // Safety check: only remove paths that look like managed worktrees
     let is_safe = path_str.contains("/.worktrees/")
         || path_str.starts_with("/tmp/worktrees/")
+        || path_str.starts_with("/private/tmp/worktrees/")
         || std::env::var("TMPDIR")
             .map(|t| path_str.starts_with(&format!("{t}/worktrees/")))
             .unwrap_or(false);
@@ -370,7 +371,7 @@ pub fn cleanup_worktree(worktree_path: &Path) {
     }
 
     // Find repo root by walking up from worktree path to find .git
-    let repo_root = find_repo_root(worktree_path);
+    let repo_root = find_repo_root(&canonical);
 
     if let Some(root) = repo_root {
         let result = std::process::Command::new("git")
@@ -388,7 +389,7 @@ pub fn cleanup_worktree(worktree_path: &Path) {
             Ok(output) if output.status.success() => {
                 info!(path = %path_str, "removed worktree");
                 // Remove empty parent dir
-                if let Some(parent) = worktree_path.parent() {
+                if let Some(parent) = canonical.parent() {
                     let _ = std::fs::remove_dir(parent); // only succeeds if empty
                 }
             }
@@ -406,7 +407,7 @@ pub fn cleanup_worktree(worktree_path: &Path) {
     } else {
         // Fallback: just remove the directory
         warn!(path = %path_str, "could not find repo root, removing directory directly");
-        let _ = std::fs::remove_dir_all(worktree_path);
+        let _ = std::fs::remove_dir_all(&canonical);
     }
 }
 
@@ -546,7 +547,7 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&artifact_path).unwrap()).unwrap();
         assert_eq!(content["pr_url"], "https://github.com/org/repo/pull/42");
-        // Should pick longest commit SHA
+        // Should pick the last (most recent) commit SHA
         assert_eq!(
             content["head_commit"],
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"

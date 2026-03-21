@@ -234,6 +234,9 @@ impl ClaudeExecutor {
 
         let mut bash_parts = Vec::new();
 
+        // Ensure pipe failures propagate (so EXIT_CODE captures claude's exit, not tee's)
+        bash_parts.push("set -o pipefail".to_string());
+
         // Export env vars (keys are validated to prevent shell injection)
         // Empty value = unset the variable from the inherited environment.
         for (k, v) in &opts.env {

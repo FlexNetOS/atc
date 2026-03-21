@@ -134,12 +134,12 @@ impl SqliteRegistry {
         }
 
         // Add artifacts TEXT column if missing (Phase 2 migration — safe ALTER TABLE ADD COLUMN)
-        let has_artifacts: Option<(i32,)> = sqlx::query_as(
+        let (has_artifacts,): (i32,) = sqlx::query_as(
             "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'artifacts'",
         )
-        .fetch_optional(pool)
+        .fetch_one(pool)
         .await?;
-        if let Some((0,)) = has_artifacts {
+        if has_artifacts == 0 {
             sqlx::query("ALTER TABLE dispatches ADD COLUMN artifacts TEXT")
                 .execute(pool)
                 .await
