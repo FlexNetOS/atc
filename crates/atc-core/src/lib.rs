@@ -5,3 +5,4 @@ pub mod registry;
 pub mod stream_json;
 pub mod templates;
 pub mod types;
+pub mod worktree;
