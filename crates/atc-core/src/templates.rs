@@ -101,6 +101,7 @@ mod tests {
             ModeConfig {
                 template_path: None,
                 template_inline: Some(template.to_string()),
+                ..Default::default()
             },
         )
     }
@@ -118,6 +119,7 @@ mod tests {
             ModeConfig {
                 template_path: Some(path.to_string_lossy().into_owned()),
                 template_inline: None,
+                ..Default::default()
             },
         );
         let result = render_prompt(&Mode::Implement, "tasks/abc", &cfg, "")
@@ -150,6 +152,7 @@ mod tests {
             ModeConfig {
                 template_path: Some(path.to_string_lossy().into_owned()),
                 template_inline: Some("From inline.".to_string()),
+                ..Default::default()
             },
         );
         let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
@@ -217,6 +220,7 @@ mod tests {
             ModeConfig {
                 template_path: Some("/tmp/nonexistent-atc-template-268.txt".to_string()),
                 template_inline: None,
+                ..Default::default()
             },
         );
         let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
@@ -251,6 +255,7 @@ mod tests {
             ModeConfig {
                 template_path: None,
                 template_inline: Some(String::new()),
+                ..Default::default()
             },
         );
         let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
@@ -271,6 +276,7 @@ mod tests {
             ModeConfig {
                 template_path: None,
                 template_inline: Some("   \n\t  ".to_string()),
+                ..Default::default()
             },
         );
         let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
@@ -296,6 +302,7 @@ mod tests {
             ModeConfig {
                 template_path: Some("templates/impl.txt".to_string()),
                 template_inline: None,
+                ..Default::default()
             },
         );
         cfg.config_dir = Some(dir.path().to_path_buf());
@@ -318,6 +325,7 @@ mod tests {
             ("pr-comments", Mode::PrComments),
             ("refine", Mode::Refine),
             ("create-task", Mode::CreateTask),
+            ("close", Mode::Close),
         ];
         for (key, mode) in &modes {
             let cfg = config_with_inline(key, &format!("Template for {{{{slug}}}} mode {key}."));
@@ -342,6 +350,7 @@ mod tests {
             Mode::PrComments,
             Mode::Refine,
             Mode::CreateTask,
+            Mode::Close,
         ];
         for mode in &modes {
             let err = render_prompt(mode, "tasks/t", &cfg, "").await.unwrap_err();

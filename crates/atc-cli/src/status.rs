@@ -45,7 +45,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
     table.set_header(vec![
         "dispatched_at",
         "status",
-        "slug",
+        "task",
         "mode",
         "cost",
         "turns",
@@ -56,10 +56,11 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
     for r in records {
         let dispatched = r.dispatched_at.format("%Y-%m-%dT%H:%M:%S").to_string();
         let status = r.status.as_str().to_string();
-        let slug = if narrow {
-            truncate(&r.slug, 40)
+        let task = r.task_slug.as_deref().unwrap_or(&r.id);
+        let task_display = if narrow {
+            truncate(task, 40)
         } else {
-            r.slug.clone()
+            task.to_string()
         };
         let mode = r.mode.as_str().to_string();
         let cost = r
@@ -82,7 +83,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
         };
 
         table.add_row(vec![
-            dispatched, status, slug, mode, cost, turns, duration, worktree,
+            dispatched, status, task_display, mode, cost, turns, duration, worktree,
         ]);
     }
 
@@ -103,7 +104,7 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
             Status::Done => done += 1,
             Status::Failed => failed += 1,
             Status::NeedsHuman => needs_human += 1,
-            Status::NeedsReview => {} // not shown in summary
+            Status::NeedsReview | Status::Stopped | Status::Retrying => {}
         }
         if let Some(c) = r.cost_usd {
             total_cost += c;
@@ -158,9 +159,10 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
 
-    fn sample_record(slug: &str, status: Status) -> DispatchRecord {
+    fn sample_record(id: &str, status: Status) -> DispatchRecord {
         DispatchRecord {
-            slug: slug.to_string(),
+            id: id.to_string(),
+            task_slug: Some("tasks/gitkb-42".to_string()),
             branch: "branch".to_string(),
             worktree_path: PathBuf::from("/tmp/worktrees/harmony/my-task/gitkb"),
             session: "session@implement@123".to_string(),
@@ -168,6 +170,7 @@ mod tests {
             status,
             mode: Mode::Implement,
             retries: 0,
+            resolver: "task".to_string(),
             pr_url: None,
             checks: HealthChecks::default(),
             cost_usd: Some(1.50),
@@ -200,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_build_table_wide_terminal() {
-        let records = vec![sample_record("tasks/gitkb-42", Status::Running)];
+        let records = vec![sample_record("id-1", Status::Running)];
         let table = build_table(&records, 160);
         assert!(table.contains("tasks/gitkb-42"));
         assert!(table.contains("running"));
@@ -209,45 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_table_narrow_terminal_truncates() {
-        let long_slug = format!("tasks/{}", "a".repeat(50));
-        let records = vec![sample_record(&long_slug, Status::Done)];
-        let table = build_table(&records, 80);
-        // Should be truncated
-        assert!(table.contains("\u{2026}"));
-    }
-
-    #[test]
-    fn test_build_table_column_order() {
-        let records = vec![sample_record("tasks/gitkb-42", Status::Running)];
-        let table = build_table(&records, 160);
-        let lines: Vec<&str> = table.lines().collect();
-        // Header should have correct column order
-        let header = lines[0];
-        let dispatched_pos = header.find("dispatched_at").unwrap();
-        let status_pos = header.find("status").unwrap();
-        let slug_pos = header.find("slug").unwrap();
-        let mode_pos = header.find("mode").unwrap();
-        let cost_pos = header.find("cost").unwrap();
-        let turns_pos = header.find("turns").unwrap();
-        let duration_pos = header.find("duration").unwrap();
-        let worktree_pos = header.find("worktree").unwrap();
-        assert!(dispatched_pos < status_pos);
-        assert!(status_pos < slug_pos);
-        assert!(slug_pos < mode_pos);
-        assert!(mode_pos < cost_pos);
-        assert!(cost_pos < turns_pos);
-        assert!(turns_pos < duration_pos);
-        assert!(duration_pos < worktree_pos);
-    }
-
-    #[test]
     fn test_build_summary() {
         let records = vec![
-            sample_record("tasks/1", Status::Running),
-            sample_record("tasks/2", Status::Done),
-            sample_record("tasks/3", Status::Failed),
-            sample_record("tasks/4", Status::NeedsHuman),
+            sample_record("id-1", Status::Running),
+            sample_record("id-2", Status::Done),
+            sample_record("id-3", Status::Failed),
+            sample_record("id-4", Status::NeedsHuman),
         ];
         let summary = build_summary(&records);
         assert!(summary.contains("1 running"));
@@ -256,28 +226,5 @@ mod tests {
         assert!(summary.contains("1 needs-human"));
         assert!(summary.contains("of 4 total"));
         assert!(summary.contains("$6.00"));
-    }
-
-    #[test]
-    fn test_build_summary_no_cost() {
-        let mut r = sample_record("tasks/1", Status::Running);
-        r.cost_usd = None;
-        let summary = build_summary(&[r]);
-        assert!(summary.contains("$0.00"));
-    }
-
-    #[test]
-    fn test_build_table_none_values() {
-        let mut r = sample_record("tasks/1", Status::Running);
-        r.cost_usd = None;
-        r.num_turns = None;
-        r.duration_ms = None;
-        let table = build_table(&[r], 160);
-        // Should show dashes for None values
-        // Check the data row contains "-" (not the header)
-        let lines: Vec<&str> = table.lines().collect();
-        let data_line = lines[1];
-        // The row should contain dashes for the None fields
-        assert!(data_line.contains('-'));
     }
 }

@@ -50,7 +50,7 @@ impl AtcConfig {
         for key in cfg.modes.keys() {
             key.parse::<crate::types::Mode>().map_err(|_| {
                 anyhow::anyhow!(
-                    "unknown mode '{}' in [modes.{}]; valid modes: implement, research, kb-update, review-fix, pr-comments, refine, create-task",
+                    "unknown mode '{}' in [modes.{}]; valid modes: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
                     key, key,
                 )
             })?;
@@ -225,11 +225,9 @@ impl DispatchConfig {
             .unwrap_or_else(|| PathBuf::from("/tmp/worktrees"))
     }
 
-    /// Resolve the repo alias. Returns an error if not configured.
-    pub fn resolved_repo(&self) -> anyhow::Result<&str> {
-        self.repo
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("dispatch.repo is required in atc.toml"))
+    /// Resolve the repo alias. Returns None if not configured (triggers auto-discovery).
+    pub fn resolved_repo(&self) -> Option<&str> {
+        self.repo.as_deref()
     }
 
     /// Resolve meta_workspace_root to an absolute, canonicalized path.
@@ -318,6 +316,10 @@ pub struct ModeConfig {
     pub template_path: Option<String>,
     /// Inline template string. Ignored if `template_path` is also set.
     pub template_inline: Option<String>,
+    /// Per-mode budget override (USD). Takes precedence over global dispatch.max_budget_usd.
+    pub max_budget_usd: Option<f64>,
+    /// Per-mode turns override. Takes precedence over global dispatch.max_turns.
+    pub max_turns: Option<u32>,
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
@@ -601,8 +603,7 @@ max_budget_usd = 10.0
     #[test]
     fn test_resolved_repo_missing() {
         let cfg = DispatchConfig::default();
-        let err = cfg.resolved_repo().unwrap_err();
-        assert!(err.to_string().contains("dispatch.repo is required"));
+        assert!(cfg.resolved_repo().is_none());
     }
 
     #[test]
@@ -611,7 +612,7 @@ max_budget_usd = 10.0
             repo: Some("core".to_string()),
             ..Default::default()
         };
-        assert_eq!(cfg.resolved_repo().unwrap(), "core");
+        assert_eq!(cfg.resolved_repo(), Some("core"));
     }
 
     #[test]
@@ -692,6 +693,20 @@ template_inline = "fallback (ignored)"
     }
 
     #[test]
+    fn test_mode_config_per_directive_budget() {
+        let toml = r#"
+[modes.implement]
+template_inline = "test"
+max_budget_usd = 10.0
+max_turns = 500
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        let mode = cfg.modes.get("implement").unwrap();
+        assert_eq!(mode.max_budget_usd, Some(10.0));
+        assert_eq!(mode.max_turns, Some(500));
+    }
+
+    #[test]
     fn test_mode_config_rejects_unknown_fields() {
         let toml = r#"
 [modes.implement]
@@ -740,9 +755,12 @@ template_inline = "f"
 
 [modes.create-task]
 template_inline = "g"
+
+[modes.close]
+template_inline = "h"
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
-        assert_eq!(cfg.modes.len(), 7);
+        assert_eq!(cfg.modes.len(), 8);
     }
 
     #[test]

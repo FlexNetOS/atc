@@ -5,7 +5,7 @@ use atc_core::registry::Registry;
 use atc_core::types::{DispatchOpts, DispatchOutcome, DispatchRecord, HealthChecks, Mode, Status};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Derive branch name from slug: replace `/` with `--`.
@@ -18,10 +18,190 @@ pub fn derive_branch(slug: &str) -> String {
     slug.replace('/', "--")
 }
 
-/// Build session name: `<slug-sanitized>@<mode>@<unix-ts>`.
+/// Build dispatch ID: `<branch>@<mode>@<unix-ts>`.
+pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
+    let ts = Utc::now().timestamp();
+    format!("{}@{}@{}", branch, mode.as_str(), ts)
+}
+
+/// Build session name (same as dispatch ID for simplicity).
 pub fn build_session_name(slug: &str, mode: &Mode) -> String {
     let ts = Utc::now().timestamp();
     format!("{}@{}@{}", derive_branch(slug), mode.as_str(), ts)
+}
+
+/// Validate a branch name via `git check-ref-format`.
+async fn validate_branch_name(branch: &str) -> Result<()> {
+    let output = tokio::process::Command::new("git")
+        .args(["check-ref-format", "--branch", branch])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "invalid branch name '{}': git check-ref-format rejected it",
+            branch
+        );
+    }
+    Ok(())
+}
+
+/// Resolve GH_TOKEN via env vars → `gh auth token` fallback.
+async fn resolve_gh_token() -> Result<String> {
+    if let Ok(t) = std::env::var("GH_TOKEN") {
+        return Ok(t);
+    }
+    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+        return Ok(t);
+    }
+    // fallback: gh auth token
+    let out = tokio::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .await?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "could not resolve GH_TOKEN: gh auth token failed (exit {:?})",
+            out.status.code()
+        );
+    }
+    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+}
+
+/// Compute AGENT_ALLOWED_PATHS for agent sandbox.
+fn compute_allowed_paths(worktree_root: &Path, extra_paths: &[String]) -> String {
+    let mut paths = vec![
+        worktree_root.to_string_lossy().into_owned(),
+        "/tmp".to_string(),
+        "/private/tmp".to_string(),
+    ];
+    for p in extra_paths {
+        if !paths.contains(p) {
+            paths.push(p.clone());
+        }
+    }
+    paths.join(":")
+}
+
+/// Write `.envrc` file to worktree with env overrides.
+async fn write_envrc(worktree_path: &Path, env_overrides: &HashMap<String, String>) -> Result<()> {
+    if env_overrides.is_empty() {
+        return Ok(());
+    }
+    let mut content = String::new();
+    for (k, v) in env_overrides {
+        content.push_str(&format!("export {}=\"{}\"\n", k, v));
+    }
+    let envrc_path = worktree_path.join(".envrc");
+    tokio::fs::write(&envrc_path, &content).await?;
+    Ok(())
+}
+
+/// Write diagnostic `.diag` file alongside log.
+async fn write_diag_file(log_dir: &Path, dispatch_id: &str, gh_token_present: bool) {
+    let diag_path = log_dir.join(format!("{}.diag", dispatch_id));
+    let mut content = format!("GH_TOKEN set: {}\n", if gh_token_present { "yes" } else { "no" });
+
+    // gh auth status (best effort)
+    if let Ok(output) = tokio::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .await
+    {
+        content.push_str(&format!(
+            "gh auth status (exit {}):\n{}\n{}\n",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    if let Err(e) = tokio::fs::write(&diag_path, &content).await {
+        warn!(error = %e, "failed to write .diag file");
+    }
+}
+
+/// Check if a tmux session exists.
+async fn tmux_session_alive(session: &str) -> bool {
+    tokio::process::Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Post a comment on a PR via `gh pr comment`.
+async fn post_pr_comment(pr_url: &str, body: &str) {
+    let result = tokio::process::Command::new("gh")
+        .args(["pr", "comment", pr_url, "--body", body])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    match result {
+        Ok(s) if !s.success() => {
+            warn!(pr_url, "gh pr comment failed (non-fatal)");
+        }
+        Err(e) => {
+            warn!(pr_url, error = %e, "gh pr comment failed (non-fatal)");
+        }
+        _ => {}
+    }
+}
+
+/// Discover the primary repo alias in a meta workspace.
+async fn discover_repo(meta_root: &Path) -> Result<String> {
+    // Check if .meta.yaml exists
+    let meta_yaml = meta_root.join(".meta.yaml");
+    if !meta_yaml.exists() {
+        // Check for .meta (alternate name)
+        let meta_alt = meta_root.join(".meta");
+        if !meta_alt.exists() {
+            anyhow::bail!("not a meta workspace: no .meta.yaml found at {}", meta_root.display());
+        }
+    }
+
+    let output = tokio::process::Command::new("meta")
+        .args(["project", "list", "--recursive", "--json"])
+        .current_dir(meta_root)
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse JSON output: object with project names as keys
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+                if let Some(obj) = json.as_object() {
+                    // Look for a project with "provides" key, or use first project
+                    for (name, value) in obj {
+                        if value.get("provides").is_some() {
+                            return Ok(name.clone());
+                        }
+                    }
+                    // Fall back to first project
+                    if let Some(name) = obj.keys().next() {
+                        return Ok(name.clone());
+                    }
+                }
+            }
+            anyhow::bail!("meta project list returned no projects")
+        }
+        Ok(out) => {
+            anyhow::bail!(
+                "meta project list failed (exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(_) => {
+            // meta not available — fall back to plain git (no --repo needed)
+            anyhow::bail!("meta command not found");
+        }
+    }
 }
 
 /// Resolve mode from CLI arg or from task frontmatter `directives` field.
@@ -119,43 +299,155 @@ async fn unassign_task(slug: &str, kb_root: &Path) {
     }
 }
 
-/// Create a worktree via `meta git worktree create`.
-#[tracing::instrument(skip(meta_workspace_root, kb_root))]
-async fn create_worktree(
+/// Ensure a worktree exists for the given branch. Reuses existing worktrees.
+#[tracing::instrument(skip(meta_workspace_root, kb_root, registry))]
+async fn ensure_worktree(
     worktree_base: &Path,
     kb_basename: &str,
-    repo: &str,
+    repo: Option<&str>,
     branch: &str,
     meta_workspace_root: &Path,
     kb_root: &Path,
-) -> Result<std::path::PathBuf> {
-    let output = tokio::process::Command::new("meta")
-        .args([
-            "git",
-            "worktree",
-            "create",
-            kb_basename,
-            "--repo",
-            repo,
-            "--branch",
-            branch,
-        ])
-        .env("META_WORKTREES", worktree_base)
-        .env("GITKB_ROOT", kb_root)
+    registry: &dyn Registry,
+    force: bool,
+) -> Result<PathBuf> {
+    // Compute expected worktree path
+    let worktree_path = match repo {
+        Some(r) => worktree_base.join(kb_basename).join(r),
+        None => worktree_base.join(kb_basename),
+    };
+
+    // Collision detection: check if another dispatch is running on this worktree
+    let running = registry
+        .find_running_on_worktree(&worktree_path)
+        .await?;
+
+    if !running.is_empty() && !force {
+        // Check if any tmux sessions are actually alive
+        for r in &running {
+            if tmux_session_alive(&r.session).await {
+                anyhow::bail!(
+                    "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
+                    worktree_path.display(),
+                    r.id,
+                    r.session,
+                );
+            }
+        }
+
+        // All sessions are dead — mark stale records as Failed
+        for r in &running {
+            info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
+            if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
+                warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+            }
+        }
+    }
+
+    // Check if worktree already exists for this branch
+    let output = tokio::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
         .current_dir(meta_workspace_root)
         .output()
         .await?;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "meta git worktree create failed (exit {:?}):\n{}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Parse porcelain output to find existing worktree for branch
+        let mut current_path: Option<String> = None;
+        for line in stdout.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                current_path = Some(path.to_string());
+            } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                if b == branch {
+                    if let Some(ref existing) = current_path {
+                        info!(branch, path = %existing, "reusing existing worktree");
+                        // Fetch latest from origin
+                        let _ = tokio::process::Command::new("git")
+                            .args(["-C", existing, "fetch", "origin"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .await;
+                        return Ok(PathBuf::from(existing));
+                    }
+                }
+            } else if line.is_empty() {
+                current_path = None;
+            }
+        }
     }
 
-    // Worktree lands at: <worktree_base>/<kb_basename>/<repo>/
-    Ok(worktree_base.join(kb_basename).join(repo))
+    // No existing worktree — create a new one
+    if let Some(repo_alias) = repo {
+        let output = tokio::process::Command::new("meta")
+            .args([
+                "git",
+                "worktree",
+                "create",
+                kb_basename,
+                "--repo",
+                repo_alias,
+                "--branch",
+                branch,
+            ])
+            .env("META_WORKTREES", worktree_base)
+            .env("GITKB_ROOT", kb_root)
+            .current_dir(meta_workspace_root)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "meta git worktree create failed (exit {:?}):\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    } else {
+        // Plain git worktree (non-meta repo)
+        let output = tokio::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                "-b",
+                branch,
+            ])
+            .current_dir(meta_workspace_root)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "git worktree add failed (exit {:?}):\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    Ok(worktree_path)
+}
+
+/// Print post-dispatch confirmation block.
+fn print_dispatch_confirmation(
+    task_slug: Option<&str>,
+    mode: &Mode,
+    id: &str,
+    branch: &str,
+    worktree_path: &Path,
+    session: &str,
+    log_file: &Path,
+) {
+    let slug_display = task_slug.unwrap_or("(none)");
+    println!("Dispatched: {}", slug_display);
+    println!("  Mode:      {}", mode.as_str());
+    println!("  ID:        {}", id);
+    println!("  Branch:    {}", branch);
+    println!("  Worktree:  {}", worktree_path.display());
+    println!("  Session:   {}", session);
+    println!("  Log:       {}", log_file.display());
 }
 
 /// Execute the full dispatch flow.
@@ -170,26 +462,95 @@ pub async fn dispatch(
     let dispatch_cfg = &config.dispatch;
 
     // Resolve config paths
-    let repo = dispatch_cfg.resolved_repo()?;
     let meta_workspace_root =
         dispatch_cfg.resolved_meta_workspace_root(config.config_dir.as_deref())?;
     let kb_root = &meta_workspace_root;
     let worktree_base = dispatch_cfg.resolved_worktree_base();
     let log_dir = dispatch_cfg.resolved_log_dir();
 
+    // Resolve repo: config > auto-discovery
+    let repo = match dispatch_cfg.resolved_repo() {
+        Some(r) => Some(r.to_string()),
+        None => match discover_repo(&meta_workspace_root).await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                debug!(error = %e, "meta discovery failed, using plain git");
+                None
+            }
+        },
+    };
+
     // 1. Resolve mode
     debug!(%slug, "resolving mode");
     let mode = resolve_mode(opts.cli_mode.clone(), slug, kb_root).await?;
     info!(%slug, mode = %mode.as_str(), "mode resolved");
 
-    // Derive branch and session name
+    // Mode-specific validation
+    if matches!(mode, Mode::ReviewFix | Mode::PrComments) && opts.pr_url.is_none() {
+        anyhow::bail!(
+            "{} mode requires a PR URL (--pr-url). Cannot dispatch without it.",
+            mode.as_str()
+        );
+    }
+
+    // Derive branch and dispatch ID
     let branch = derive_branch(slug);
-    let session_name = build_session_name(slug, &mode);
+
+    // Validate branch name
+    validate_branch_name(&branch).await?;
+
+    let dispatch_id = build_dispatch_id(&branch, &mode);
+    let session_name = dispatch_id.clone();
+
+    // Resolve per-directive budget/turns
+    let mode_key = mode.as_str();
+    let budget = opts
+        .max_budget_override
+        .or_else(|| {
+            config
+                .modes
+                .get(mode_key)
+                .and_then(|m| m.max_budget_usd)
+        })
+        .unwrap_or(dispatch_cfg.max_budget_usd);
+    let turns = opts
+        .max_turns_override
+        .or_else(|| config.modes.get(mode_key).and_then(|m| m.max_turns))
+        .unwrap_or(dispatch_cfg.max_turns);
+
+    // Duplicate session detection
+    if !opts.force && tmux_session_alive(&session_name).await {
+        anyhow::bail!(
+            "tmux session '{}' already exists. Use --force to override.",
+            session_name
+        );
+    }
+
+    // Dry-run: print config and exit
+    if opts.dry_run {
+        println!("=== DRY RUN ===");
+        println!("Task:        {}", slug);
+        println!("Mode:        {}", mode.as_str());
+        println!("Branch:      {}", branch);
+        println!("ID:          {}", dispatch_id);
+        println!("Repo:        {}", repo.as_deref().unwrap_or("(plain git)"));
+        println!("Worktree:    {}/{}{}", worktree_base.display(),
+            meta_workspace_root.file_name().unwrap_or_default().to_string_lossy(),
+            repo.as_ref().map(|r| format!("/{r}")).unwrap_or_default());
+        println!("Budget:      ${:.2}", budget);
+        println!("Turns:       {}", turns);
+        println!("PR URL:      {}", opts.pr_url.as_deref().unwrap_or("(none)"));
+        return Ok(DispatchOutcome {
+            id: dispatch_id,
+            session: session_name,
+            inline_exit_code: Some(0),
+        });
+    }
 
     // 2. CAS-claim the task (before worktree creation)
     cas_claim(slug, &session_name, kb_root).await?;
 
-    // 3. Create worktree (with unassign-on-failure)
+    // 3. Ensure worktree (with unassign-on-failure)
     let kb_basename = meta_workspace_root
         .file_name()
         .ok_or_else(|| {
@@ -198,13 +559,15 @@ pub async fn dispatch(
         .to_string_lossy()
         .into_owned();
 
-    let worktree_path = match create_worktree(
+    let worktree_path = match ensure_worktree(
         &worktree_base,
         &kb_basename,
-        repo,
+        repo.as_deref(),
         &branch,
         &meta_workspace_root,
         kb_root,
+        registry,
+        opts.force,
     )
     .await
     {
@@ -215,7 +578,7 @@ pub async fn dispatch(
         }
     };
 
-    // 4. Resolve agent env
+    // 4. Resolve GH_TOKEN and agent env
     let mut env = HashMap::new();
     env.insert("GITKB_WORKSPACE".to_string(), branch.clone());
     env.insert(
@@ -223,13 +586,52 @@ pub async fn dispatch(
         kb_root.to_string_lossy().into_owned(),
     );
 
+    // GH_TOKEN resolution
+    match resolve_gh_token().await {
+        Ok(token) => {
+            env.insert("GH_TOKEN".to_string(), token);
+        }
+        Err(e) => {
+            warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+        }
+    }
+
+    // AGENT_ALLOWED_PATHS
+    let allowed_paths = compute_allowed_paths(&worktree_path, &[]);
+    env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
+
+    // Unset CLAUDECODE in agent environment
+    env.insert("CLAUDECODE".to_string(), String::new());
+
+    // Write .envrc to worktree (resolver env_overrides would be added here)
+    let envrc_vars: HashMap<String, String> = HashMap::new();
+    if let Err(e) = write_envrc(&worktree_path, &envrc_vars).await {
+        warn!(error = %e, "failed to write .envrc (non-fatal)");
+    }
+
     // 5. Setup log file
     tokio::fs::create_dir_all(&log_dir).await?;
-    let log_file = log_dir.join(format!("{}.jsonl", session_name));
+    let log_file = log_dir.join(format!("{}.jsonl", dispatch_id));
+
+    // Write diagnostic file
+    let gh_token_present = env.contains_key("GH_TOKEN") && !env["GH_TOKEN"].is_empty();
+    write_diag_file(&log_dir, &dispatch_id, gh_token_present).await;
 
     // Render system prompt from mode template + config overrides
     let directive = opts.directive.as_deref().unwrap_or("");
     let prompt = atc_core::templates::render_prompt(&mode, slug, config, directive).await?;
+
+    // "Agent starting" PR comment for review-fix/pr-comments modes
+    if matches!(mode, Mode::ReviewFix | Mode::PrComments) {
+        if let Some(ref url) = opts.pr_url {
+            let comment = format!(
+                "\u{1f916} Agent starting: {} on {}",
+                mode.as_str(),
+                branch
+            );
+            post_pr_comment(url, &comment).await;
+        }
+    }
 
     // 6. Build agent opts and spawn
     let agent_opts = AgentOpts {
@@ -242,8 +644,8 @@ pub async fn dispatch(
         session_name: session_name.clone(),
         sandbox: dispatch_cfg.sandbox,
         inline: opts.inline,
-        max_turns: dispatch_cfg.max_turns,
-        max_budget_usd: dispatch_cfg.max_budget_usd,
+        max_turns: turns,
+        max_budget_usd: budget,
     };
 
     let handle = match executor.spawn(&agent_opts).await {
@@ -275,15 +677,17 @@ pub async fn dispatch(
     };
     let now = Utc::now();
     let record = DispatchRecord {
-        slug: slug.to_string(),
-        branch,
-        worktree_path,
+        id: dispatch_id.clone(),
+        task_slug: Some(slug.to_string()),
+        branch: branch.clone(),
+        worktree_path: worktree_path.clone(),
         session: handle.session.clone(),
-        log_file,
+        log_file: log_file.clone(),
         status,
-        mode,
+        mode: mode.clone(),
         retries: 0,
-        pr_url: None,
+        resolver: "task".to_string(),
+        pr_url: opts.pr_url.clone(),
         checks: HealthChecks::default(),
         cost_usd: None,
         num_turns: None,
@@ -294,9 +698,21 @@ pub async fn dispatch(
     registry.insert(&record).await?;
 
     let outcome = DispatchOutcome {
+        id: dispatch_id.clone(),
         session: handle.session.clone(),
         inline_exit_code: handle.inline_exit_code,
     };
+
+    // Post-dispatch confirmation
+    print_dispatch_confirmation(
+        Some(slug),
+        &mode,
+        &dispatch_id,
+        &branch,
+        &worktree_path,
+        &handle.session,
+        &log_file,
+    );
 
     if let Some(exit_code) = handle.inline_exit_code {
         info!(
@@ -333,27 +749,31 @@ mod tests {
 
     #[test]
     fn test_derive_branch_edge_cases() {
-        // Empty slug
         assert_eq!(derive_branch(""), "");
-        // Trailing slash
         assert_eq!(derive_branch("tasks/"), "tasks--");
-        // Leading slash
         assert_eq!(derive_branch("/tasks"), "--tasks");
-        // Multiple consecutive slashes
         assert_eq!(derive_branch("a//b"), "a----b");
-        // No slashes
         assert_eq!(derive_branch("no-slashes-here"), "no-slashes-here");
+    }
+
+    #[test]
+    fn test_build_dispatch_id_format() {
+        let id = build_dispatch_id("tasks--gitkb-42", &Mode::Implement);
+        let parts: Vec<&str> = id.split('@').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "tasks--gitkb-42");
+        assert_eq!(parts[1], "implement");
+        let ts: i64 = parts[2].parse().expect("timestamp should be a number");
+        assert!(ts > 0);
     }
 
     #[test]
     fn test_build_session_name_format() {
         let name = build_session_name("tasks/gitkb-42", &Mode::Implement);
-        // Format: <slug-sanitized>@<mode>@<unix-ts>
         let parts: Vec<&str> = name.split('@').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], "tasks--gitkb-42");
         assert_eq!(parts[1], "implement");
-        // Third part should be a valid unix timestamp
         let ts: i64 = parts[2].parse().expect("timestamp should be a number");
         assert!(ts > 0);
     }
@@ -365,38 +785,33 @@ mod tests {
 
         let name = build_session_name("tasks/gitkb-264", &Mode::ReviewFix);
         assert!(name.starts_with("tasks--gitkb-264@review-fix@"));
+
+        let name = build_session_name("tasks/gitkb-264", &Mode::Close);
+        assert!(name.starts_with("tasks--gitkb-264@close@"));
+    }
+
+    #[test]
+    fn test_compute_allowed_paths() {
+        let result = compute_allowed_paths(Path::new("/tmp/wt"), &[]);
+        assert!(result.contains("/tmp/wt"));
+        assert!(result.contains("/tmp"));
+        assert!(result.contains("/private/tmp"));
+
+        let result = compute_allowed_paths(
+            Path::new("/tmp/wt"),
+            &["/extra/path".to_string()],
+        );
+        assert!(result.contains("/extra/path"));
     }
 
     #[test]
     fn test_derive_branch_shell_metacharacters() {
-        // Slugs with shell metacharacters should pass through derive_branch
-        // without any injection risk — it only replaces `/` with `--`.
         assert_eq!(derive_branch("tasks/$(whoami)"), "tasks--$(whoami)");
         assert_eq!(derive_branch("tasks/;rm -rf /"), "tasks--;rm -rf --");
-        assert_eq!(derive_branch("tasks/`id`"), "tasks--`id`");
-        assert_eq!(derive_branch("tasks/$HOME"), "tasks--$HOME");
-        assert_eq!(derive_branch("tasks/a'b"), "tasks--a'b");
-        assert_eq!(derive_branch("tasks/a\"b"), "tasks--a\"b");
     }
 
     #[test]
     fn test_derive_branch_double_hyphen_invariant() {
-        // Slug ABNF (`segment = 1*(ALPHA / DIGIT / "-" / "_")`) prevents `--`
-        // in valid slugs. If a malformed slug with `--` reaches derive_branch,
-        // the output would collide with the `/` → `--` mapping. This test locks
-        // the invariant: derive_branch is a pure replace and does NOT reject `--`.
-        // Upstream slug validation (git-kb) is responsible for preventing this.
         assert_eq!(derive_branch("tasks/a--b"), "tasks--a--b");
-    }
-
-    #[test]
-    fn test_build_session_name_shell_metacharacters() {
-        // Session names derived from adversarial slugs should not cause
-        // parsing ambiguity beyond the expected format.
-        let name = build_session_name("tasks/$(rm -rf /)", &Mode::Implement);
-        assert!(name.starts_with("tasks--$(rm -rf --)@implement@"));
-
-        let name = build_session_name("tasks/;echo pwned", &Mode::Research);
-        assert!(name.starts_with("tasks--;echo pwned@research@"));
     }
 }

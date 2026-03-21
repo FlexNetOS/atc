@@ -2,7 +2,7 @@ use crate::types::{DispatchRecord, HealthChecks, Status};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
@@ -31,26 +31,34 @@ impl StatusFilter {
 #[async_trait]
 pub trait Registry: Send + Sync {
     async fn insert(&self, record: &DispatchRecord) -> Result<()>;
-    async fn update_status(&self, slug: &str, status: Status) -> Result<()>;
-    async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
-    async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>>;
+    async fn update_status(&self, id: &str, status: Status) -> Result<()>;
+    async fn update_cost(&self, id: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
+    async fn get(&self, id: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
     /// Atomically update health checks, status, and updated_at in a single write.
     async fn update_health(
         &self,
-        slug: &str,
+        id: &str,
         checks: &HealthChecks,
         status: Status,
         updated_at: DateTime<Utc>,
     ) -> Result<()>;
-    async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()>;
+    async fn set_pr_url(&self, id: &str, url: &str) -> Result<()>;
     async fn increment_retries(
         &self,
-        slug: &str,
+        id: &str,
         new_session: &str,
-        new_log_file: &std::path::Path,
+        new_log_file: &Path,
         new_dispatched_at: DateTime<Utc>,
     ) -> Result<()>;
+
+    // --- New query methods ---
+    async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>>;
+    async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>>;
+    async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>>;
+    async fn find_by_worktree(&self, worktree_path: &Path) -> Result<Vec<DispatchRecord>>;
+    async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>>;
+    async fn find_running_on_worktree(&self, worktree_path: &Path) -> Result<Vec<DispatchRecord>>;
 }
 
 pub struct SqliteRegistry {
@@ -59,7 +67,8 @@ pub struct SqliteRegistry {
 
 const CREATE_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS dispatches (
-  slug                      TEXT PRIMARY KEY,
+  id                        TEXT PRIMARY KEY,
+  task_slug                 TEXT,
   branch                    TEXT NOT NULL,
   worktree_path             TEXT NOT NULL,
   session                   TEXT NOT NULL,
@@ -67,6 +76,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   status                    TEXT NOT NULL DEFAULT 'running',
   mode                      TEXT NOT NULL,
   retries                   INTEGER NOT NULL DEFAULT 0,
+  resolver                  TEXT NOT NULL,
   pr_url                    TEXT,
   check_agent_exited_clean  INTEGER NOT NULL DEFAULT 0,
   check_branch_pushed       INTEGER NOT NULL DEFAULT 0,
@@ -82,14 +92,42 @@ CREATE TABLE IF NOT EXISTS dispatches (
 );
 "#;
 
-const CREATE_INDEX_SQL: &str =
-    "CREATE INDEX IF NOT EXISTS idx_dispatches_status ON dispatches(status);";
+const CREATE_INDEXES_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_status ON dispatches(status);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_task_slug ON dispatches(task_slug);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
+];
 
 impl SqliteRegistry {
-    /// Apply DDL (create table + index) to the pool.
+    /// Apply DDL (create table + indexes) to the pool.
     async fn apply_ddl(pool: &sqlx::SqlitePool) -> Result<()> {
         sqlx::query(CREATE_TABLE_SQL).execute(pool).await?;
-        sqlx::query(CREATE_INDEX_SQL).execute(pool).await?;
+        for idx_sql in CREATE_INDEXES_SQL {
+            sqlx::query(idx_sql).execute(pool).await?;
+        }
+        Ok(())
+    }
+
+    /// Migrate from old schema (slug PK) to new schema (id PK).
+    /// DROP + CREATE is fine — no production state to preserve.
+    async fn migrate_if_needed(pool: &sqlx::SqlitePool) -> Result<()> {
+        // Check if old schema exists (has 'slug' column but no 'id' column)
+        let row: Option<(i32,)> = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'slug'",
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some((count,)) = row {
+            if count > 0 {
+                // Old schema detected, drop and recreate
+                sqlx::query("DROP TABLE IF EXISTS dispatches")
+                    .execute(pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -112,6 +150,8 @@ impl SqliteRegistry {
             "failed to enable WAL mode, got: {}",
             mode.0
         );
+
+        Self::migrate_if_needed(&pool).await?;
         Self::apply_ddl(&pool).await?;
 
         Ok(Self { pool })
@@ -147,7 +187,8 @@ impl SqliteRegistry {
         let log_file_str: String = row.get("log_file");
 
         Ok(DispatchRecord {
-            slug: row.get("slug"),
+            id: row.get("id"),
+            task_slug: row.get("task_slug"),
             branch: row.get("branch"),
             worktree_path: PathBuf::from(worktree_str),
             session: row.get("session"),
@@ -156,6 +197,7 @@ impl SqliteRegistry {
             mode: mode_str.parse()?,
             retries: u32::try_from(row.get::<i32, _>("retries"))
                 .map_err(|_| anyhow::anyhow!("invalid retries value in database"))?,
+            resolver: row.get("resolver"),
             pr_url: row.get("pr_url"),
             checks: HealthChecks {
                 agent_exited_clean: row.get::<i32, _>("check_agent_exited_clean") != 0,
@@ -187,16 +229,17 @@ impl Registry for SqliteRegistry {
     async fn insert(&self, record: &DispatchRecord) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO dispatches (
-                slug, branch, worktree_path, session, log_file, status, mode, retries,
-                pr_url, check_agent_exited_clean, check_branch_pushed, check_pr_created,
+                id, task_slug, branch, worktree_path, session, log_file, status, mode, retries,
+                resolver, pr_url, check_agent_exited_clean, check_branch_pushed, check_pr_created,
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
                 cost_usd, num_turns, duration_ms, dispatched_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21, ?22
             )"#,
         )
-        .bind(&record.slug)
+        .bind(&record.id)
+        .bind(&record.task_slug)
         .bind(&record.branch)
         .bind(
             record
@@ -214,6 +257,7 @@ impl Registry for SqliteRegistry {
         .bind(record.status.as_str())
         .bind(record.mode.as_str())
         .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
+        .bind(&record.resolver)
         .bind(&record.pr_url)
         .bind(record.checks.agent_exited_clean as i32)
         .bind(record.checks.branch_pushed as i32)
@@ -243,44 +287,44 @@ impl Registry for SqliteRegistry {
         Ok(())
     }
 
-    async fn update_status(&self, slug: &str, status: Status) -> Result<()> {
+    async fn update_status(&self, id: &str, status: Status) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let result =
-            sqlx::query("UPDATE dispatches SET status = ?1, updated_at = ?2 WHERE slug = ?3")
+            sqlx::query("UPDATE dispatches SET status = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(status.as_str())
                 .bind(&now)
-                .bind(slug)
+                .bind(id)
                 .execute(&self.pool)
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
+            "no dispatch record found for id: {id}"
         );
         Ok(())
     }
 
-    async fn update_cost(&self, slug: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()> {
+    async fn update_cost(&self, id: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
-            "UPDATE dispatches SET cost_usd = ?1, num_turns = ?2, duration_ms = ?3, updated_at = ?4 WHERE slug = ?5",
+            "UPDATE dispatches SET cost_usd = ?1, num_turns = ?2, duration_ms = ?3, updated_at = ?4 WHERE id = ?5",
         )
         .bind(cost)
         .bind(i32::try_from(turns).map_err(|_| anyhow::anyhow!("turns overflows i32"))?)
         .bind(i64::try_from(duration_ms).map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?)
         .bind(&now)
-        .bind(slug)
+        .bind(id)
         .execute(&self.pool)
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
+            "no dispatch record found for id: {id}"
         );
         Ok(())
     }
 
-    async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>> {
-        let row = sqlx::query("SELECT * FROM dispatches WHERE slug = ?1")
-            .bind(slug)
+    async fn get(&self, id: &str) -> Result<Option<DispatchRecord>> {
+        let row = sqlx::query("SELECT * FROM dispatches WHERE id = ?1")
+            .bind(id)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -329,7 +373,7 @@ impl Registry for SqliteRegistry {
 
     async fn update_health(
         &self,
-        slug: &str,
+        id: &str,
         checks: &HealthChecks,
         status: Status,
         updated_at: DateTime<Utc>,
@@ -344,7 +388,7 @@ impl Registry for SqliteRegistry {
                 check_threads_resolved = ?6,
                 status = ?7,
                 updated_at = ?8
-            WHERE slug = ?9"#,
+            WHERE id = ?9"#,
         )
         .bind(checks.agent_exited_clean as i32)
         .bind(checks.branch_pushed as i32)
@@ -354,37 +398,37 @@ impl Registry for SqliteRegistry {
         .bind(checks.threads_resolved as i32)
         .bind(status.as_str())
         .bind(updated_at.to_rfc3339())
-        .bind(slug)
+        .bind(id)
         .execute(&self.pool)
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
+            "no dispatch record found for id: {id}"
         );
         Ok(())
     }
 
-    async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()> {
+    async fn set_pr_url(&self, id: &str, url: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let result =
-            sqlx::query("UPDATE dispatches SET pr_url = ?1, updated_at = ?2 WHERE slug = ?3")
+            sqlx::query("UPDATE dispatches SET pr_url = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(url)
                 .bind(&now)
-                .bind(slug)
+                .bind(id)
                 .execute(&self.pool)
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
+            "no dispatch record found for id: {id}"
         );
         Ok(())
     }
 
     async fn increment_retries(
         &self,
-        slug: &str,
+        id: &str,
         new_session: &str,
-        new_log_file: &std::path::Path,
+        new_log_file: &Path,
         new_dispatched_at: DateTime<Utc>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
@@ -406,7 +450,7 @@ impl Registry for SqliteRegistry {
                 cost_usd = NULL,
                 num_turns = NULL,
                 duration_ms = NULL
-            WHERE slug = ?5"#,
+            WHERE id = ?5"#,
         )
         .bind(new_session)
         .bind(
@@ -416,14 +460,84 @@ impl Registry for SqliteRegistry {
         )
         .bind(new_dispatched_at.to_rfc3339())
         .bind(&now)
-        .bind(slug)
+        .bind(id)
         .execute(&self.pool)
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for slug: {slug}"
+            "no dispatch record found for id: {id}"
         );
         Ok(())
+    }
+
+    async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE branch = ?1 ORDER BY dispatched_at DESC",
+        )
+        .bind(branch)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE task_slug = ?1 ORDER BY dispatched_at DESC",
+        )
+        .bind(task_slug)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC",
+        )
+        .bind(pr_url)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_by_worktree(&self, worktree_path: &Path) -> Result<Vec<DispatchRecord>> {
+        let path_str = worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE worktree_path = ?1 ORDER BY dispatched_at DESC",
+        )
+        .bind(path_str)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
+        let row = sqlx::query(
+            "SELECT * FROM dispatches WHERE task_slug = ?1 ORDER BY dispatched_at DESC LIMIT 1",
+        )
+        .bind(task_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_record(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_running_on_worktree(&self, worktree_path: &Path) -> Result<Vec<DispatchRecord>> {
+        let path_str = worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE worktree_path = ?1 AND status = 'running' ORDER BY dispatched_at DESC",
+        )
+        .bind(path_str)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
     }
 }
 
@@ -435,16 +549,18 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    fn sample_record(slug: &str) -> DispatchRecord {
+    fn sample_record(id: &str) -> DispatchRecord {
         DispatchRecord {
-            slug: slug.to_string(),
-            branch: format!("{}-branch", slug.replace('/', "-")),
+            id: id.to_string(),
+            task_slug: Some("tasks/gitkb-42".to_string()),
+            branch: "tasks--gitkb-42".to_string(),
             worktree_path: PathBuf::from("/tmp/test-worktree"),
-            session: format!("{}@implement@1234567890", slug.replace('/', "-")),
+            session: format!("{}@implement@1234567890", id),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status: Status::Running,
             mode: Mode::Implement,
             retries: 0,
+            resolver: "task".to_string(),
             pr_url: None,
             checks: HealthChecks::default(),
             cost_usd: None,
@@ -458,27 +574,55 @@ mod tests {
     #[tokio::test]
     async fn test_insert_and_get_round_trip() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        let record = sample_record("tasks/gitkb-42");
+        let record = sample_record("tasks--gitkb-42@implement@1234567890");
         registry.insert(&record).await.unwrap();
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-        assert_eq!(fetched.slug, "tasks/gitkb-42");
+        let fetched = registry
+            .get("tasks--gitkb-42@implement@1234567890")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.id, "tasks--gitkb-42@implement@1234567890");
+        assert_eq!(fetched.task_slug.as_deref(), Some("tasks/gitkb-42"));
         assert_eq!(fetched.status, Status::Running);
         assert_eq!(fetched.mode, Mode::Implement);
         assert_eq!(fetched.retries, 0);
+        assert_eq!(fetched.resolver, "task");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_dispatches_per_task() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("tasks--gitkb-42@implement@1000");
+        r1.task_slug = Some("tasks/gitkb-42".to_string());
+        let mut r2 = sample_record("tasks--gitkb-42@implement@2000");
+        r2.task_slug = Some("tasks/gitkb-42".to_string());
+        let mut r3 = sample_record("tasks--gitkb-42@review-fix@3000");
+        r3.task_slug = Some("tasks/gitkb-42".to_string());
+        r3.mode = Mode::ReviewFix;
+
+        registry.insert(&r1).await.unwrap();
+        registry.insert(&r2).await.unwrap();
+        registry.insert(&r3).await.unwrap();
+
+        // All three should be retrievable
+        let all = registry.list(StatusFilter::all()).await.unwrap();
+        assert_eq!(all.len(), 3);
+
+        // find_by_task_slug should return all 3
+        let by_slug = registry
+            .find_by_task_slug("tasks/gitkb-42")
+            .await
+            .unwrap();
+        assert_eq!(by_slug.len(), 3);
     }
 
     #[tokio::test]
     async fn test_update_status() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-        registry
-            .update_status("tasks/gitkb-42", Status::Done)
-            .await
-            .unwrap();
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        let id = "test@implement@1000";
+        registry.insert(&sample_record(id)).await.unwrap();
+        registry.update_status(id, Status::Done).await.unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.status, Status::Done);
     }
 
@@ -498,15 +642,15 @@ mod tests {
     async fn test_list_with_filter() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         registry
-            .insert(&sample_record("tasks/gitkb-1"))
+            .insert(&sample_record("id-1"))
             .await
             .unwrap();
         registry
-            .insert(&sample_record("tasks/gitkb-2"))
+            .insert(&sample_record("id-2"))
             .await
             .unwrap();
         registry
-            .update_status("tasks/gitkb-2", Status::Done)
+            .update_status("id-2", Status::Done)
             .await
             .unwrap();
 
@@ -518,23 +662,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(running.len(), 1);
-        assert_eq!(running[0].slug, "tasks/gitkb-1");
+        assert_eq!(running[0].id, "id-1");
     }
 
     #[tokio::test]
     async fn test_update_cost() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
+        let id = "cost-test";
+        registry.insert(&sample_record(id)).await.unwrap();
 
-        registry
-            .update_cost("tasks/gitkb-42", 1.23, 15, 45000)
-            .await
-            .unwrap();
+        registry.update_cost(id, 1.23, 15, 45000).await.unwrap();
 
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.cost_usd, Some(1.23));
         assert_eq!(fetched.num_turns, Some(15));
         assert_eq!(fetched.duration_ms, Some(45000));
@@ -543,17 +682,15 @@ mod tests {
     #[tokio::test]
     async fn test_set_pr_url() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "pr-test";
+        registry.insert(&sample_record(id)).await.unwrap();
+
         registry
-            .insert(&sample_record("tasks/gitkb-42"))
+            .set_pr_url(id, "https://github.com/org/repo/pull/1")
             .await
             .unwrap();
 
-        registry
-            .set_pr_url("tasks/gitkb-42", "https://github.com/org/repo/pull/1")
-            .await
-            .unwrap();
-
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(
             fetched.pr_url.as_deref(),
             Some("https://github.com/org/repo/pull/1")
@@ -563,10 +700,8 @@ mod tests {
     #[tokio::test]
     async fn test_update_health_round_trip() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
+        let id = "health-test";
+        registry.insert(&sample_record(id)).await.unwrap();
 
         let checks = HealthChecks {
             agent_exited_clean: true,
@@ -582,11 +717,11 @@ mod tests {
             .with_timezone(&Utc);
 
         registry
-            .update_health("tasks/gitkb-42", &checks, status, updated_at)
+            .update_health(id, &checks, status, updated_at)
             .await
             .unwrap();
 
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.checks, checks);
         assert_eq!(fetched.status, Status::NeedsReview);
         assert_eq!(fetched.updated_at, updated_at);
@@ -597,7 +732,7 @@ mod tests {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
             .update_health(
-                "tasks/no-such-slug",
+                "no-such-id",
                 &HealthChecks::default(),
                 Status::Running,
                 Utc::now(),
@@ -613,7 +748,7 @@ mod tests {
     #[tokio::test]
     async fn test_round_trip_with_all_optional_fields() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        let mut record = sample_record("tasks/gitkb-42");
+        let mut record = sample_record("full-test");
         record.pr_url = Some("https://github.com/org/repo/pull/99".to_string());
         record.cost_usd = Some(4.56);
         record.num_turns = Some(42);
@@ -628,7 +763,7 @@ mod tests {
         };
         registry.insert(&record).await.unwrap();
 
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        let fetched = registry.get("full-test").await.unwrap().unwrap();
         assert_eq!(fetched.pr_url, record.pr_url);
         assert_eq!(fetched.cost_usd, record.cost_usd);
         assert_eq!(fetched.num_turns, record.num_turns);
@@ -641,7 +776,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_nonexistent_returns_none() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        let result = registry.get("tasks/does-not-exist").await.unwrap();
+        let result = registry.get("does-not-exist").await.unwrap();
         assert!(result.is_none());
     }
 
@@ -649,7 +784,7 @@ mod tests {
     async fn test_update_status_nonexistent_errors() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
-            .update_status("tasks/no-such-slug", Status::Done)
+            .update_status("no-such-id", Status::Done)
             .await
             .unwrap_err();
         assert!(
@@ -662,7 +797,7 @@ mod tests {
     async fn test_update_cost_nonexistent_errors() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
-            .update_cost("tasks/no-such-slug", 1.0, 1, 1000)
+            .update_cost("no-such-id", 1.0, 1, 1000)
             .await
             .unwrap_err();
         assert!(
@@ -675,7 +810,7 @@ mod tests {
     async fn test_set_pr_url_nonexistent_errors() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
-            .set_pr_url("tasks/no-such-slug", "https://example.com")
+            .set_pr_url("no-such-id", "https://example.com")
             .await
             .unwrap_err();
         assert!(
@@ -689,7 +824,7 @@ mod tests {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let err = registry
             .increment_retries(
-                "tasks/no-such-slug",
+                "no-such-id",
                 "session",
                 &PathBuf::from("/tmp/log.jsonl"),
                 Utc::now(),
@@ -705,15 +840,9 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_insert_errors() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-        let err = registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap_err();
-        // SQLite UNIQUE constraint violation
+        let id = "dup-test";
+        registry.insert(&sample_record(id)).await.unwrap();
+        let err = registry.insert(&sample_record(id)).await.unwrap_err();
         assert!(
             err.to_string().contains("UNIQUE constraint failed"),
             "unexpected error: {err}"
@@ -737,23 +866,21 @@ mod tests {
     #[tokio::test]
     async fn test_list_with_any_filter() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        // Insert records with different statuses
-        let mut r1 = sample_record("tasks/running-1");
+        let mut r1 = sample_record("running-1");
         r1.status = Status::Running;
-        let mut r2 = sample_record("tasks/done-1");
+        let mut r2 = sample_record("done-1");
         r2.status = Status::Done;
-        let mut r3 = sample_record("tasks/needs-review-1");
+        let mut r3 = sample_record("needs-review-1");
         r3.status = Status::NeedsReview;
-        let mut r4 = sample_record("tasks/failed-1");
+        let mut r4 = sample_record("failed-1");
         r4.status = Status::Failed;
-        let mut r5 = sample_record("tasks/needs-human-1");
+        let mut r5 = sample_record("needs-human-1");
         r5.status = Status::NeedsHuman;
 
         for r in [&r1, &r2, &r3, &r4, &r5] {
             registry.insert(r).await.unwrap();
         }
 
-        // Query running + needs-review (the health check query)
         let active = registry
             .list(StatusFilter::any(vec![
                 Status::Running,
@@ -762,84 +889,192 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(active.len(), 2);
-        let slugs: Vec<&str> = active.iter().map(|r| r.slug.as_str()).collect();
-        assert!(slugs.contains(&"tasks/running-1"));
-        assert!(slugs.contains(&"tasks/needs-review-1"));
+        let ids: Vec<&str> = active.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"running-1"));
+        assert!(ids.contains(&"needs-review-1"));
 
-        // Query single status via Any
-        let done_only = registry
-            .list(StatusFilter::any(vec![Status::Done]))
-            .await
-            .unwrap();
-        assert_eq!(done_only.len(), 1);
-        assert_eq!(done_only[0].slug, "tasks/done-1");
-
-        // Query all terminal statuses
-        let terminal = registry
-            .list(StatusFilter::any(vec![Status::Done, Status::Failed]))
-            .await
-            .unwrap();
-        assert_eq!(terminal.len(), 2);
-
-        // Empty vec returns empty
         let empty = registry.list(StatusFilter::any(vec![])).await.unwrap();
         assert!(empty.is_empty());
+    }
+
+    // --- New query method tests ---
+
+    #[tokio::test]
+    async fn test_find_by_branch() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.branch = "feature-a".to_string();
+        let mut r2 = sample_record("id-2");
+        r2.branch = "feature-b".to_string();
+        let mut r3 = sample_record("id-3");
+        r3.branch = "feature-a".to_string();
+
+        for r in [&r1, &r2, &r3] {
+            registry.insert(r).await.unwrap();
+        }
+
+        let results = registry.find_by_branch("feature-a").await.unwrap();
+        assert_eq!(results.len(), 2);
+        let results = registry.find_by_branch("feature-b").await.unwrap();
+        assert_eq!(results.len(), 1);
+        let results = registry.find_by_branch("nonexistent").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_find_by_task_slug() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.task_slug = Some("tasks/gitkb-42".to_string());
+        let mut r2 = sample_record("id-2");
+        r2.task_slug = Some("tasks/gitkb-42".to_string());
+        let mut r3 = sample_record("id-3");
+        r3.task_slug = Some("tasks/gitkb-99".to_string());
+        let mut r4 = sample_record("id-4");
+        r4.task_slug = None;
+
+        for r in [&r1, &r2, &r3, &r4] {
+            registry.insert(r).await.unwrap();
+        }
+
+        let results = registry
+            .find_by_task_slug("tasks/gitkb-42")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        let results = registry
+            .find_by_task_slug("tasks/gitkb-99")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_pr_url() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.pr_url = Some("https://github.com/org/repo/pull/1".to_string());
+        let mut r2 = sample_record("id-2");
+        r2.pr_url = Some("https://github.com/org/repo/pull/1".to_string());
+        let mut r3 = sample_record("id-3");
+        r3.pr_url = None;
+
+        for r in [&r1, &r2, &r3] {
+            registry.insert(r).await.unwrap();
+        }
+
+        let results = registry
+            .find_by_pr_url("https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_worktree() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.worktree_path = PathBuf::from("/tmp/wt-a");
+        let mut r2 = sample_record("id-2");
+        r2.worktree_path = PathBuf::from("/tmp/wt-a");
+        let mut r3 = sample_record("id-3");
+        r3.worktree_path = PathBuf::from("/tmp/wt-b");
+
+        for r in [&r1, &r2, &r3] {
+            registry.insert(r).await.unwrap();
+        }
+
+        let results = registry
+            .find_by_worktree(Path::new("/tmp/wt-a"))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_latest_for_task() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.task_slug = Some("tasks/gitkb-42".to_string());
+        r1.dispatched_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut r2 = sample_record("id-2");
+        r2.task_slug = Some("tasks/gitkb-42".to_string());
+        r2.dispatched_at = DateTime::parse_from_rfc3339("2025-06-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        registry.insert(&r1).await.unwrap();
+        registry.insert(&r2).await.unwrap();
+
+        let latest = registry
+            .find_latest_for_task("tasks/gitkb-42")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, "id-2");
+
+        let none = registry
+            .find_latest_for_task("tasks/nonexistent")
+            .await
+            .unwrap();
+        assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_running_on_worktree() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.worktree_path = PathBuf::from("/tmp/wt-a");
+        r1.status = Status::Running;
+        let mut r2 = sample_record("id-2");
+        r2.worktree_path = PathBuf::from("/tmp/wt-a");
+        r2.status = Status::Done;
+        let mut r3 = sample_record("id-3");
+        r3.worktree_path = PathBuf::from("/tmp/wt-b");
+        r3.status = Status::Running;
+
+        for r in [&r1, &r2, &r3] {
+            registry.insert(r).await.unwrap();
+        }
+
+        let results = registry
+            .find_running_on_worktree(Path::new("/tmp/wt-a"))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
     }
 
     // --- Security / red-team tests ---
 
     #[tokio::test]
-    async fn test_sql_injection_in_slug() {
+    async fn test_sql_injection_in_id() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        let malicious_slug = "'; DROP TABLE dispatches; --";
-        let mut record = sample_record(malicious_slug);
+        let malicious_id = "'; DROP TABLE dispatches; --";
+        let mut record = sample_record(malicious_id);
         record.branch = "safe-branch".to_string();
         registry.insert(&record).await.unwrap();
 
-        // Table still exists and record round-trips
-        let fetched = registry.get(malicious_slug).await.unwrap().unwrap();
-        assert_eq!(fetched.slug, malicious_slug);
+        let fetched = registry.get(malicious_id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, malicious_id);
 
-        // Other operations still work
         let all = registry.list(StatusFilter::all()).await.unwrap();
         assert_eq!(all.len(), 1);
     }
 
     #[tokio::test]
-    async fn test_unicode_slug_round_trip() {
+    async fn test_nullable_task_slug() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        let unicode_slug = "tasks/日本語-émojis-🚀";
-        registry.insert(&sample_record(unicode_slug)).await.unwrap();
-        let fetched = registry.get(unicode_slug).await.unwrap().unwrap();
-        assert_eq!(fetched.slug, unicode_slug);
-    }
-
-    #[tokio::test]
-    async fn test_very_long_slug() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        let long_slug: String = "a".repeat(4096);
-        registry.insert(&sample_record(&long_slug)).await.unwrap();
-        let fetched = registry.get(&long_slug).await.unwrap().unwrap();
-        assert_eq!(fetched.slug, long_slug);
-    }
-
-    #[tokio::test]
-    async fn test_empty_slug() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry.insert(&sample_record("")).await.unwrap();
-        let fetched = registry.get("").await.unwrap().unwrap();
-        assert_eq!(fetched.slug, "");
-    }
-
-    #[tokio::test]
-    async fn test_path_traversal_stored_literally() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        let mut record = sample_record("tasks/traversal");
-        record.worktree_path = PathBuf::from("../../etc/passwd");
+        let mut record = sample_record("prompt-dispatch");
+        record.task_slug = None;
+        record.resolver = "prompt".to_string();
         registry.insert(&record).await.unwrap();
-        let fetched = registry.get("tasks/traversal").await.unwrap().unwrap();
-        // Path should be stored as-is, no resolution
-        assert_eq!(fetched.worktree_path, PathBuf::from("../../etc/passwd"));
+
+        let fetched = registry.get("prompt-dispatch").await.unwrap().unwrap();
+        assert!(fetched.task_slug.is_none());
+        assert_eq!(fetched.resolver, "prompt");
     }
 
     #[tokio::test]
@@ -851,13 +1086,15 @@ mod tests {
             Status::Failed,
             Status::NeedsReview,
             Status::NeedsHuman,
+            Status::Stopped,
+            Status::Retrying,
         ];
         for (i, status) in statuses.iter().enumerate() {
-            let slug = format!("tasks/status-{i}");
-            let mut record = sample_record(&slug);
+            let id = format!("status-{i}");
+            let mut record = sample_record(&id);
             record.status = *status;
             registry.insert(&record).await.unwrap();
-            let fetched = registry.get(&slug).await.unwrap().unwrap();
+            let fetched = registry.get(&id).await.unwrap().unwrap();
             assert_eq!(&fetched.status, status);
         }
     }
@@ -873,13 +1110,14 @@ mod tests {
             Mode::PrComments,
             Mode::Refine,
             Mode::CreateTask,
+            Mode::Close,
         ];
         for (i, mode) in modes.iter().enumerate() {
-            let slug = format!("tasks/mode-{i}");
-            let mut record = sample_record(&slug);
+            let id = format!("mode-{i}");
+            let mut record = sample_record(&id);
             record.mode = mode.clone();
             registry.insert(&record).await.unwrap();
-            let fetched = registry.get(&slug).await.unwrap().unwrap();
+            let fetched = registry.get(&id).await.unwrap().unwrap();
             assert_eq!(&fetched.mode, mode);
         }
     }
@@ -887,19 +1125,17 @@ mod tests {
     #[tokio::test]
     async fn test_increment_retries() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "retry-test";
+        registry.insert(&sample_record(id)).await.unwrap();
         registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-        registry
-            .update_status("tasks/gitkb-42", Status::Failed)
+            .update_status(id, Status::Failed)
             .await
             .unwrap();
 
         let new_time = Utc::now();
         registry
             .increment_retries(
-                "tasks/gitkb-42",
+                id,
                 "new-session",
                 &PathBuf::from("/tmp/retry.jsonl"),
                 new_time,
@@ -907,148 +1143,36 @@ mod tests {
             .await
             .unwrap();
 
-        let fetched = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.retries, 1);
         assert_eq!(fetched.status, Status::Running);
         assert_eq!(fetched.session, "new-session");
-        // Verify per-attempt state was reset
         assert!(!fetched.checks.agent_exited_clean);
-        assert!(!fetched.checks.branch_pushed);
-        assert!(!fetched.checks.pr_created);
-        assert!(!fetched.checks.ci_passed);
-        assert!(!fetched.checks.reviews_approved);
-        assert!(!fetched.checks.threads_resolved);
         assert_eq!(fetched.pr_url, None);
         assert_eq!(fetched.cost_usd, None);
-        assert_eq!(fetched.num_turns, None);
-        assert_eq!(fetched.duration_ms, None);
     }
-
-    #[tokio::test]
-    async fn test_increment_retries_clears_pr_url() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-        // Set a pr_url from a previous attempt
-        registry
-            .set_pr_url("tasks/gitkb-42", "https://github.com/org/repo/pull/1")
-            .await
-            .unwrap();
-        let before = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-        assert!(before.pr_url.is_some());
-
-        // Retry should clear pr_url
-        registry
-            .increment_retries(
-                "tasks/gitkb-42",
-                "retry-session",
-                &PathBuf::from("/tmp/retry.jsonl"),
-                Utc::now(),
-            )
-            .await
-            .unwrap();
-
-        let after = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-        assert_eq!(after.pr_url, None, "pr_url should be cleared on retry");
-    }
-
-    // --- Timestamp advancement tests ---
-
-    #[tokio::test]
-    async fn test_updated_at_advances_on_mutation() {
-        let registry = SqliteRegistry::in_memory().await.unwrap();
-        registry
-            .insert(&sample_record("tasks/gitkb-42"))
-            .await
-            .unwrap();
-        let before = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-
-        // Small sleep to ensure clock advances
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        registry
-            .update_status("tasks/gitkb-42", Status::Done)
-            .await
-            .unwrap();
-        let after = registry.get("tasks/gitkb-42").await.unwrap().unwrap();
-
-        assert!(
-            after.updated_at > before.updated_at,
-            "updated_at should advance: before={}, after={}",
-            before.updated_at,
-            after.updated_at
-        );
-    }
-
-    // --- List ordering tests ---
 
     #[tokio::test]
     async fn test_list_ordered_by_dispatched_at_desc() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
 
-        // Insert records with known ordering: older first
-        let mut older = sample_record("tasks/older");
+        let mut older = sample_record("older");
         older.dispatched_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let mut newer = sample_record("tasks/newer");
+        let mut newer = sample_record("newer");
         newer.dispatched_at = DateTime::parse_from_rfc3339("2025-06-15T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
 
-        // Insert older first, newer second
         registry.insert(&older).await.unwrap();
         registry.insert(&newer).await.unwrap();
 
         let all = registry.list(StatusFilter::all()).await.unwrap();
         assert_eq!(all.len(), 2);
-        // DESC order: newer should be first
-        assert_eq!(all[0].slug, "tasks/newer");
-        assert_eq!(all[1].slug, "tasks/older");
+        assert_eq!(all[0].id, "newer");
+        assert_eq!(all[1].id, "older");
     }
-
-    // --- Serde JSON round-trip tests ---
-
-    #[tokio::test]
-    async fn test_dispatch_record_serde_json_round_trip() {
-        let mut record = sample_record("tasks/gitkb-42");
-        record.pr_url = Some("https://github.com/org/repo/pull/1".to_string());
-        record.cost_usd = Some(2.50);
-        record.num_turns = Some(10);
-        record.duration_ms = Some(60_000);
-
-        let json = serde_json::to_string(&record).unwrap();
-        let deserialized: DispatchRecord = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.slug, record.slug);
-        assert_eq!(deserialized.status, record.status);
-        assert_eq!(deserialized.mode, record.mode);
-        assert_eq!(deserialized.pr_url, record.pr_url);
-        assert_eq!(deserialized.cost_usd, record.cost_usd);
-        assert_eq!(deserialized.num_turns, record.num_turns);
-        assert_eq!(deserialized.duration_ms, record.duration_ms);
-        assert_eq!(deserialized.checks, record.checks);
-    }
-
-    #[test]
-    fn test_status_serde_kebab_case() {
-        let json = serde_json::to_string(&Status::NeedsReview).unwrap();
-        assert_eq!(json, "\"needs-review\"");
-        let deserialized: Status = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, Status::NeedsReview);
-    }
-
-    #[test]
-    fn test_mode_serde_kebab_case() {
-        let json = serde_json::to_string(&Mode::KbUpdate).unwrap();
-        assert_eq!(json, "\"kb-update\"");
-        let deserialized: Mode = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, Mode::KbUpdate);
-    }
-
-    // --- Concurrent access test ---
 
     #[tokio::test]
     async fn test_concurrent_inserts() {
@@ -1058,8 +1182,8 @@ mod tests {
         for i in 0..10 {
             let reg = Arc::clone(&registry);
             handles.push(tokio::spawn(async move {
-                let slug = format!("tasks/concurrent-{i}");
-                reg.insert(&sample_record(&slug)).await.unwrap();
+                let id = format!("concurrent-{i}");
+                reg.insert(&sample_record(&id)).await.unwrap();
             }));
         }
 

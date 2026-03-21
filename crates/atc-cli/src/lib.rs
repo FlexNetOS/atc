@@ -34,18 +34,34 @@ mod args {
     #[derive(Subcommand)]
     pub enum Commands {
         /// Dispatch an agent to work on a task
+        #[command(name = "run", alias = "dispatch")]
         Dispatch {
             /// Task slug (e.g. tasks/gitkb-42)
             slug: String,
-            /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task)
+            /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task, close)
             #[arg(value_name = "MODE", value_parser = clap::value_parser!(Mode))]
             mode: Option<Mode>,
             /// Additional directive passed into prompt rendering
             #[arg(long)]
             directive: Option<String>,
+            /// PR URL (required for review-fix and pr-comments modes)
+            #[arg(long)]
+            pr_url: Option<String>,
             /// Run inline (synchronous, no tmux). Auto-enabled when ATC_CI=true.
             #[arg(long)]
             inline: bool,
+            /// Force dispatch even if worktree is in use or session exists
+            #[arg(long)]
+            force: bool,
+            /// Preview full dispatch config without launching
+            #[arg(long)]
+            dry_run: bool,
+            /// Override max budget (USD) for this dispatch
+            #[arg(long)]
+            max_budget_usd: Option<f64>,
+            /// Override max turns for this dispatch
+            #[arg(long)]
+            max_turns: Option<u32>,
         },
         /// Check health of all active dispatches
         Health {
@@ -78,20 +94,20 @@ mod args {
         },
         /// Send a message to a running agent's tmux session
         Redirect {
-            /// Task slug (e.g. tasks/gitkb-42)
-            slug: String,
+            /// Dispatch ID or task slug
+            id: String,
             /// Message to send to the agent
             message: String,
         },
         /// Re-dispatch a failed task with the same mode and config
         Retry {
-            /// Task slug (e.g. tasks/gitkb-42)
-            slug: String,
+            /// Dispatch ID or task slug
+            id: String,
         },
         /// Show table view of all dispatch records
         #[command(name = "status")]
         StatusCmd {
-            /// Filter by status (running, done, failed, needs-review, needs-human)
+            /// Filter by status (running, done, failed, needs-review, needs-human, stopped, retrying)
             #[arg(long = "status")]
             status_filter: Option<String>,
             /// Output as JSON array
@@ -100,12 +116,12 @@ mod args {
         },
         /// Show detailed info for a single dispatch record
         Info {
-            /// Task slug (e.g. tasks/gitkb-42)
-            slug: String,
+            /// Dispatch ID or task slug
+            id: String,
         },
         /// Tail the stream-json log for a dispatch
         Logs {
-            /// Task slug or session name
+            /// Dispatch ID, task slug, or session name
             arg: String,
             /// Follow log file (like tail -f)
             #[arg(short = 'f', long)]
@@ -127,7 +143,12 @@ pub async fn run(
             mode,
             slug,
             directive,
+            pr_url,
             inline,
+            force,
+            dry_run,
+            max_budget_usd,
+            max_turns,
         } => {
             let is_inline = *inline
                 || std::env::var("ATC_CI")
@@ -137,7 +158,12 @@ pub async fn run(
                 slug: slug.clone(),
                 cli_mode: mode.clone(),
                 directive: directive.clone(),
+                pr_url: pr_url.clone(),
                 inline: is_inline,
+                force: *force,
+                dry_run: *dry_run,
+                max_budget_override: *max_budget_usd,
+                max_turns_override: *max_turns,
             };
             let outcome =
                 dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await?;
@@ -167,17 +193,17 @@ pub async fn run(
         Commands::Close { slug, pr } => {
             close::run_close(config, registry.as_ref(), slug, pr.as_deref()).await
         }
-        Commands::Redirect { slug, message } => {
-            redirect::run_redirect(registry.as_ref(), slug, message).await
+        Commands::Redirect { id, message } => {
+            redirect::run_redirect(registry.as_ref(), id, message).await
         }
-        Commands::Retry { slug } => {
-            retry::run_retry(config, registry.as_ref(), executor.as_ref(), slug).await
+        Commands::Retry { id } => {
+            retry::run_retry(config, registry.as_ref(), executor.as_ref(), id).await
         }
         Commands::StatusCmd {
             status_filter,
             json,
         } => status::run_status(registry, status_filter.clone(), *json).await,
-        Commands::Info { slug } => info::run_info(registry, slug).await,
+        Commands::Info { id } => info::run_info(registry, id).await,
         Commands::Logs { arg, follow } => logs::run_logs(registry, config, arg, *follow).await,
     }
 }

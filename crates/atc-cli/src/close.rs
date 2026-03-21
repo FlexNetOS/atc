@@ -1,6 +1,6 @@
 use anyhow::Result;
 use atc_core::config::AtcConfig;
-use atc_core::registry::{Registry, StatusFilter};
+use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::{info, warn};
 
@@ -9,35 +9,48 @@ use crate::subprocess::run_cmd_with_timeout;
 /// Timeout for non-fatal subprocess calls (git-kb, git worktree).
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Resolve a dispatch record by ID or task slug.
+/// Tries get(arg) first (by ID), then find_latest_for_task(arg) (by slug).
+async fn resolve_record(
+    registry: &dyn Registry,
+    arg: &str,
+) -> Result<atc_core::types::DispatchRecord> {
+    if let Some(record) = registry.get(arg).await? {
+        return Ok(record);
+    }
+    if let Some(record) = registry.find_latest_for_task(arg).await? {
+        return Ok(record);
+    }
+    anyhow::bail!("no dispatch record found for: {arg}")
+}
+
 /// Execute the `atc close` command.
 pub async fn run_close(
     config: &AtcConfig,
     registry: &dyn Registry,
-    slug: &str,
+    arg: &str,
     pr_url: Option<&str>,
 ) -> Result<()> {
     // 1. Get the record
-    let record = registry
-        .get(slug)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no dispatch record found for slug: {slug}"))?;
+    let record = resolve_record(registry, arg).await?;
+    let id = &record.id;
 
     // 2. Idempotent: already Done
     if record.status == Status::Done {
-        println!("[{slug}] already closed");
+        println!("[{id}] already closed");
         return Ok(());
     }
 
     // 3. Set PR URL
     let effective_pr_url = if let Some(url) = pr_url {
-        registry.set_pr_url(slug, url).await?;
+        registry.set_pr_url(id, url).await?;
         Some(url.to_string())
     } else {
         record.pr_url.clone()
     };
 
     // 4. Update status to Done
-    registry.update_status(slug, Status::Done).await?;
+    registry.update_status(id, Status::Done).await?;
 
     // 5. git-kb set status=completed (non-fatal)
     let kb_root = config
@@ -46,31 +59,33 @@ pub async fn run_close(
         .ok();
 
     if let Some(ref kb_root) = kb_root {
-        let status = run_cmd_with_timeout(
-            tokio::process::Command::new("git-kb")
-                .args(["set", slug, "status=completed"])
-                .env("GITKB_ROOT", kb_root),
-            CMD_TIMEOUT,
-        )
-        .await;
+        if let Some(ref slug) = record.task_slug {
+            let status = run_cmd_with_timeout(
+                tokio::process::Command::new("git-kb")
+                    .args(["set", slug, "status=completed"])
+                    .env("GITKB_ROOT", kb_root),
+                CMD_TIMEOUT,
+            )
+            .await;
 
-        match status {
-            Ok(Some(s)) if !s.success() => {
-                warn!(slug, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
-            }
-            Ok(None) => {
-                warn!(slug, "git-kb set status=completed timed out (non-fatal)");
-            }
-            Err(e) => {
-                warn!(slug, error = %e, "git-kb set status=completed failed (non-fatal)");
-            }
-            _ => {
-                info!(slug, "git-kb status set to completed");
+            match status {
+                Ok(Some(s)) if !s.success() => {
+                    warn!(id, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
+                }
+                Ok(None) => {
+                    warn!(id, "git-kb set status=completed timed out (non-fatal)");
+                }
+                Err(e) => {
+                    warn!(id, error = %e, "git-kb set status=completed failed (non-fatal)");
+                }
+                _ => {
+                    info!(id, "git-kb status set to completed");
+                }
             }
         }
     } else {
         warn!(
-            slug,
+            id,
             "could not resolve meta_workspace_root; skipping git-kb set"
         );
     }
@@ -80,18 +95,12 @@ pub async fn run_close(
 
     if worktree_path.exists() {
         // Check if another Running record shares the same worktree_path.
-        // NOTE: This check is inherently racy (TOCTOU) — another dispatch could start
-        // between the check and the removal. This is acceptable because the window is
-        // very small and the consequence (removing a shared worktree) is recoverable
-        // via re-dispatch. A lock-based approach would add complexity for minimal benefit.
-        let all_records = registry.list(StatusFilter::all()).await?;
-        let shared = all_records.iter().any(|r| {
-            r.slug != slug && r.status == Status::Running && r.worktree_path == *worktree_path
-        });
+        let running = registry.find_running_on_worktree(worktree_path).await?;
+        let shared = running.iter().any(|r| r.id != *id);
 
         if shared {
             warn!(
-                slug,
+                id,
                 worktree = %worktree_path.display(),
                 "skipping worktree removal: another running record shares this worktree"
             );
@@ -116,19 +125,19 @@ pub async fn run_close(
                     match result {
                         Ok(Some(s)) if !s.success() => {
                             warn!(
-                                slug,
+                                id,
                                 exit_code = ?s.code(),
                                 "git worktree remove failed (non-fatal)"
                             );
                         }
                         Ok(None) => {
-                            warn!(slug, "git worktree remove timed out (non-fatal)");
+                            warn!(id, "git worktree remove timed out (non-fatal)");
                         }
                         Err(e) => {
-                            warn!(slug, error = %e, "git worktree remove failed (non-fatal)");
+                            warn!(id, error = %e, "git worktree remove failed (non-fatal)");
                         }
                         _ => {
-                            info!(slug, worktree = %worktree_path.display(), "worktree removed");
+                            info!(id, worktree = %worktree_path.display(), "worktree removed");
 
                             // Attempt to rmdir parent if empty and inside worktree_base
                             if let Some(parent) = worktree_path.parent() {
@@ -142,7 +151,7 @@ pub async fn run_close(
                 }
                 None => {
                     warn!(
-                        slug,
+                        id,
                         "could not derive repo_root; skipping worktree removal"
                     );
                 }
@@ -150,7 +159,7 @@ pub async fn run_close(
         }
     } else {
         warn!(
-            slug,
+            id,
             worktree = %worktree_path.display(),
             "worktree path does not exist; skipping removal"
         );
@@ -158,7 +167,8 @@ pub async fn run_close(
 
     // 7. Print result
     let pr_display = effective_pr_url.as_deref().unwrap_or("none");
-    println!("[{slug}] closed | pr={pr_display}");
+    let slug_display = record.task_slug.as_deref().unwrap_or(id);
+    println!("[{slug_display}] closed | pr={pr_display}");
 
     Ok(())
 }
@@ -169,7 +179,7 @@ fn derive_repo_root(config: &AtcConfig) -> Option<std::path::PathBuf> {
         .dispatch
         .resolved_meta_workspace_root(config.config_dir.as_deref())
         .ok()?;
-    let repo = config.dispatch.resolved_repo().ok()?;
+    let repo = config.dispatch.resolved_repo()?;
     Some(meta_root.join(repo))
 }
 
@@ -180,7 +190,7 @@ mod tests {
     use atc_core::registry::StatusFilter;
     use atc_core::types::{DispatchRecord, HealthChecks, Mode};
     use chrono::Utc;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     /// A simple in-memory registry for testing close logic without SQLite.
@@ -203,20 +213,20 @@ mod tests {
             Ok(())
         }
 
-        async fn update_status(&self, slug: &str, status: Status) -> Result<()> {
+        async fn update_status(&self, id: &str, status: Status) -> Result<()> {
             let mut records = self.records.lock().unwrap();
             for r in records.iter_mut() {
-                if r.slug == slug {
+                if r.id == id {
                     r.status = status;
                     return Ok(());
                 }
             }
-            anyhow::bail!("no dispatch record found for slug: {slug}")
+            anyhow::bail!("no dispatch record found for id: {id}")
         }
 
         async fn update_cost(
             &self,
-            _slug: &str,
+            _id: &str,
             _cost: f64,
             _turns: u32,
             _duration_ms: u64,
@@ -224,13 +234,13 @@ mod tests {
             Ok(())
         }
 
-        async fn get(&self, slug: &str) -> Result<Option<DispatchRecord>> {
+        async fn get(&self, id: &str) -> Result<Option<DispatchRecord>> {
             Ok(self
                 .records
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|r| r.slug == slug)
+                .find(|r| r.id == id)
                 .cloned())
         }
 
@@ -240,7 +250,7 @@ mod tests {
 
         async fn update_health(
             &self,
-            _slug: &str,
+            _id: &str,
             _checks: &HealthChecks,
             _status: Status,
             _updated_at: chrono::DateTime<Utc>,
@@ -248,27 +258,27 @@ mod tests {
             Ok(())
         }
 
-        async fn set_pr_url(&self, slug: &str, url: &str) -> Result<()> {
+        async fn set_pr_url(&self, id: &str, url: &str) -> Result<()> {
             let mut records = self.records.lock().unwrap();
             for r in records.iter_mut() {
-                if r.slug == slug {
+                if r.id == id {
                     r.pr_url = Some(url.to_string());
                     return Ok(());
                 }
             }
-            anyhow::bail!("no dispatch record found for slug: {slug}")
+            anyhow::bail!("no dispatch record found for id: {id}")
         }
 
         async fn increment_retries(
             &self,
-            slug: &str,
+            id: &str,
             new_session: &str,
-            new_log_file: &std::path::Path,
+            new_log_file: &Path,
             new_dispatched_at: chrono::DateTime<Utc>,
         ) -> Result<()> {
             let mut records = self.records.lock().unwrap();
             for r in records.iter_mut() {
-                if r.slug == slug {
+                if r.id == id {
                     r.retries += 1;
                     r.session = new_session.to_string();
                     r.log_file = new_log_file.to_path_buf();
@@ -277,13 +287,53 @@ mod tests {
                     return Ok(());
                 }
             }
-            anyhow::bail!("no dispatch record found for slug: {slug}")
+            anyhow::bail!("no dispatch record found for id: {id}")
+        }
+
+        async fn find_by_branch(&self, _branch: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_task_slug(&self, _task_slug: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_pr_url(&self, _pr_url: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_by_worktree(&self, _worktree_path: &Path) -> Result<Vec<DispatchRecord>> {
+            Ok(vec![])
+        }
+        async fn find_latest_for_task(
+            &self,
+            task_slug: &str,
+        ) -> Result<Option<DispatchRecord>> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.task_slug.as_deref() == Some(task_slug))
+                .max_by_key(|r| r.dispatched_at)
+                .cloned())
+        }
+        async fn find_running_on_worktree(
+            &self,
+            worktree_path: &Path,
+        ) -> Result<Vec<DispatchRecord>> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.worktree_path == worktree_path && r.status == Status::Running)
+                .cloned()
+                .collect())
         }
     }
 
-    fn sample_record(slug: &str, status: Status) -> DispatchRecord {
+    fn sample_record(id: &str, status: Status) -> DispatchRecord {
         DispatchRecord {
-            slug: slug.to_string(),
+            id: id.to_string(),
+            task_slug: Some("tasks/test-1".to_string()),
             branch: "test-branch".to_string(),
             worktree_path: PathBuf::from("/tmp/nonexistent-atc-test-worktree"),
             session: "test-session".to_string(),
@@ -291,6 +341,7 @@ mod tests {
             status,
             mode: Mode::Implement,
             retries: 0,
+            resolver: "task".to_string(),
             pr_url: None,
             checks: HealthChecks::default(),
             cost_usd: None,
@@ -303,25 +354,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_idempotent_on_done() {
-        let record = sample_record("tasks/test-1", Status::Done);
+        let record = sample_record("test-id-1", Status::Done);
         let registry = MockRegistry::new(vec![record]);
         let config = AtcConfig::default();
 
-        // Should succeed without error
-        let result = run_close(&config, &registry, "tasks/test-1", None).await;
+        let result = run_close(&config, &registry, "test-id-1", None).await;
         assert!(result.is_ok());
 
-        // Status should still be Done
-        let r = registry.get("tasks/test-1").await.unwrap().unwrap();
+        let r = registry.get("test-id-1").await.unwrap().unwrap();
         assert_eq!(r.status, Status::Done);
     }
 
     #[tokio::test]
-    async fn test_close_unknown_slug_errors() {
+    async fn test_close_unknown_id_errors() {
         let registry = MockRegistry::new(vec![]);
         let config = AtcConfig::default();
 
-        let result = run_close(&config, &registry, "tasks/nonexistent", None).await;
+        let result = run_close(&config, &registry, "nonexistent", None).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -331,33 +380,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_updates_status_to_done() {
-        let record = sample_record("tasks/test-1", Status::Running);
+        let record = sample_record("test-id-1", Status::Running);
         let registry = MockRegistry::new(vec![record]);
         let config = AtcConfig::default();
 
-        let result = run_close(&config, &registry, "tasks/test-1", None).await;
+        let result = run_close(&config, &registry, "test-id-1", None).await;
         assert!(result.is_ok());
 
-        let r = registry.get("tasks/test-1").await.unwrap().unwrap();
+        let r = registry.get("test-id-1").await.unwrap().unwrap();
         assert_eq!(r.status, Status::Done);
     }
 
     #[tokio::test]
     async fn test_close_with_pr_url_sets_it() {
-        let record = sample_record("tasks/test-1", Status::Running);
+        let record = sample_record("test-id-1", Status::Running);
         let registry = MockRegistry::new(vec![record]);
         let config = AtcConfig::default();
 
         let result = run_close(
             &config,
             &registry,
-            "tasks/test-1",
+            "test-id-1",
             Some("https://github.com/org/repo/pull/1"),
         )
         .await;
         assert!(result.is_ok());
 
-        let r = registry.get("tasks/test-1").await.unwrap().unwrap();
+        let r = registry.get("test-id-1").await.unwrap().unwrap();
         assert_eq!(
             r.pr_url.as_deref(),
             Some("https://github.com/org/repo/pull/1")
@@ -366,13 +415,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_missing_worktree_does_not_error() {
-        let mut record = sample_record("tasks/test-1", Status::Running);
+        let mut record = sample_record("test-id-1", Status::Running);
         record.worktree_path = PathBuf::from("/tmp/this-path-definitely-does-not-exist-atc-test");
         let registry = MockRegistry::new(vec![record]);
         let config = AtcConfig::default();
 
-        // Should succeed even though worktree path doesn't exist
-        let result = run_close(&config, &registry, "tasks/test-1", None).await;
+        let result = run_close(&config, &registry, "test-id-1", None).await;
         assert!(result.is_ok());
     }
 }
