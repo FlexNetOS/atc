@@ -64,12 +64,14 @@ async fn validate_branch_name(branch: &str) -> Result<()> {
 /// Resolve GH_TOKEN via env vars → `gh auth token` fallback.
 async fn resolve_gh_token() -> Result<String> {
     if let Ok(t) = std::env::var("GH_TOKEN") {
-        if !t.trim().is_empty() {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
             return Ok(t);
         }
     }
     if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        if !t.trim().is_empty() {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
             return Ok(t);
         }
     }
@@ -364,6 +366,13 @@ async fn check_worktree_collision(
             info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
             if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
                 warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+            }
+        } else if force {
+            // Force-override: mark the displaced live session as Failed so the
+            // registry doesn't retain an orphaned Running record.
+            info!(id = %r.id, "force-overriding live dispatch; marking as Failed");
+            if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
+                warn!(id = %r.id, error = %e, "failed to mark force-overridden record as Failed");
             }
         }
     }

@@ -205,8 +205,8 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
                 StreamEvent::AssistantText(text) => {
                     // Look for PR URLs in text
                     for word in text.split_whitespace() {
-                        let word =
-                            word.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '/');
+                        let word = word
+                            .trim_matches(|c: char| c.is_ascii_punctuation() && c != '/');
                         if word.starts_with("https://github.com/")
                             && word.contains("/pull/")
                             && !artifacts.pr_urls.contains(&word.to_string())

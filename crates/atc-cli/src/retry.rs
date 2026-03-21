@@ -146,6 +146,12 @@ pub async fn run_retry(
         }
     };
 
+    // Mark the old record as Stopped so it can't be retried again by ID.
+    // The new dispatch record carries the incremented retries counter.
+    if let Err(e) = registry.update_status(id, Status::Stopped).await {
+        warn!(id, error = %e, "failed to mark old record as Stopped after retry (non-fatal)");
+    }
+
     if let Some(code) = outcome.inline_exit_code {
         if code != 0 {
             anyhow::bail!("inline dispatch failed with exit code {code}");
