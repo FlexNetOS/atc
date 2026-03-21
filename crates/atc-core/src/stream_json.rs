@@ -182,6 +182,36 @@ pub struct Artifacts {
     pub summary: Option<String>,
 }
 
+/// Extract GitHub PR URLs from a text string.
+///
+/// Handles plain URLs, markdown links like `[text](url)`, and URLs with
+/// trailing punctuation. Searches for the URL prefix within each token
+/// rather than requiring it at the start, which catches URLs embedded in
+/// surrounding syntax.
+fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
+    const PREFIX: &str = "https://github.com/";
+    const MARKER: &str = "/pull/";
+
+    for token in text.split_whitespace() {
+        // Strip quotes (for JSON-encoded tool inputs)
+        let token = token.trim_matches('"');
+
+        // Find the URL prefix anywhere in the token (handles markdown links, parens, etc.)
+        let Some(start) = token.find(PREFIX) else {
+            continue;
+        };
+        let candidate = &token[start..];
+        if !candidate.contains(MARKER) {
+            continue;
+        }
+        // Trim trailing punctuation (but not `/`)
+        let url = candidate.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '/');
+        if !urls.iter().any(|u| u == url) {
+            urls.push(url.to_string());
+        }
+    }
+}
+
 /// Extract artifacts from parsed stream events.
 /// Used by post-completion (Phase 2A) and stale record recovery (Phase 7D).
 pub fn extract_artifacts(log_path: &Path) -> Artifacts {
@@ -203,32 +233,11 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
         for event in parse_stream_events(&line) {
             match &event {
                 StreamEvent::AssistantText(text) => {
-                    // Look for PR URLs in text
-                    for word in text.split_whitespace() {
-                        let word =
-                            word.trim_matches(|c: char| c.is_ascii_punctuation() && c != '/');
-                        if word.starts_with("https://github.com/")
-                            && word.contains("/pull/")
-                            && !artifacts.pr_urls.contains(&word.to_string())
-                        {
-                            artifacts.pr_urls.push(word.to_string());
-                        }
-                    }
+                    extract_pr_urls(text, &mut artifacts.pr_urls);
                     last_text = Some(text.clone());
                 }
                 StreamEvent::ToolUse { input, .. } => {
-                    // Look for PR URLs in tool inputs (JSON-encoded, so strip quotes + punctuation)
-                    for word in input.split_whitespace() {
-                        let word = word.trim_matches(|c: char| {
-                            c == '"' || (c.is_ascii_punctuation() && c != '/')
-                        });
-                        if word.starts_with("https://github.com/")
-                            && word.contains("/pull/")
-                            && !artifacts.pr_urls.contains(&word.to_string())
-                        {
-                            artifacts.pr_urls.push(word.to_string());
-                        }
-                    }
+                    extract_pr_urls(input, &mut artifacts.pr_urls);
                 }
                 StreamEvent::Result(r) => {
                     artifacts.result = Some(r.clone());
@@ -493,6 +502,37 @@ mod tests {
         assert_eq!(result.total_cost_usd, None);
         assert_eq!(result.num_turns, None);
         assert_eq!(result.duration_ms, None);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_plain() {
+        let mut urls = Vec::new();
+        extract_pr_urls("See https://github.com/org/repo/pull/42 for details", &mut urls);
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_markdown_link() {
+        let mut urls = Vec::new();
+        extract_pr_urls("[PR](https://github.com/org/repo/pull/42)", &mut urls);
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_angle_brackets() {
+        let mut urls = Vec::new();
+        extract_pr_urls("<https://github.com/org/repo/pull/42>", &mut urls);
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_deduplicates() {
+        let mut urls = Vec::new();
+        extract_pr_urls(
+            "https://github.com/org/repo/pull/42 and https://github.com/org/repo/pull/42",
+            &mut urls,
+        );
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
     }
 
     #[test]

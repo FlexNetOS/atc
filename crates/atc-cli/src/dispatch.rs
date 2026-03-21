@@ -368,9 +368,15 @@ async fn check_worktree_collision(
                 warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
             }
         } else if force {
-            // Force-override: mark the displaced live session as Failed so the
-            // registry doesn't retain an orphaned Running record.
-            info!(id = %r.id, "force-overriding live dispatch; marking as Failed");
+            // Force-override: kill the displaced tmux session and mark as Failed
+            // so the registry doesn't retain an orphaned Running record.
+            info!(id = %r.id, session = %r.session, "force-overriding live dispatch; killing session and marking as Failed");
+            let _ = tokio::process::Command::new("tmux")
+                .args(["kill-session", "-t", &r.session])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
             if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
                 warn!(id = %r.id, error = %e, "failed to mark force-overridden record as Failed");
             }
@@ -652,13 +658,17 @@ pub async fn dispatch(
         );
     }
 
+    // Compute kb_basename once, with proper validation for both dry-run and real paths
+    let kb_basename = meta_workspace_root
+        .file_name()
+        .ok_or_else(|| {
+            anyhow::anyhow!("meta_workspace_root has no basename (is it the filesystem root?)")
+        })?
+        .to_string_lossy()
+        .into_owned();
+
     // Dry-run: print config and exit
     if opts.dry_run {
-        let kb_basename = meta_workspace_root
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
         let dry_run_worktree = match repo.as_deref() {
             Some(r) => worktree_base.join(&kb_basename).join(r),
             None => worktree_base.join(&kb_basename).join(&branch),
@@ -685,15 +695,6 @@ pub async fn dispatch(
 
     // 2. CAS-claim the task (before worktree creation)
     cas_claim(slug, &session_name, kb_root).await?;
-
-    // 3. Ensure worktree (with unassign-on-failure)
-    let kb_basename = meta_workspace_root
-        .file_name()
-        .ok_or_else(|| {
-            anyhow::anyhow!("meta_workspace_root has no basename (is it the filesystem root?)")
-        })?
-        .to_string_lossy()
-        .into_owned();
 
     let wt_opts = WorktreeOpts {
         worktree_base: &worktree_base,
