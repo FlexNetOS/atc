@@ -64,7 +64,7 @@ pub async fn run_post_completion(
     });
 
     // 5. Determine status
-    let status = if exit_code == 0
+    let derived_status = if exit_code == 0
         && artifacts
             .result
             .as_ref()
@@ -73,6 +73,20 @@ pub async fn run_post_completion(
         Status::Done
     } else {
         Status::Failed
+    };
+
+    // If the record is already in a terminal state (e.g. stopped by user, needs-human),
+    // preserve that outcome — don't overwrite it with a derived done/failed.
+    let status = if record.status.is_terminal() {
+        info!(
+            id = %input.dispatch_id,
+            existing = %record.status,
+            derived = %derived_status,
+            "preserving existing terminal status"
+        );
+        record.status
+    } else {
+        derived_status
     };
 
     // 6. Update registry with cost/turns/duration
@@ -89,8 +103,10 @@ pub async fn run_post_completion(
         }
     }
 
-    // 7. Update status
-    registry.update_status(&input.dispatch_id, status).await?;
+    // 7. Update status (only transitions non-terminal → terminal)
+    if !record.status.is_terminal() {
+        registry.update_status(&input.dispatch_id, status).await?;
+    }
 
     // 8. Store PR URL
     let pr_url = artifacts.pr_urls.first().cloned();
@@ -100,7 +116,7 @@ pub async fn run_post_completion(
         }
     }
 
-    // 9. Store artifacts as JSON blob
+    // 9. Store artifacts as JSON blob (always store — artifacts are additive metadata)
     let json = serde_json::to_string(&artifacts)?;
     registry.set_artifacts(&input.dispatch_id, &json).await?;
 
@@ -313,7 +329,7 @@ pub async fn cleanup_if_pr_done(pr_url: &str, worktree_path: &Path, worktree_bas
     };
 
     if state == "MERGED" || state == "CLOSED" {
-        cleanup_worktree(worktree_path, worktree_base);
+        cleanup_worktree(worktree_path, worktree_base).await;
     }
 }
 
@@ -339,7 +355,9 @@ async fn get_pr_state(pr_url: &str) -> Option<String> {
 
 /// Remove a git worktree and its empty parent directory.
 /// Safety: only removes if path matches known worktree patterns.
-pub fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
+/// Uses a 30-second timeout to prevent a hung `git worktree remove` from
+/// blocking the async pipeline indefinitely.
+pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
     // Canonicalize to resolve symlinks and ".." before safety checks
     let canonical = match worktree_path.canonicalize() {
         Ok(p) => p,
@@ -362,7 +380,7 @@ pub fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
     let repo_root = find_repo_root(&canonical);
 
     if let Some(root) = repo_root {
-        let result = std::process::Command::new("git")
+        let mut child = match tokio::process::Command::new("git")
             .args([
                 "-C",
                 &root.to_string_lossy(),
@@ -371,25 +389,35 @@ pub fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
                 "--force",
                 &path_str,
             ])
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(path = %path_str, error = %e, "failed to spawn git worktree remove");
+                return;
+            }
+        };
 
-        match result {
-            Ok(output) if output.status.success() => {
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        match tokio::time::timeout(TIMEOUT, child.wait()).await {
+            Ok(Ok(exit_status)) if exit_status.success() => {
                 info!(path = %path_str, "removed worktree");
                 // Remove empty parent dir
                 if let Some(parent) = canonical.parent() {
                     let _ = std::fs::remove_dir(parent); // only succeeds if empty
                 }
             }
-            Ok(output) => {
-                warn!(
-                    path = %path_str,
-                    stderr = %String::from_utf8_lossy(&output.stderr),
-                    "git worktree remove failed"
-                );
+            Ok(Ok(_)) => {
+                warn!(path = %path_str, "git worktree remove failed (non-zero exit)");
             }
-            Err(e) => {
-                warn!(path = %path_str, error = %e, "failed to run git worktree remove");
+            Ok(Err(e)) => {
+                warn!(path = %path_str, error = %e, "git worktree remove I/O error");
+            }
+            Err(_) => {
+                warn!(path = %path_str, "git worktree remove timed out after 30s, killing");
+                let _ = child.kill().await;
             }
         }
     } else {
@@ -499,13 +527,13 @@ mod tests {
         assert_eq!(status, Status::Failed);
     }
 
-    #[test]
-    fn test_cleanup_worktree_safety_check() {
+    #[tokio::test]
+    async fn test_cleanup_worktree_safety_check() {
         let base = Path::new("/tmp/worktrees");
         // Should not panic or remove a non-worktree path
-        cleanup_worktree(Path::new("/usr/local/bin"), base);
+        cleanup_worktree(Path::new("/usr/local/bin"), base).await;
         // Should not panic — path doesn't exist but matches pattern
-        cleanup_worktree(Path::new("/tmp/worktrees/test/nonexistent"), base);
+        cleanup_worktree(Path::new("/tmp/worktrees/test/nonexistent"), base).await;
     }
 
     #[test]

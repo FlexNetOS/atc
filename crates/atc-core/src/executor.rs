@@ -18,6 +18,7 @@ pub struct AgentOpts {
     pub log_file: PathBuf,            // stream-json output destination
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
     pub session_name: String,         // tmux session name (derived from slug)
+    pub dispatch_id: String,          // stable registry ID (used for post-complete --id)
     pub sandbox: bool, // false = pass --settings with sandbox.enabled=false to claude
     pub inline: bool,  // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
@@ -296,7 +297,7 @@ impl ClaudeExecutor {
         // Run post-completion pipeline (fire and forget — errors logged but don't fail the session)
         bash_parts.push(format!(
             "atc post-complete --id '{}' --exit-code $EXIT_CODE --log '{}' 2>/dev/null || true",
-            shell_escape(&opts.session_name)?,
+            shell_escape(&opts.dispatch_id)?,
             shell_escape(&log_file_str)?,
         ));
 
@@ -432,6 +433,7 @@ mod tests {
             log_file: PathBuf::from("/tmp/log.jsonl"),
             env: HashMap::new(),
             session_name: "test".to_string(),
+            dispatch_id: "test".to_string(),
             sandbox: false,
             inline: true,
             max_turns: 10_000,

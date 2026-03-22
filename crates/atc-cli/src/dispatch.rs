@@ -772,6 +772,7 @@ pub async fn dispatch(
         log_file: log_file.clone(),
         env,
         session_name: session_name.clone(),
+        dispatch_id: dispatch_id.clone(),
         sandbox: dispatch_cfg.sandbox,
         inline: opts.inline,
         max_turns: turns,

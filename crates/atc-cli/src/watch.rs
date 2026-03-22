@@ -329,15 +329,26 @@ pub async fn run_watch(
                     emit_event(&event, &output_format, &tx_clone);
                 }
 
-                if !watcher.saw_result {
-                    // Session died without result event — run post-completion
-                    emit_event(
-                        &WatchEvent::SessionDied { id: id.clone() },
-                        &output_format,
-                        &tx_clone,
-                    );
+                // Re-read registry — only finalize if the dispatch is still non-terminal.
+                // The tmux-side `atc post-complete` may have already succeeded, or the
+                // user may have stopped the dispatch manually.
+                let needs_finalize = registry
+                    .get(id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|r| !r.status.is_terminal());
 
-                    // Trigger post-completion
+                if needs_finalize {
+                    if !watcher.saw_result {
+                        emit_event(
+                            &WatchEvent::SessionDied { id: id.clone() },
+                            &output_format,
+                            &tx_clone,
+                        );
+                    }
+
+                    // Trigger post-completion for non-terminal dispatch
                     let input = atc_core::post_completion::PostCompleteInput {
                         dispatch_id: id.clone(),
                         exit_code: None,
