@@ -159,6 +159,27 @@ setup_lifecycle() {
 }
 
 # ---------------------------------------------------------------------------
+# setup_test_git_worktree — create a real git repo at $TEST_TMPDIR/worktree
+# with branch "test-branch" pushed to a bare origin, so health-checker
+# signal 2 (git ls-remote) succeeds.
+# ---------------------------------------------------------------------------
+setup_test_git_worktree() {
+    # Create a bare "origin" repo
+    git init --bare "$TEST_TMPDIR/origin.git" --quiet
+    # Clone it as the worktree
+    git clone "$TEST_TMPDIR/origin.git" "$TEST_TMPDIR/worktree" --quiet
+    # Create a commit and push the test branch
+    (
+        cd "$TEST_TMPDIR/worktree"
+        git checkout -b test-branch --quiet
+        echo "test" > file.txt
+        git add file.txt
+        git commit -m "init" --quiet
+        git push origin test-branch --quiet
+    )
+}
+
+# ---------------------------------------------------------------------------
 # query_dispatch_field — read a single field from the dispatches table
 # ---------------------------------------------------------------------------
 query_dispatch_field() {

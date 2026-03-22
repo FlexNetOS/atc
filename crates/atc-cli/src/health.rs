@@ -155,6 +155,9 @@ pub async fn run_health(
                 r.record.status,
                 Status::Done | Status::Failed | Status::NeedsReview
             )
+            // Only run if post-completion hasn't already populated cost
+            // (proxy for "watcher already ran post-completion for this record")
+            && r.record.cost_usd.is_none()
         {
             // Check if log file has artifacts we can extract
             if r.record.log_file.exists() {

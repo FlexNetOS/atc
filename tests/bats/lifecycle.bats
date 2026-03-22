@@ -361,9 +361,16 @@ load helpers/common
 
 @test "health --auto: auto-review prints trigger message for NeedsReview with PR" {
     setup_lifecycle
-    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-review" "tasks/review-test" "needs-review"
+    setup_test_git_worktree
 
-    # Set pr_url and all signals that would keep it in NeedsReview
+    # Insert as "running" so the Running→NeedsReview transition produces changed=true.
+    # Health checker re-evaluates signals from scratch; the DB check values just
+    # serve as the baseline for detecting change.
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-review" "tasks/review-test" "running"
+
+    # Set pr_url and checks matching what health evaluation will produce
+    # (agent exited=true via tmux, branch pushed=true via git ls-remote,
+    # pr created=true via pr_url shortcut, ci=false since gh fails in test env).
     sqlite3 "$TEST_TMPDIR/atc.db" \
         "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/99', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-review';"
 
@@ -376,7 +383,10 @@ load helpers/common
 
 @test "health: config auto_review enables auto without --auto flag" {
     setup_lifecycle
-    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-auto" "tasks/auto-test" "needs-review"
+    setup_test_git_worktree
+
+    # Insert as "running" so the Running→NeedsReview transition produces changed=true.
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-auto" "tasks/auto-test" "running"
 
     sqlite3 "$TEST_TMPDIR/atc.db" \
         "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/100', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-auto';"
