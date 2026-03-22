@@ -96,7 +96,10 @@ pub fn collect_auto_review_candidates(results: &[HealthResult]) -> Vec<&Dispatch
     results
         .iter()
         .filter(|r| {
-            r.changed && r.record.status == Status::NeedsReview && r.record.pr_url.is_some()
+            r.changed
+                && r.record.status == Status::NeedsReview
+                && r.record.pr_url.is_some()
+                && r.record.task_slug.is_some()
         })
         .map(|r| &r.record)
         .collect()
@@ -136,18 +139,6 @@ pub async fn run_health(
     // Evaluate active records (running + needs-review)
     let mut results: Vec<HealthResult> = checker.run().await?;
 
-    // --- 7A: Cost threshold warnings ---
-    let cost_threshold = config.health.cost_warning_threshold;
-    for r in &results {
-        if let Some(msg) = cost_warning(&r.record, cost_threshold) {
-            if json {
-                eprintln!("{msg}");
-            } else {
-                println!("{msg}");
-            }
-        }
-    }
-
     // --- 7B: Stale record cleanup ---
     // For records that just transitioned out of Running (agent exited and checker
     // updated status) but whose post-completion was never triggered by the watcher,
@@ -184,6 +175,12 @@ pub async fn run_health(
                 } else {
                     refreshed_ids.push(r.record.id.clone());
                 }
+            } else {
+                warn!(
+                    id = %r.record.id,
+                    log_file = %r.record.log_file.display(),
+                    "stale record missing log file — skipping post-completion fallback"
+                );
             }
         }
     }
@@ -194,6 +191,20 @@ pub async fn run_health(
         if let Ok(Some(fresh)) = registry.get(id).await {
             if let Some(entry) = results.iter_mut().find(|r| &r.record.id == id) {
                 entry.record = fresh;
+            }
+        }
+    }
+
+    // --- 7A: Cost threshold warnings ---
+    // Emitted after 7B so that records refreshed by stale-record extraction
+    // have their cost_usd populated before the warning pass.
+    let cost_threshold = config.health.cost_warning_threshold;
+    for r in &results {
+        if let Some(msg) = cost_warning(&r.record, cost_threshold) {
+            if json {
+                eprintln!("{msg}");
+            } else {
+                println!("{msg}");
             }
         }
     }
@@ -240,9 +251,9 @@ pub async fn run_health(
     if auto_enabled {
         let candidates = collect_auto_review_candidates(&results);
         for record in &candidates {
-            let task_slug = match &record.task_slug {
-                Some(s) => s.clone(),
-                None => record.id.clone(),
+            let Some(task_slug) = record.task_slug.clone() else {
+                warn!(id = %record.id, "skipping auto review-fix: missing task_slug");
+                continue;
             };
             let pr_url = record.pr_url.clone();
             if json {
@@ -556,6 +567,30 @@ mod tests {
         let results = vec![HealthResult {
             record,
             changed: false,
+        }];
+        let candidates = collect_auto_review_candidates(&results);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_auto_review_skips_missing_task_slug() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            ..Default::default()
+        };
+        let mut record = make_record_with_pr(
+            Status::NeedsReview,
+            checks,
+            Some("https://github.com/org/repo/pull/1".to_string()),
+            None,
+        );
+        record.task_slug = None;
+        let results = vec![HealthResult {
+            record,
+            changed: true,
         }];
         let candidates = collect_auto_review_candidates(&results);
         assert!(candidates.is_empty());
