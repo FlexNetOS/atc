@@ -11,6 +11,27 @@ use atc_core::types::{DispatchRecord, Mode, RunOpts};
 
 use crate::dispatch::build_dispatch_id;
 
+/// Check whether `s` contains only characters safe for use in a Git refname.
+/// Rejects spaces and characters forbidden by `git check-ref-format`:
+/// control chars, space, `~`, `^`, `:`, `?`, `*`, `[`, `\`.
+fn is_ref_safe(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('.')
+        && !s.ends_with('.')
+        && !s.contains("..")
+        && s.chars().all(|c| {
+            !c.is_control()
+                && c != ' '
+                && c != '~'
+                && c != '^'
+                && c != ':'
+                && c != '?'
+                && c != '*'
+                && c != '['
+                && c != '\\'
+        })
+}
+
 /// Resolver for template-based dispatches.
 ///
 /// Templates are `.md` files in the configured templates directory. The template
@@ -62,6 +83,11 @@ impl InputResolver for TemplateResolver {
         if input.contains("..") || input.contains('/') || input.contains('\\') {
             return false;
         }
+        // Reject characters that are invalid in Git refnames (spaces, *, :, ?, [, ^, ~, etc.)
+        // so we fail fast instead of waiting for validate_branch_name() later.
+        if !is_ref_safe(input) {
+            return false;
+        }
         let dir = Self::templates_dir(config);
         let template_path = dir.join(format!("{input}.md"));
         template_path.exists()
@@ -79,8 +105,15 @@ impl InputResolver for TemplateResolver {
             "template name must not contain path separators or '..': {:?}",
             input
         );
-        let dir = Self::templates_dir(config);
-        let template_path = dir.join(format!("{input}.md"));
+        // Reject characters that are invalid in Git refnames so the user gets
+        // immediate feedback instead of a cryptic validate_branch_name error.
+        anyhow::ensure!(
+            is_ref_safe(input),
+            "template name contains characters invalid in Git refnames: {:?}",
+            input
+        );
+        let template_name = format!("{input}.md");
+        let template_path = Self::templates_dir(config).join(&template_name);
 
         debug!(template = %template_path.display(), "rendering template");
 
@@ -90,8 +123,12 @@ impl InputResolver for TemplateResolver {
             params.insert(k.clone(), v.clone());
         }
 
-        // Render template
-        let output = prompt_engine::render_template(&template_path, &params, config, None).await?;
+        // Render template — pass just the filename so render_template resolves
+        // it against templates_dir internally, avoiding double-resolution when
+        // templates_dir is relative and config_dir is None.
+        let output =
+            prompt_engine::render_template(Path::new(&template_name), &params, config, None)
+                .await?;
 
         // Resolve mode: CLI override > frontmatter directives > default implement
         let mode = if let Some(ref m) = opts.mode {
@@ -110,7 +147,10 @@ impl InputResolver for TemplateResolver {
         // Use template name with a resolver-specific prefix to avoid collisions
         // with task-derived branches (derive_branch is bijective only for valid
         // GitKB slugs that contain '/').
-        let branch = format!("tpl--{}", input);
+        // Include a timestamp so concurrent dispatches of the same template
+        // get distinct branches (similar to PromptResolver).
+        let ts = chrono::Utc::now().timestamp_millis();
+        let branch = format!("tpl--{}-{}", input, ts);
         let dispatch_id = build_dispatch_id(&branch, &mode);
 
         Ok(ResolvedInput {
@@ -208,6 +248,51 @@ mod tests {
         assert!(!resolver.can_resolve("sub/dir", &config).await);
         assert!(!resolver.can_resolve("sub\\dir", &config).await);
         assert!(!resolver.can_resolve("..", &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_can_resolve_rejects_invalid_refname_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmpl_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        // Create files whose stems contain git-refname-invalid characters
+        std::fs::write(tmpl_dir.join("my template.md"), "body").unwrap();
+        std::fs::write(tmpl_dir.join("star*.md"), "body").unwrap();
+        std::fs::write(tmpl_dir.join("colon:.md"), "body").unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                templates_dir: "templates".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let resolver = TemplateResolver;
+        assert!(!resolver.can_resolve("my template", &config).await);
+        assert!(!resolver.can_resolve("star*", &config).await);
+        assert!(!resolver.can_resolve("colon:", &config).await);
+        assert!(!resolver.can_resolve("q?mark", &config).await);
+        assert!(!resolver.can_resolve("tilde~1", &config).await);
+    }
+
+    #[test]
+    fn test_is_ref_safe() {
+        assert!(is_ref_safe("review"));
+        assert!(is_ref_safe("my-template"));
+        assert!(is_ref_safe("v1.0"));
+        assert!(!is_ref_safe("has space"));
+        assert!(!is_ref_safe("star*"));
+        assert!(!is_ref_safe("colon:x"));
+        assert!(!is_ref_safe("q?mark"));
+        assert!(!is_ref_safe("caret^"));
+        assert!(!is_ref_safe("tilde~"));
+        assert!(!is_ref_safe("bracket[0]"));
+        assert!(!is_ref_safe(""));
+        assert!(!is_ref_safe(".hidden"));
+        assert!(!is_ref_safe("trail."));
+        assert!(!is_ref_safe("dbl..dot"));
     }
 
     #[tokio::test]
@@ -325,6 +410,10 @@ mod tests {
             .system_prompt
             .contains("https://github.com/org/repo/pull/1"));
         assert!(result.task_slug.is_none());
-        assert_eq!(result.branch, "tpl--review");
+        assert!(
+            result.branch.starts_with("tpl--review-"),
+            "branch should start with 'tpl--review-', got: {}",
+            result.branch
+        );
     }
 }

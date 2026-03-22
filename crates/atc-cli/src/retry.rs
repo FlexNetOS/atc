@@ -136,7 +136,18 @@ pub async fn run_retry(
             anyhow::anyhow!("cannot retry dispatch {id}: no original_input or task slug recorded")
         })?;
 
-    // 5. Classify failure and compute budget/turns adjustments
+    // 5. Validate resolver is known before mutating any external state.
+    // This prevents setting status=draft or running cleanup for a resolver
+    // we can't actually re-dispatch through.
+    let recorded_resolver = resolver_by_name(&record.resolver).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot retry dispatch {}: unknown resolver '{}'",
+            id,
+            record.resolver
+        )
+    })?;
+
+    // 6. Classify failure and compute budget/turns adjustments
     let (max_budget_override, max_turns_override) =
         classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
 
@@ -184,18 +195,17 @@ pub async fn run_retry(
     }
 
     // 7b. Resolver cleanup (non-fatal) — replaces hardcoded git-kb unassign
-    match resolver_by_name(&record.resolver) {
-        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
-        None => warn!(
-            id,
-            resolver = %record.resolver,
-            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
-        ),
+    // Use a fresh instance since recorded_resolver is consumed below for re-dispatch.
+    if let Some(cleanup_resolver) = resolver_by_name(&record.resolver) {
+        cleanup_resolver
+            .on_cleanup(&record, config, Some(registry))
+            .await;
     }
 
     // 8. Re-dispatch via pipeline
     let retry_num = record.retries + 1;
-    println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
+    // Print the dispatch ID (not original_input which may contain raw prompt text)
+    println!("Re-dispatching {} (retry {retry_num}/{max_retries})...", id);
 
     // Recover the original input for faithful retry. Falls back to task slug
     // for records created before original_input was persisted.
@@ -222,13 +232,6 @@ pub async fn run_retry(
     // Use the recorded resolver directly instead of rebuilding the full chain.
     // This prevents resolver-order issues where e.g. a task slug might match
     // the prompt resolver if task resolver is ordered after it.
-    let recorded_resolver = resolver_by_name(&record.resolver).ok_or_else(|| {
-        anyhow::anyhow!(
-            "cannot retry dispatch {}: unknown resolver '{}'",
-            id,
-            record.resolver
-        )
-    })?;
     let pipeline = DispatchPipeline {
         resolvers: vec![recorded_resolver],
         config,

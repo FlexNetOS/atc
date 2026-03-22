@@ -825,6 +825,8 @@ mod tests {
             reviews_approved: true,
             threads_resolved: true,
         };
+        record.no_worktree = true;
+        record.original_input = Some("review".to_string());
         registry.insert(&record).await.unwrap();
 
         let fetched = registry.get("full-test").await.unwrap().unwrap();
@@ -833,6 +835,8 @@ mod tests {
         assert_eq!(fetched.num_turns, record.num_turns);
         assert_eq!(fetched.duration_ms, record.duration_ms);
         assert_eq!(fetched.checks, record.checks);
+        assert_eq!(fetched.no_worktree, record.no_worktree);
+        assert_eq!(fetched.original_input, record.original_input);
     }
 
     // --- Error path tests ---
@@ -1248,5 +1252,87 @@ mod tests {
 
         let all = registry.list(StatusFilter::all()).await.unwrap();
         assert_eq!(all.len(), 10);
+    }
+
+    /// Regression test: open a legacy database that lacks `no_worktree` and
+    /// `original_input` columns and verify `migrate_if_needed()` adds them so
+    /// records round-trip with the correct defaults.
+    #[tokio::test]
+    async fn test_migration_adds_no_worktree_and_original_input_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+
+        // Create a legacy schema WITHOUT no_worktree and original_input columns.
+        {
+            let url = format!("sqlite:{}?mode=rwc", db_path.display());
+            let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+            sqlx::query(
+                r#"CREATE TABLE dispatches (
+                    id TEXT PRIMARY KEY,
+                    task_slug TEXT,
+                    branch TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    session TEXT NOT NULL,
+                    log_file TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    mode TEXT NOT NULL,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    resolver TEXT NOT NULL,
+                    pr_url TEXT,
+                    check_agent_exited_clean INTEGER NOT NULL DEFAULT 0,
+                    check_branch_pushed INTEGER NOT NULL DEFAULT 0,
+                    check_pr_created INTEGER NOT NULL DEFAULT 0,
+                    check_ci_passed INTEGER NOT NULL DEFAULT 0,
+                    check_reviews_approved INTEGER NOT NULL DEFAULT 0,
+                    check_threads_resolved INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL,
+                    num_turns INTEGER,
+                    duration_ms INTEGER,
+                    artifacts TEXT,
+                    dispatched_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Insert a record using the old schema
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                r#"INSERT INTO dispatches (
+                    id, task_slug, branch, worktree_path, session, log_file,
+                    status, mode, retries, resolver, dispatched_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+            )
+            .bind("legacy-id")
+            .bind("tasks/old-task")
+            .bind("tasks--old-task")
+            .bind("/tmp/old")
+            .bind("old-session")
+            .bind("/tmp/old.jsonl")
+            .bind("running")
+            .bind("implement")
+            .bind(0i32)
+            .bind("task")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            pool.close().await;
+        }
+
+        // Re-open through SqliteRegistry::open() which runs migrate_if_needed()
+        let registry = SqliteRegistry::open(&db_path).await.unwrap();
+        let fetched = registry.get("legacy-id").await.unwrap().unwrap();
+
+        // Migrated columns should have sensible defaults
+        assert!(!fetched.no_worktree, "no_worktree should default to false");
+        assert_eq!(
+            fetched.original_input, None,
+            "original_input should default to None"
+        );
     }
 }
