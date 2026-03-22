@@ -125,13 +125,13 @@ SCHEMA
 # insert_test_dispatch — insert a dispatch record directly into the registry
 # ---------------------------------------------------------------------------
 insert_test_dispatch() {
-    local db="$1" id="$2" task_slug="$3" status="${4:-running}" mode="${5:-implement}"
+    local db="$1" id="$2" task_slug="$3" status="${4:-running}" mode="${5:-implement}" retries="${6:-0}"
     # Use RFC 3339 timestamps — atc's registry deserializes with parse_from_rfc3339
     local now
     now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
     sqlite3 "$db" <<SQL
 INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, mode, retries, resolver, dispatched_at, updated_at)
-VALUES ('${id//\'/\'\'}', '${task_slug//\'/\'\'}', 'test-branch', '${TEST_TMPDIR//\'/\'\'}/worktree', '${id//\'/\'\'}', '${TEST_TMPDIR//\'/\'\'}/${id//\'/\'\'}.jsonl', '${status//\'/\'\'}', '${mode//\'/\'\'}', 0, 'task', '$now', '$now');
+VALUES ('${id//\'/\'\'}', '${task_slug//\'/\'\'}', 'test-branch', '${TEST_TMPDIR//\'/\'\'}/worktree', '${id//\'/\'\'}', '${TEST_TMPDIR//\'/\'\'}/${id//\'/\'\'}.jsonl', '${status//\'/\'\'}', '${mode//\'/\'\'}', ${retries}, 'task', '$now', '$now');
 SQL
 }
 

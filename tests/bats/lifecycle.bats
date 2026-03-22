@@ -72,9 +72,9 @@ load helpers/common
 @test "info: resolves by task slug (latest dispatch)" {
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
-    # Insert a second dispatch — should resolve to this one (latest)
-    sleep 1  # ensure different dispatched_at
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-1" "running"
+    # Ensure disp-002 has a later timestamp so it resolves as "latest"
+    sqlite3 "$TEST_TMPDIR/atc.db" "UPDATE dispatches SET dispatched_at = '2020-01-01T00:00:00+00:00' WHERE id = 'disp-001';"
 
     run atc --config "$TEST_TMPDIR/atc.toml" info tasks/test-1
     assert_success
@@ -282,8 +282,7 @@ load helpers/common
 @test "retry: max retries exceeded marks NeedsHuman" {
     setup_lifecycle
     # Insert a failed dispatch with retries = 3 (default max_retries = 3)
-    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "failed"
-    sqlite3 "$TEST_TMPDIR/atc.db" "UPDATE dispatches SET retries = 3 WHERE id = 'disp-001';"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "failed" "implement" 3
 
     run atc --config "$TEST_TMPDIR/atc.toml" retry disp-001
     assert_failure
