@@ -359,6 +359,7 @@ pub fn resolver_by_name(name: &str) -> Option<Box<dyn InputResolver>> {
 }
 
 /// Print post-dispatch confirmation block.
+#[allow(clippy::too_many_arguments)]
 fn print_dispatch_confirmation(
     task_slug: Option<&str>,
     mode: &Mode,

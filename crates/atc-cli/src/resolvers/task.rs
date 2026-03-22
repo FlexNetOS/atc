@@ -163,9 +163,7 @@ impl InputResolver for TaskResolver {
         let session_name = dispatch_id.clone();
 
         // 3. CAS-claim the task
-        if let Err(e) = Self::cas_claim(slug, &session_name, &kb_root).await {
-            return Err(e);
-        }
+        Self::cas_claim(slug, &session_name, &kb_root).await?;
 
         // 4. Render system prompt
         let directive = opts.directives.as_deref().unwrap_or("");
