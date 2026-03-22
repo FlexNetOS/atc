@@ -1,9 +1,15 @@
 use anyhow::Result;
+use atc_core::config::AtcConfig;
+use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
+use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{DispatchRecord, Status};
+use atc_core::types::{DispatchOpts, DispatchRecord, Mode, Status};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::warn;
+
+use crate::dispatch;
 
 /// Format a three-state signal value for display.
 /// `Some(true)` = "✓", `Some(false)` = "✗", `None` = "-" (not evaluated / skipped).
@@ -85,12 +91,37 @@ fn print_table(records: &[DispatchRecord]) {
     }
 }
 
-/// Run the health command: evaluate signals, apply transitions, display results.
+/// Determine which NeedsReview records should have review-fix dispatched.
+pub fn collect_auto_review_candidates(results: &[HealthResult]) -> Vec<&DispatchRecord> {
+    results
+        .iter()
+        .filter(|r| r.record.status == Status::NeedsReview && r.record.pr_url.is_some())
+        .map(|r| &r.record)
+        .collect()
+}
+
+/// Check if a cost exceeds the configured threshold and return a warning message if so.
+pub fn cost_warning(record: &DispatchRecord, threshold: f64) -> Option<String> {
+    if let Some(cost) = record.cost_usd {
+        if cost > threshold {
+            return Some(format!(
+                "\u{26a0} {} cost ${:.2} (exceeds ${:.2} threshold)",
+                record.id, cost, threshold
+            ));
+        }
+    }
+    None
+}
+
+/// Run the health command: evaluate signals, apply transitions, display results,
+/// and optionally auto-dispatch review-fix for NeedsReview records.
 pub async fn run_health(
-    config: &atc_core::config::AtcConfig,
+    config: &AtcConfig,
     registry: Arc<dyn Registry>,
+    executor: Arc<dyn AgentExecutor>,
     json: bool,
     all: bool,
+    auto_flag: bool,
 ) -> Result<()> {
     let checker = HealthChecker {
         registry: registry.clone(),
@@ -103,7 +134,95 @@ pub async fn run_health(
     // Evaluate active records (running + needs-review)
     let results: Vec<HealthResult> = checker.run().await?;
 
-    // Collect evaluated records
+    // --- 7C: Cost threshold warnings ---
+    let cost_threshold = config.health.cost_warning_threshold;
+    for r in &results {
+        if let Some(msg) = cost_warning(&r.record, cost_threshold) {
+            println!("{msg}");
+        }
+    }
+
+    // --- 7D: Stale record cleanup ---
+    // For Running records where the agent exited (signal 1 = true) but
+    // post-completion was missed, run artifact extraction now.
+    for r in &results {
+        if r.changed
+            && r.record.checks.agent_exited_clean
+            && matches!(
+                r.record.status,
+                Status::Done | Status::Failed | Status::NeedsReview
+            )
+        {
+            // Check if log file has artifacts we can extract
+            if r.record.log_file.exists() {
+                let input = PostCompleteInput {
+                    dispatch_id: r.record.id.clone(),
+                    exit_code: None,
+                    log_file: Some(r.record.log_file.clone()),
+                };
+                if let Err(e) =
+                    post_completion::run_post_completion(&input, registry.as_ref(), config).await
+                {
+                    warn!(
+                        id = %r.record.id,
+                        error = %e,
+                        "stale record post-completion extraction failed"
+                    );
+                }
+            }
+        }
+    }
+
+    // --- 7B: Auto-cleanup worktrees for Done records with merged/closed PRs ---
+    let worktree_base = config.dispatch.resolved_worktree_base();
+    for r in &results {
+        if r.record.status == Status::Done {
+            if let Some(ref url) = r.record.pr_url {
+                post_completion::cleanup_if_pr_done(url, &r.record.worktree_path, &worktree_base)
+                    .await;
+            }
+        }
+    }
+
+    // --- 7A: Auto-remediation ---
+    let auto_enabled = auto_flag || config.health.auto_review;
+    if auto_enabled {
+        let candidates = collect_auto_review_candidates(&results);
+        for record in &candidates {
+            let task_slug = match &record.task_slug {
+                Some(s) => s.clone(),
+                None => record.id.clone(),
+            };
+            let pr_url = record.pr_url.clone();
+            println!("Auto-triggering review-fix for {}...", task_slug);
+            let opts = DispatchOpts {
+                slug: task_slug.clone(),
+                cli_mode: Some(Mode::ReviewFix),
+                directive: Some("review-fix".to_string()),
+                pr_url,
+                inline: false,
+                force: false,
+                dry_run: false,
+                max_budget_override: None,
+                max_turns_override: None,
+                retries: 0,
+            };
+            match dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await {
+                Ok(outcome) => {
+                    println!(
+                        "  Dispatched review-fix for {}: session={}",
+                        task_slug, outcome.session
+                    );
+                }
+                Err(e) => {
+                    warn!(task = %task_slug, error = %e, "auto review-fix dispatch failed");
+                    eprintln!("  Warning: review-fix dispatch failed for {task_slug}: {e}");
+                }
+            }
+        }
+    }
+
+    // Collect evaluated records for display
     let mut display_records: Vec<DispatchRecord> = results.into_iter().map(|r| r.record).collect();
 
     // Add needs-human records (shown but not evaluated)
@@ -174,6 +293,19 @@ mod tests {
             duration_ms: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn make_record_with_pr(
+        status: Status,
+        checks: HealthChecks,
+        pr_url: Option<String>,
+        cost_usd: Option<f64>,
+    ) -> DispatchRecord {
+        DispatchRecord {
+            pr_url,
+            cost_usd,
+            ..make_record(status, checks)
         }
     }
 
@@ -281,5 +413,103 @@ mod tests {
         assert_eq!(signal_display(Some(true)), "✓");
         assert_eq!(signal_display(Some(false)), "✗");
         assert_eq!(signal_display(None), "-");
+    }
+
+    // --- 7A: Auto-review candidate tests ---
+
+    #[test]
+    fn test_auto_review_collects_needs_review_with_pr() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            ..Default::default()
+        };
+        let record = make_record_with_pr(
+            Status::NeedsReview,
+            checks,
+            Some("https://github.com/org/repo/pull/1".to_string()),
+            None,
+        );
+        let results = vec![HealthResult {
+            record,
+            changed: true,
+        }];
+        let candidates = collect_auto_review_candidates(&results);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn test_auto_review_skips_needs_review_without_pr() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            ..Default::default()
+        };
+        let record = make_record_with_pr(Status::NeedsReview, checks, None, None);
+        let results = vec![HealthResult {
+            record,
+            changed: true,
+        }];
+        let candidates = collect_auto_review_candidates(&results);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_auto_review_skips_non_needs_review() {
+        let checks = HealthChecks::default();
+        let record = make_record_with_pr(
+            Status::Running,
+            checks,
+            Some("https://github.com/org/repo/pull/1".to_string()),
+            None,
+        );
+        let results = vec![HealthResult {
+            record,
+            changed: false,
+        }];
+        let candidates = collect_auto_review_candidates(&results);
+        assert!(candidates.is_empty());
+    }
+
+    // --- 7C: Cost warning tests ---
+
+    #[test]
+    fn test_cost_warning_over_threshold() {
+        let record = make_record_with_pr(Status::Done, HealthChecks::default(), None, Some(15.0));
+        let msg = cost_warning(&record, 10.0);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(msg.contains("15.00"));
+        assert!(msg.contains("10.00"));
+    }
+
+    #[test]
+    fn test_cost_warning_under_threshold() {
+        let record = make_record_with_pr(Status::Done, HealthChecks::default(), None, Some(5.0));
+        assert!(cost_warning(&record, 10.0).is_none());
+    }
+
+    #[test]
+    fn test_cost_warning_no_cost() {
+        let record = make_record_with_pr(Status::Done, HealthChecks::default(), None, None);
+        assert!(cost_warning(&record, 10.0).is_none());
+    }
+
+    #[test]
+    fn test_cost_warning_exact_threshold() {
+        let record = make_record_with_pr(Status::Done, HealthChecks::default(), None, Some(10.0));
+        // Exactly at threshold should NOT warn (> not >=)
+        assert!(cost_warning(&record, 10.0).is_none());
+    }
+
+    #[test]
+    fn test_cost_warning_custom_threshold() {
+        let record = make_record_with_pr(Status::Done, HealthChecks::default(), None, Some(6.0));
+        assert!(cost_warning(&record, 5.0).is_some());
+        assert!(cost_warning(&record, 10.0).is_none());
     }
 }
