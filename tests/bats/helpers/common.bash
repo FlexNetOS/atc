@@ -170,13 +170,15 @@ setup_test_git_worktree() {
     git clone "$TEST_TMPDIR/origin.git" "$TEST_TMPDIR/worktree" --quiet
     # Create a commit and push the test branch
     (
-        cd "$TEST_TMPDIR/worktree"
+        cd "$TEST_TMPDIR/worktree" || return 1
+        git config user.email "test@example.com"
+        git config user.name "ATC Test"
         git checkout -b test-branch --quiet
         echo "test" > file.txt
         git add file.txt
         git commit -m "init" --quiet
         git push origin test-branch --quiet
-    )
+    ) || return 1
 }
 
 # ---------------------------------------------------------------------------

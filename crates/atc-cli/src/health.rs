@@ -134,13 +134,17 @@ pub async fn run_health(
     };
 
     // Evaluate active records (running + needs-review)
-    let results: Vec<HealthResult> = checker.run().await?;
+    let mut results: Vec<HealthResult> = checker.run().await?;
 
     // --- 7A: Cost threshold warnings ---
     let cost_threshold = config.health.cost_warning_threshold;
     for r in &results {
         if let Some(msg) = cost_warning(&r.record, cost_threshold) {
-            println!("{msg}");
+            if json {
+                eprintln!("{msg}");
+            } else {
+                println!("{msg}");
+            }
         }
     }
 
@@ -148,6 +152,7 @@ pub async fn run_health(
     // For records that just transitioned out of Running (agent exited and checker
     // updated status) but whose post-completion was never triggered by the watcher,
     // run artifact extraction now as a fallback.
+    let mut refreshed_ids: Vec<String> = Vec::new();
     for r in &results {
         if r.changed
             && r.record.checks.agent_exited_clean
@@ -155,9 +160,10 @@ pub async fn run_health(
                 r.record.status,
                 Status::Done | Status::Failed | Status::NeedsReview
             )
-            // Only run if post-completion hasn't already populated cost
-            // (proxy for "watcher already ran post-completion for this record")
-            && r.record.cost_usd.is_none()
+            // Only run if post-completion hasn't already stored artifacts
+            // (artifacts are always written by post-completion, even when no
+            // result event exists, making this a reliable once-only sentinel)
+            && r.record.artifacts.is_none()
         {
             // Check if log file has artifacts we can extract
             if r.record.log_file.exists() {
@@ -165,6 +171,7 @@ pub async fn run_health(
                     dispatch_id: r.record.id.clone(),
                     exit_code: None,
                     log_file: Some(r.record.log_file.clone()),
+                    skip_cleanup: true,
                 };
                 if let Err(e) =
                     post_completion::run_post_completion(&input, registry.as_ref(), config).await
@@ -174,7 +181,19 @@ pub async fn run_health(
                         error = %e,
                         "stale record post-completion extraction failed"
                     );
+                } else {
+                    refreshed_ids.push(r.record.id.clone());
                 }
+            }
+        }
+    }
+
+    // Re-read records that were updated by 7B so downstream logic (7C, 7D,
+    // display) uses fresh PR URLs, cost data, and status.
+    for id in &refreshed_ids {
+        if let Ok(Some(fresh)) = registry.get(id).await {
+            if let Some(entry) = results.iter_mut().find(|r| &r.record.id == id) {
+                entry.record = fresh;
             }
         }
     }
@@ -183,20 +202,36 @@ pub async fn run_health(
     let auto_enabled = auto_flag || config.health.auto_review;
     if auto_enabled {
         let worktree_base = config.dispatch.resolved_worktree_base();
-        for r in &results {
-            if r.record.status == Status::Done {
-                if let Some(ref url) = r.record.pr_url {
-                    // Skip records whose worktree has already been cleaned up
-                    if !r.record.worktree_path.exists() {
-                        continue;
-                    }
-                    post_completion::cleanup_if_pr_done(
-                        url,
-                        &r.record.worktree_path,
-                        &worktree_base,
-                    )
-                    .await;
+
+        // Collect Done records from the health-check snapshot
+        let snapshot_ids: std::collections::HashSet<String> =
+            results.iter().map(|r| r.record.id.clone()).collect();
+
+        // Also load Done records from the registry that weren't in the snapshot
+        // (records that reached Done before this health run are not included in
+        // the health-checker results, so their worktrees would never be cleaned).
+        let mut done_records: Vec<&DispatchRecord> = results
+            .iter()
+            .filter(|r| r.record.status == Status::Done)
+            .map(|r| &r.record)
+            .collect();
+
+        let registry_done = registry.list(StatusFilter::by_status(Status::Done)).await?;
+        // We'll hold owned records and reference them separately
+        let extra_done: Vec<&DispatchRecord> = registry_done
+            .iter()
+            .filter(|r| !snapshot_ids.contains(&r.id))
+            .collect();
+        done_records.extend(extra_done);
+
+        for record in &done_records {
+            if let Some(ref url) = record.pr_url {
+                // Skip records whose worktree has already been cleaned up
+                if !record.worktree_path.exists() {
+                    continue;
                 }
+                post_completion::cleanup_if_pr_done(url, &record.worktree_path, &worktree_base)
+                    .await;
             }
         }
     }
@@ -210,7 +245,11 @@ pub async fn run_health(
                 None => record.id.clone(),
             };
             let pr_url = record.pr_url.clone();
-            println!("Auto-triggering review-fix for {}...", task_slug);
+            if json {
+                eprintln!("Auto-triggering review-fix for {}...", task_slug);
+            } else {
+                println!("Auto-triggering review-fix for {}...", task_slug);
+            }
             let opts = DispatchOpts {
                 slug: task_slug.clone(),
                 cli_mode: Some(Mode::ReviewFix),
@@ -225,10 +264,17 @@ pub async fn run_health(
             };
             match dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await {
                 Ok(outcome) => {
-                    println!(
-                        "  Dispatched review-fix for {}: session={}",
-                        task_slug, outcome.session
-                    );
+                    if json {
+                        eprintln!(
+                            "  Dispatched review-fix for {}: session={}",
+                            task_slug, outcome.session
+                        );
+                    } else {
+                        println!(
+                            "  Dispatched review-fix for {}: session={}",
+                            task_slug, outcome.session
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!(task = %task_slug, error = %e, "auto review-fix dispatch failed");
@@ -307,6 +353,7 @@ mod tests {
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
+            artifacts: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }

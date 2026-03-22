@@ -45,6 +45,7 @@ pub async fn run_post_complete(
         dispatch_id: dispatch_id.clone(),
         exit_code,
         log_file,
+        skip_cleanup: false,
     };
 
     let result = post_completion::run_post_completion(&input, registry, config).await?;

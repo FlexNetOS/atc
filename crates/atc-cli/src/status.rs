@@ -217,6 +217,7 @@ mod tests {
             cost_usd: Some(1.50),
             num_turns: Some(10),
             duration_ms: Some(592_000),
+            artifacts: None,
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41Z")
                 .unwrap()
                 .with_timezone(&Utc),

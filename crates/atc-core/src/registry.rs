@@ -274,6 +274,7 @@ impl SqliteRegistry {
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("invalid duration_ms value in database"))?,
+            artifacts: row.get("artifacts"),
             dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
@@ -642,6 +643,7 @@ mod tests {
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
+            artifacts: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }

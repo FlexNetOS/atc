@@ -270,6 +270,7 @@ mod tests {
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
+            artifacts: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }
