@@ -330,7 +330,11 @@ mod tests {
         // Either way, the Running status must not be silently changed to Stopped.
         if result.is_err() {
             let r = registry.get("test-id-1").await.unwrap().unwrap();
-            assert_eq!(r.status, Status::Running, "status must remain Running on bail");
+            assert_eq!(
+                r.status,
+                Status::Running,
+                "status must remain Running on bail"
+            );
         }
     }
 
