@@ -228,10 +228,12 @@ pub async fn run_health(
             .collect();
 
         let registry_done = registry.list(StatusFilter::by_status(Status::Done)).await?;
-        // We'll hold owned records and reference them separately
+        // Limit to records updated in the last 30 days to bound the number of
+        // sequential `gh pr view` API calls on first --auto run (T19).
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
         let extra_done: Vec<&DispatchRecord> = registry_done
             .iter()
-            .filter(|r| !snapshot_ids.contains(&r.id))
+            .filter(|r| !snapshot_ids.contains(&r.id) && r.updated_at > cutoff)
             .collect();
         done_records.extend(extra_done);
 
@@ -289,7 +291,12 @@ pub async fn run_health(
                 }
                 Err(e) => {
                     warn!(task = %task_slug, error = %e, "auto review-fix dispatch failed");
-                    eprintln!("  Warning: review-fix dispatch failed for {task_slug}: {e}");
+                    let msg = format!("  Warning: review-fix dispatch failed for {task_slug}: {e}");
+                    if json {
+                        eprintln!("{msg}");
+                    } else {
+                        println!("{msg}");
+                    }
                 }
             }
         }
