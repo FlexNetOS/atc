@@ -58,12 +58,12 @@ impl InputResolver for TemplateResolver {
     }
 
     async fn can_resolve(&self, input: &str, config: &AtcConfig) -> bool {
-        let dir = Self::templates_dir(config);
-        let template_path = dir.join(format!("{input}.md"));
-        // Reject path traversal attempts
-        if !template_path.starts_with(&dir) {
+        // Reject path traversal attempts at the input level
+        if input.contains("..") || input.contains('/') || input.contains('\\') {
             return false;
         }
+        let dir = Self::templates_dir(config);
+        let template_path = dir.join(format!("{input}.md"));
         template_path.exists()
     }
 
@@ -73,14 +73,14 @@ impl InputResolver for TemplateResolver {
         opts: &RunOpts,
         config: &AtcConfig,
     ) -> Result<ResolvedInput> {
-        let dir = Self::templates_dir(config);
-        let template_path = dir.join(format!("{input}.md"));
-        // Reject path traversal attempts
+        // Reject path traversal attempts at the input level
         anyhow::ensure!(
-            template_path.starts_with(&dir),
-            "template name must not contain path traversal components: {:?}",
+            !input.contains("..") && !input.contains('/') && !input.contains('\\'),
+            "template name must not contain path separators or '..': {:?}",
             input
         );
+        let dir = Self::templates_dir(config);
+        let template_path = dir.join(format!("{input}.md"));
 
         debug!(template = %template_path.display(), "rendering template");
 
@@ -178,6 +178,68 @@ mod tests {
 
         let names = TemplateResolver::list_templates(&config);
         assert_eq!(names, vec!["deploy", "review"]);
+    }
+
+    #[tokio::test]
+    async fn test_can_resolve_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmpl_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        // Create a file that traversal would reach
+        std::fs::write(dir.path().join("secret.md"), "secret").unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                templates_dir: "templates".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let resolver = TemplateResolver;
+        assert!(!resolver.can_resolve("../secret", &config).await);
+        assert!(!resolver.can_resolve("../../etc/passwd", &config).await);
+        assert!(!resolver.can_resolve("sub/dir", &config).await);
+        assert!(!resolver.can_resolve("sub\\dir", &config).await);
+        assert!(!resolver.can_resolve("..", &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmpl_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                templates_dir: "templates".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let opts = RunOpts {
+            input: "../secret".to_string(),
+            mode: None,
+            params: std::collections::HashMap::new(),
+            pr_url: None,
+            inline: true,
+            force: false,
+            dry_run: false,
+            directives: None,
+            no_worktree: false,
+            max_budget_usd: None,
+            max_turns: None,
+            retries: 0,
+            list: false,
+        };
+
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("../secret", &opts, &config).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path separators"));
     }
 
     #[tokio::test]
