@@ -303,7 +303,11 @@ async fn register_partials_from_dir(
 ) {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
-        Err(_) => return, // Directory doesn't exist — skip silently
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "cannot read partials directory");
+            return;
+        }
     };
 
     loop {
