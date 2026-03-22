@@ -4,6 +4,7 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::{info, warn};
 
+use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
 use crate::subprocess::run_cmd_with_timeout;
 
@@ -63,42 +64,49 @@ pub async fn run_close(
     // 5. Update status to Done
     registry.update_status(id, Status::Done).await?;
 
-    // 6. git-kb set status=completed (non-fatal)
-    let kb_root = config
-        .dispatch
-        .resolved_meta_workspace_root(config.config_dir.as_deref())
-        .ok();
+    // 6. Resolver cleanup (replaces hardcoded git-kb unassign) + close-specific git-kb set
+    if let Some(resolver) = resolver_by_name(&record.resolver) {
+        resolver.on_cleanup(&record, config).await;
+    }
 
-    if let Some(ref kb_root) = kb_root {
-        if let Some(ref slug) = record.task_slug {
-            let status = run_cmd_with_timeout(
-                tokio::process::Command::new("git-kb")
-                    .args(["set", slug, "status=completed"])
-                    .env("GITKB_ROOT", kb_root),
-                CMD_TIMEOUT,
-            )
-            .await;
+    // Close-specific: set task status to completed in git-kb (non-fatal)
+    if record.resolver == "task" {
+        let kb_root = config
+            .dispatch
+            .resolved_meta_workspace_root(config.config_dir.as_deref())
+            .ok();
 
-            match status {
-                Ok(Some(s)) if !s.success() => {
-                    warn!(id, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
-                }
-                Ok(None) => {
-                    warn!(id, "git-kb set status=completed timed out (non-fatal)");
-                }
-                Err(e) => {
-                    warn!(id, error = %e, "git-kb set status=completed failed (non-fatal)");
-                }
-                _ => {
-                    info!(id, "git-kb status set to completed");
+        if let Some(ref kb_root) = kb_root {
+            if let Some(ref slug) = record.task_slug {
+                let status = run_cmd_with_timeout(
+                    tokio::process::Command::new("git-kb")
+                        .args(["set", slug, "status=completed"])
+                        .env("GITKB_ROOT", kb_root),
+                    CMD_TIMEOUT,
+                )
+                .await;
+
+                match status {
+                    Ok(Some(s)) if !s.success() => {
+                        warn!(id, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
+                    }
+                    Ok(None) => {
+                        warn!(id, "git-kb set status=completed timed out (non-fatal)");
+                    }
+                    Err(e) => {
+                        warn!(id, error = %e, "git-kb set status=completed failed (non-fatal)");
+                    }
+                    _ => {
+                        info!(id, "git-kb status set to completed");
+                    }
                 }
             }
+        } else {
+            warn!(
+                id,
+                "could not resolve meta_workspace_root; skipping git-kb set"
+            );
         }
-    } else {
-        warn!(
-            id,
-            "could not resolve meta_workspace_root; skipping git-kb set"
-        );
     }
 
     // 7. Remove worktree

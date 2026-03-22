@@ -2,7 +2,8 @@ use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
-use atc_core::types::DispatchOpts;
+use atc_core::types::RunOpts;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use args::{Args, Commands};
@@ -14,9 +15,11 @@ pub mod health;
 pub mod info;
 pub mod kb;
 pub mod logs;
+pub mod pipeline;
 pub mod post_complete;
 pub mod redirect;
 pub mod resolve;
+pub mod resolvers;
 pub mod retry;
 pub mod status;
 pub mod stop;
@@ -40,17 +43,16 @@ mod args {
 
     #[derive(Subcommand)]
     pub enum Commands {
-        /// Dispatch an agent to work on a task
-        #[command(name = "run", alias = "dispatch")]
-        Dispatch {
-            /// Task slug (e.g. tasks/gitkb-42)
-            slug: String,
+        /// Run an agent
+        Run {
+            /// Input: "task <slug>", template name, or raw prompt string
+            input: Vec<String>,
             /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task, close)
-            #[arg(value_name = "MODE", value_parser = clap::value_parser!(Mode))]
+            #[arg(long, value_parser = clap::value_parser!(Mode))]
             mode: Option<Mode>,
-            /// Additional directive passed into prompt rendering
-            #[arg(long)]
-            directive: Option<String>,
+            /// Key=value pairs for template rendering
+            #[arg(long = "param")]
+            param: Vec<String>,
             /// PR URL (required for review-fix and pr-comments modes)
             #[arg(long)]
             pr_url: Option<String>,
@@ -63,6 +65,15 @@ mod args {
             /// Preview full dispatch config without launching
             #[arg(long)]
             dry_run: bool,
+            /// List available templates
+            #[arg(long)]
+            list: bool,
+            /// Comma-separated directive override
+            #[arg(long)]
+            directives: Option<String>,
+            /// Skip worktree creation (run in current directory)
+            #[arg(long)]
+            no_worktree: bool,
             /// Override max budget (USD) for this dispatch
             #[arg(long)]
             max_budget_usd: Option<f64>,
@@ -180,8 +191,19 @@ mod args {
     }
 }
 
-/// Library entry point for command execution. Used by `harmony-atc-cli` to compose
-/// commands via the library rather than re-implementing them.
+/// Parse `--param key=value` pairs into a HashMap.
+fn parse_params(param_args: &[String]) -> Result<HashMap<String, String>> {
+    let mut params = HashMap::new();
+    for p in param_args {
+        let (k, v) = p.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid --param format: {:?} (expected key=value)", p)
+        })?;
+        params.insert(k.to_string(), v.to_string());
+    }
+    Ok(params)
+}
+
+/// Library entry point for command execution.
 pub async fn run(
     args: &Args,
     config: &AtcConfig,
@@ -189,35 +211,90 @@ pub async fn run(
     executor: Arc<dyn AgentExecutor>,
 ) -> Result<()> {
     match &args.command {
-        Commands::Dispatch {
+        Commands::Run {
+            input,
             mode,
-            slug,
-            directive,
+            param,
             pr_url,
             inline,
             force,
             dry_run,
+            list,
+            directives,
+            no_worktree,
             max_budget_usd,
             max_turns,
         } => {
+            // Handle --list
+            if *list {
+                let templates = resolvers::template::TemplateResolver::list_templates(config);
+                if templates.is_empty() {
+                    println!("No templates found.");
+                } else {
+                    println!("Available templates:");
+                    for name in &templates {
+                        println!("  {name}");
+                    }
+                }
+                return Ok(());
+            }
+
+            if input.is_empty() {
+                anyhow::bail!(
+                    "input is required: provide a task slug, template name, or prompt string"
+                );
+            }
+
+            // Parse input: if first word is "task", strip it and route to TaskResolver explicitly
+            let (raw_input, force_task) = if input.first().map(|s| s.as_str()) == Some("task") {
+                (input[1..].join(" "), true)
+            } else {
+                (input.join(" "), false)
+            };
+
             let is_inline = *inline
                 || std::env::var("ATC_CI")
                     .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                     .unwrap_or(false);
-            let opts = DispatchOpts {
-                slug: slug.clone(),
-                cli_mode: mode.clone(),
-                directive: directive.clone(),
+
+            let params = parse_params(param)?;
+
+            let opts = RunOpts {
+                input: raw_input.clone(),
+                mode: mode.clone(),
+                params,
                 pr_url: pr_url.clone(),
                 inline: is_inline,
                 force: *force,
                 dry_run: *dry_run,
-                max_budget_override: *max_budget_usd,
-                max_turns_override: *max_turns,
+                directives: directives.clone(),
+                no_worktree: *no_worktree,
+                max_budget_usd: *max_budget_usd,
+                max_turns: *max_turns,
                 retries: 0,
+                list: false,
             };
-            let outcome =
-                dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await?;
+
+            // Build resolver chain
+            let all_resolvers = resolvers::build_resolvers(config);
+            let resolvers_to_use = if force_task {
+                // "task <slug>" explicitly routes to TaskResolver
+                all_resolvers
+                    .into_iter()
+                    .filter(|r| r.name() == "task")
+                    .collect()
+            } else {
+                all_resolvers
+            };
+
+            let pipeline = pipeline::DispatchPipeline {
+                resolvers: resolvers_to_use,
+                config,
+                registry: registry.as_ref(),
+                executor: executor.as_ref(),
+            };
+
+            let outcome = pipeline.execute(&raw_input, &opts).await?;
             if let Some(code) = outcome.inline_exit_code {
                 if code != 0 {
                     anyhow::bail!("inline dispatch failed with exit code {code}");

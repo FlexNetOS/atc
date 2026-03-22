@@ -3,10 +3,13 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
 use atc_core::stream_json;
-use atc_core::types::{DispatchOpts, Status};
+use atc_core::types::{RunOpts, Status};
+use std::collections::HashMap;
 use tracing::{info, warn};
 
+use crate::pipeline::{resolver_by_name, DispatchPipeline};
 use crate::resolve::resolve_record;
+use crate::resolvers;
 use crate::subprocess::run_cmd_with_timeout;
 
 /// Timeout for non-fatal subprocess calls (tmux, git-kb).
@@ -110,9 +113,9 @@ pub async fn run_retry(
     if record.retries >= max_retries {
         registry.update_status(id, Status::NeedsHuman).await?;
 
-        // Unassign in git-kb (non-fatal)
-        if let Some(ref slug) = record.task_slug {
-            kb_unassign(slug, config).await;
+        // Resolver cleanup (non-fatal)
+        if let Some(resolver) = resolver_by_name(&record.resolver) {
+            resolver.on_cleanup(&record, config).await;
         }
 
         anyhow::bail!(
@@ -150,31 +153,46 @@ pub async fn run_retry(
         _ => {}
     }
 
-    // 7. Clear git-kb claim (non-fatal)
+    // 7. Resolver cleanup (non-fatal) — replaces hardcoded git-kb unassign/set-draft
+    if let Some(resolver) = resolver_by_name(&record.resolver) {
+        resolver.on_cleanup(&record, config).await;
+    }
     if let Some(ref task_slug) = record.task_slug {
-        kb_unassign(task_slug, config).await;
         kb_set_status_draft(task_slug, config).await;
     }
 
-    // 8. Re-dispatch
+    // 8. Re-dispatch via pipeline
     let retry_num = record.retries + 1;
     println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
 
-    let opts = DispatchOpts {
-        slug: slug.to_string(),
-        cli_mode: Some(record.mode.clone()),
-        directive: None,
+    // Build the input string for the pipeline — "task <slug>" for task resolver
+    let input = slug.to_string();
+    let opts = RunOpts {
+        input: input.clone(),
+        mode: Some(record.mode.clone()),
+        params: HashMap::new(),
         pr_url: record.pr_url.clone(),
         inline: false,
         force: false,
         dry_run: false,
-        max_budget_override,
-        max_turns_override,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: max_budget_override,
+        max_turns: max_turns_override,
         retries: record.retries + 1,
+        list: false,
+    };
+
+    let resolver_chain = resolvers::build_resolvers(config);
+    let pipeline = DispatchPipeline {
+        resolvers: resolver_chain,
+        config,
+        registry,
+        executor,
     };
 
     let original_status = record.status;
-    let outcome = match crate::dispatch::dispatch(config, registry, executor, &opts).await {
+    let outcome = match pipeline.execute(&input, &opts).await {
         Ok(o) => o,
         Err(e) => {
             warn!(id, error = %e, "dispatch failed during retry; rolling back to {original_status}");
@@ -205,38 +223,6 @@ pub async fn run_retry(
     }
 
     Ok(())
-}
-
-/// Non-fatal: unassign task in git-kb.
-async fn kb_unassign(slug: &str, config: &AtcConfig) {
-    let kb_root = match config
-        .dispatch
-        .resolved_meta_workspace_root(config.config_dir.as_deref())
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let status = run_cmd_with_timeout(
-        tokio::process::Command::new("git-kb")
-            .args(["unassign", slug])
-            .env("GITKB_ROOT", &kb_root),
-        CMD_TIMEOUT,
-    )
-    .await;
-
-    match status {
-        Ok(Some(s)) if !s.success() => {
-            warn!(slug, "git-kb unassign failed (non-fatal)");
-        }
-        Ok(None) => {
-            warn!(slug, "git-kb unassign timed out (non-fatal)");
-        }
-        Err(e) => {
-            warn!(slug, error = %e, "git-kb unassign failed (non-fatal)");
-        }
-        _ => {}
-    }
 }
 
 /// Non-fatal: set task status to draft in git-kb.

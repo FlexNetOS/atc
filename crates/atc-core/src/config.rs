@@ -28,6 +28,57 @@ pub struct AtcConfig {
     /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
+    /// Resolver chain configuration.
+    #[serde(default)]
+    pub resolvers: ResolversConfig,
+}
+
+/// `[resolvers]` section — controls resolver order and per-resolver settings.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResolversConfig {
+    /// Ordered list of resolver names. Default: ["task", "template", "prompt"].
+    #[serde(default = "default_resolver_order")]
+    pub order: Vec<String>,
+    /// Per-resolver settings.
+    #[serde(default)]
+    pub task: ResolverEntryConfig,
+    #[serde(default)]
+    pub template: ResolverEntryConfig,
+    #[serde(default)]
+    pub prompt: ResolverEntryConfig,
+}
+
+fn default_resolver_order() -> Vec<String> {
+    vec![
+        "task".to_string(),
+        "template".to_string(),
+        "prompt".to_string(),
+    ]
+}
+
+impl Default for ResolversConfig {
+    fn default() -> Self {
+        Self {
+            order: default_resolver_order(),
+            task: ResolverEntryConfig::default(),
+            template: ResolverEntryConfig::default(),
+            prompt: ResolverEntryConfig::default(),
+        }
+    }
+}
+
+/// Per-resolver toggle.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResolverEntryConfig {
+    /// Whether this resolver is enabled. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for ResolverEntryConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl AtcConfig {

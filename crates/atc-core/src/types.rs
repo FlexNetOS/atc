@@ -155,7 +155,7 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// Options for a single dispatch invocation.
+/// Options for a single dispatch invocation (legacy — used by retry internals).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchOpts {
     pub slug: String,
@@ -169,6 +169,37 @@ pub struct DispatchOpts {
     pub max_turns_override: Option<u32>,
     /// Retry count to propagate into the new dispatch record (default 0).
     pub retries: u32,
+}
+
+/// Options for an `atc run` invocation. Supersedes `DispatchOpts`.
+#[derive(Debug, Clone)]
+pub struct RunOpts {
+    /// Raw input string (joined from CLI positional args).
+    pub input: String,
+    /// Explicit mode override from `--mode`.
+    pub mode: Option<Mode>,
+    /// Key=value pairs for template rendering.
+    pub params: std::collections::HashMap<String, String>,
+    /// PR URL for review-fix / pr-comments modes.
+    pub pr_url: Option<String>,
+    /// Run inline (synchronous, no tmux).
+    pub inline: bool,
+    /// Force dispatch even if worktree is in use.
+    pub force: bool,
+    /// Preview config without launching.
+    pub dry_run: bool,
+    /// Comma-separated directive override.
+    pub directives: Option<String>,
+    /// Skip worktree creation (run in current directory).
+    pub no_worktree: bool,
+    /// Override max budget (USD).
+    pub max_budget_usd: Option<f64>,
+    /// Override max turns.
+    pub max_turns: Option<u32>,
+    /// Retry count (propagated on retry).
+    pub retries: u32,
+    /// List available templates instead of dispatching.
+    pub list: bool,
 }
 
 /// Outcome of a successful dispatch.

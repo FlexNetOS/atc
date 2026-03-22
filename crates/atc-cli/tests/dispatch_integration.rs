@@ -2,7 +2,7 @@ use anyhow::Result;
 use atc_core::config::{AtcConfig, DispatchConfig, ModeConfig};
 use atc_core::executor::{AgentExecutor, AgentHandle, AgentOpts};
 use atc_core::registry::{Registry, SqliteRegistry, StatusFilter};
-use atc_core::types::{DispatchOpts, Mode, Status};
+use atc_core::types::{Mode, RunOpts, Status};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -88,6 +88,10 @@ if [ "$1" = "assign" ]; then
 elif [ "$1" = "unassign" ]; then
     exit 0
 elif [ "$1" = "show" ]; then
+    if [ "$2" = "--json" ]; then
+        echo '{"slug":"'"$3"'","title":"Test","directives":["implement"]}'
+        exit 0
+    fi
     echo "---"
     echo "slug: $3"
     echo "title: Test task"
@@ -116,6 +120,11 @@ fn write_stub_git_assign_fails(dir: &std::path::Path) {
 if [ "$1" = "assign" ]; then
     echo "error: task already assigned" >&2
     exit 1
+elif [ "$1" = "show" ]; then
+    if [ "$2" = "--json" ]; then
+        echo '{"slug":"'"$3"'","title":"Test","directives":["implement"]}'
+        exit 0
+    fi
 fi
 exit 1
 "#,
@@ -269,19 +278,40 @@ impl Drop for TestFixture {
     }
 }
 
-fn default_dispatch_opts(slug: &str, mode: Mode) -> DispatchOpts {
-    DispatchOpts {
-        slug: slug.to_string(),
-        cli_mode: Some(mode),
-        directive: None,
+fn default_run_opts(input: &str, mode: Mode) -> RunOpts {
+    RunOpts {
+        input: input.to_string(),
+        mode: Some(mode),
+        params: HashMap::new(),
         pr_url: None,
         inline: true,
         force: false,
         dry_run: false,
-        max_budget_override: None,
-        max_turns_override: None,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
         retries: 0,
+        list: false,
     }
+}
+
+/// Helper to create a pipeline and dispatch via it.
+async fn dispatch_via_pipeline(
+    config: &AtcConfig,
+    registry: &dyn Registry,
+    executor: &dyn AgentExecutor,
+    input: &str,
+    opts: &RunOpts,
+) -> Result<atc_core::types::DispatchOutcome> {
+    let resolvers = atc_cli::resolvers::build_resolvers(config);
+    let pipeline = atc_cli::pipeline::DispatchPipeline {
+        resolvers,
+        config,
+        registry,
+        executor,
+    };
+    pipeline.execute(input, opts).await
 }
 
 #[tokio::test]
@@ -296,11 +326,16 @@ async fn test_dispatch_inline_inserts_registry_record() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = default_dispatch_opts("tasks/gitkb-42", Mode::Implement);
-    let outcome =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("dispatch failed");
+    let opts = default_run_opts("tasks/gitkb-42", Mode::Implement);
+    let outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-42",
+        &opts,
+    )
+    .await
+    .expect("dispatch failed");
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
@@ -328,9 +363,15 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = default_dispatch_opts("tasks/gitkb-99", Mode::Implement);
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let opts = default_run_opts("tasks/gitkb-99", Mode::Implement);
+    let result = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-99",
+        &opts,
+    )
+    .await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -357,11 +398,16 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 1 });
 
-    let opts = default_dispatch_opts("tasks/gitkb-fail", Mode::Implement);
-    let outcome =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("dispatch should succeed even with non-zero exit");
+    let opts = default_run_opts("tasks/gitkb-fail", Mode::Implement);
+    let outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-fail",
+        &opts,
+    )
+    .await
+    .expect("dispatch should succeed even with non-zero exit");
 
     assert_eq!(outcome.inline_exit_code, Some(1));
 
@@ -422,22 +468,30 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
     // Pass None for mode — should resolve from frontmatter directives
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-auto-mode".to_string(),
-        cli_mode: None,
-        directive: None,
+    let opts = RunOpts {
+        input: "tasks/gitkb-auto-mode".to_string(),
+        mode: None,
+        params: HashMap::new(),
         pr_url: None,
         inline: true,
         force: false,
         dry_run: false,
-        max_budget_override: None,
-        max_turns_override: None,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
         retries: 0,
+        list: false,
     };
-    let outcome =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("dispatch with mode from frontmatter failed");
+    let outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-auto-mode",
+        &opts,
+    )
+    .await
+    .expect("dispatch with mode from frontmatter failed");
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
@@ -461,21 +515,32 @@ async fn test_dispatch_multiple_dispatches_same_task() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
+    let opts = default_run_opts("tasks/gitkb-dup", Mode::Implement);
+
     // First dispatch
-    let opts = default_dispatch_opts("tasks/gitkb-dup", Mode::Implement);
-    let outcome1 =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("first dispatch failed");
+    let outcome1 = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-dup",
+        &opts,
+    )
+    .await
+    .expect("first dispatch failed");
 
     // Small delay to ensure different millisecond timestamp
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // Second dispatch of same slug should succeed (different dispatch ID)
-    let outcome2 =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("second dispatch should succeed with new ID");
+    let outcome2 = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-dup",
+        &opts,
+    )
+    .await
+    .expect("second dispatch should succeed with new ID");
 
     assert_ne!(outcome1.id, outcome2.id, "dispatch IDs should differ");
 
@@ -500,9 +565,15 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(FailingExecutor);
 
-    let opts = default_dispatch_opts("tasks/gitkb-exec-fail", Mode::Implement);
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let opts = default_run_opts("tasks/gitkb-exec-fail", Mode::Implement);
+    let result = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-exec-fail",
+        &opts,
+    )
+    .await;
 
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -529,22 +600,30 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(RecordingExecutor::new());
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-directive".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: Some("focus on error handling".to_string()),
+    let opts = RunOpts {
+        input: "tasks/gitkb-directive".to_string(),
+        mode: Some(Mode::Implement),
+        params: HashMap::new(),
         pr_url: None,
         inline: true,
         force: false,
         dry_run: false,
-        max_budget_override: None,
-        max_turns_override: None,
+        directives: Some("focus on error handling".to_string()),
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
         retries: 0,
+        list: false,
     };
-    let outcome =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("dispatch failed");
+    let outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-directive",
+        &opts,
+    )
+    .await
+    .expect("dispatch failed");
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
@@ -570,20 +649,29 @@ async fn test_dispatch_review_fix_requires_pr_url() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-review".to_string(),
-        cli_mode: Some(Mode::ReviewFix),
-        directive: None,
+    let opts = RunOpts {
+        input: "tasks/gitkb-review".to_string(),
+        mode: Some(Mode::ReviewFix),
+        params: HashMap::new(),
         pr_url: None, // Missing!
         inline: true,
         force: false,
         dry_run: false,
-        max_budget_override: None,
-        max_turns_override: None,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
         retries: 0,
+        list: false,
     };
-    let result =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts).await;
+    let result = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-review",
+        &opts,
+    )
+    .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -604,26 +692,152 @@ async fn test_dispatch_dry_run() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = DispatchOpts {
-        slug: "tasks/gitkb-dry".to_string(),
-        cli_mode: Some(Mode::Implement),
-        directive: None,
+    let opts = RunOpts {
+        input: "tasks/gitkb-dry".to_string(),
+        mode: Some(Mode::Implement),
+        params: HashMap::new(),
         pr_url: None,
         inline: true,
         force: false,
         dry_run: true,
-        max_budget_override: None,
-        max_turns_override: None,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
         retries: 0,
+        list: false,
     };
-    let outcome =
-        atc_cli::dispatch::dispatch(&fix.config, registry.as_ref(), executor.as_ref(), &opts)
-            .await
-            .expect("dry run should succeed");
+    let outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-dry",
+        &opts,
+    )
+    .await
+    .expect("dry run should succeed");
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
     // No registry record should exist (dry run doesn't dispatch)
     let all = registry.list(StatusFilter::All).await.unwrap();
     assert!(all.is_empty(), "dry run should not create registry records");
+}
+
+// --- Resolver-specific tests ---
+
+#[tokio::test]
+async fn test_prompt_resolver_dispatch() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    // Use a raw prompt string that won't match any task or template
+    let opts = RunOpts {
+        input: "Fix the auth bug in login.rs".to_string(),
+        mode: Some(Mode::Implement),
+        params: HashMap::new(),
+        pr_url: None,
+        inline: true,
+        force: false,
+        dry_run: false,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
+        retries: 0,
+        list: false,
+    };
+
+    // Only use prompt resolver (no task resolver since git-kb not configured)
+    let mut config = fix.config.clone();
+    config.resolvers.task.enabled = false;
+    config.resolvers.template.enabled = false;
+
+    let outcome = dispatch_via_pipeline(
+        &config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Fix the auth bug in login.rs",
+        &opts,
+    )
+    .await
+    .expect("prompt dispatch failed");
+
+    assert_eq!(outcome.inline_exit_code, Some(0));
+
+    let record = registry.get(&outcome.id).await.unwrap().unwrap();
+    assert_eq!(record.resolver, "prompt");
+    assert!(record.task_slug.is_none());
+    assert_eq!(record.mode, Mode::Implement);
+}
+
+#[tokio::test]
+async fn test_template_resolver_dispatch() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    // Create a template file
+    let tmpl_dir = fix.tmp.path().join("templates");
+    std::fs::create_dir_all(&tmpl_dir).unwrap();
+    std::fs::write(
+        tmpl_dir.join("my-review.md"),
+        "---\ndirectives: [review-fix]\n---\nReview template body.",
+    )
+    .unwrap();
+
+    let partials_dir = fix.tmp.path().join("partials");
+    std::fs::create_dir_all(&partials_dir).unwrap();
+    let comp_dir = fix.tmp.path().join("components");
+    std::fs::create_dir_all(&comp_dir).unwrap();
+
+    let mut config = fix.config.clone();
+    config.prompt.templates_dir = "templates".to_string();
+    config.prompt.partials_dir = "partials".to_string();
+    config.prompt.components_dir = "components".to_string();
+    config.resolvers.task.enabled = false; // Skip task resolver
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    let opts = RunOpts {
+        input: "my-review".to_string(),
+        mode: None,
+        params: HashMap::new(),
+        pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
+        inline: true,
+        force: false,
+        dry_run: false,
+        directives: None,
+        no_worktree: false,
+        max_budget_usd: None,
+        max_turns: None,
+        retries: 0,
+        list: false,
+    };
+
+    let outcome = dispatch_via_pipeline(
+        &config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "my-review",
+        &opts,
+    )
+    .await
+    .expect("template dispatch failed");
+
+    assert_eq!(outcome.inline_exit_code, Some(0));
+
+    let record = registry.get(&outcome.id).await.unwrap().unwrap();
+    assert_eq!(record.resolver, "template");
+    assert!(record.task_slug.is_none());
+    assert_eq!(record.mode, Mode::ReviewFix);
 }
