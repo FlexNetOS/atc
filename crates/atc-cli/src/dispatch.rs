@@ -369,11 +369,43 @@ async fn rollback_claim_and_worktree(
         }
         let wt_str = worktree_path.to_string_lossy();
         args.push(&wt_str);
-        let _ = tokio::process::Command::new(cmd)
+        let timeout = std::time::Duration::from_secs(30);
+        match tokio::process::Command::new(cmd)
             .args(&args)
             .current_dir(workspace_root)
-            .status()
-            .await;
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(mut child) => match tokio::time::timeout(timeout, child.wait()).await {
+                Ok(Ok(status)) if !status.success() => {
+                    warn!(
+                        worktree = %worktree_path.display(),
+                        "rollback worktree remove exited with {status}"
+                    );
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        worktree = %worktree_path.display(),
+                        "rollback worktree remove failed: {e}"
+                    );
+                }
+                Err(_) => {
+                    let _ = child.kill().await;
+                    warn!(
+                        worktree = %worktree_path.display(),
+                        "rollback worktree remove timed out after {}s",
+                        timeout.as_secs()
+                    );
+                }
+                _ => {}
+            },
+            Err(e) => {
+                warn!(
+                    worktree = %worktree_path.display(),
+                    "failed to spawn worktree remove: {e}"
+                );
+            }
+        }
     }
 }
 

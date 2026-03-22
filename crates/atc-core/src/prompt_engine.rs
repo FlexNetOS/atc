@@ -65,7 +65,9 @@ pub async fn assemble_system_prompt(
             format!("failed to expand partials in assembled prompt for mode '{mode_key}'")
         })?;
 
-    if !directive.trim().is_empty() && !template_owns_directive {
+    // Append the directive only if not already present — either inlined via
+    // {{directive}} in a component or expanded through a partial.
+    if !directive.trim().is_empty() && !template_owns_directive && !rendered.contains(directive) {
         rendered.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
     }
 
@@ -95,9 +97,16 @@ pub async fn render_template(
     config: &AtcConfig,
     worktree_path: Option<&Path>,
 ) -> Result<TemplateOutput> {
-    let raw = tokio::fs::read_to_string(template_path)
+    // Resolve relative template paths against `prompt.templates_dir`.
+    let resolved = if template_path.is_relative() {
+        resolve_dir(&config.prompt.templates_dir, config.config_dir.as_deref())
+            .join(template_path)
+    } else {
+        template_path.to_path_buf()
+    };
+    let raw = tokio::fs::read_to_string(&resolved)
         .await
-        .with_context(|| format!("failed to read template file '{}'", template_path.display()))?;
+        .with_context(|| format!("failed to read template file '{}'", resolved.display()))?;
 
     let (frontmatter, body) = split_frontmatter(&raw)?;
 
@@ -204,12 +213,14 @@ struct Frontmatter {
 }
 
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
-    let trimmed = raw.trim_start();
+    // Strip optional UTF-8 BOM but do NOT trim whitespace — a file that starts
+    // with blank lines followed by `---` is body content, not frontmatter.
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
 
     // The opening fence must be exactly `---` followed by a newline (LF or CRLF).
-    let after_open = if let Some(rest) = trimmed.strip_prefix("---\n") {
+    let after_open = if let Some(rest) = raw.strip_prefix("---\n") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix("---\r\n") {
+    } else if let Some(rest) = raw.strip_prefix("---\r\n") {
         rest
     } else {
         // No frontmatter — entire content is the body
@@ -242,8 +253,8 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
     let body = after_open[body_start..].trim_start_matches(['\r', '\n']);
 
     // Parse YAML
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(yaml_str).context("failed to parse template YAML frontmatter")?;
+    let yaml: serde_yml::Value =
+        serde_yml::from_str(yaml_str).context("failed to parse template YAML frontmatter")?;
 
     let description = yaml
         .get("description")
