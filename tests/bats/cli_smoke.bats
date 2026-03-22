@@ -10,24 +10,24 @@ load helpers/common
 # ---------------------------------------------------------------------------
 
 @test "atc --help exits 0 and shows usage" {
-    run "$ATC_BIN" --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Air Traffic Control"* ]]
-    [[ "$output" == *"dispatch"* ]]
+    run atc --help
+    assert_success
+    assert_output --partial "Air Traffic Control"
+    assert_output --partial "dispatch"
 }
 
 @test "atc dispatch --help exits 0 and shows dispatch usage" {
-    run "$ATC_BIN" dispatch --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SLUG"* ]]
-    [[ "$output" == *"MODE"* ]]
+    run atc dispatch --help
+    assert_success
+    assert_output --partial "SLUG"
+    assert_output --partial "MODE"
 }
 
 @test "atc health --help exits 0 and shows health usage" {
-    run "$ATC_BIN" health --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"--json"* ]]
-    [[ "$output" == *"--all"* ]]
+    run atc health --help
+    assert_success
+    assert_output --partial "--json"
+    assert_output --partial "--all"
 }
 
 # ---------------------------------------------------------------------------
@@ -35,25 +35,25 @@ load helpers/common
 # ---------------------------------------------------------------------------
 
 @test "atc with no subcommand fails" {
-    run "$ATC_BIN"
-    [ "$status" -ne 0 ]
+    run atc
+    assert_failure
 }
 
 @test "atc dispatch with no slug fails" {
-    run "$ATC_BIN" dispatch
-    [ "$status" -ne 0 ]
+    run atc dispatch
+    assert_failure
 }
 
 @test "atc dispatch with invalid mode fails with clap error" {
     # Arg order: atc dispatch <SLUG> [MODE]
-    run "$ATC_BIN" dispatch tasks/test-1 not-a-real-mode
+    run atc dispatch tasks/test-1 not-a-real-mode
     [ "$status" -eq 2 ]
-    [[ "$output" == *"invalid value"* ]]
+    assert_output --partial "invalid value"
 }
 
 @test "atc unknown subcommand fails" {
-    run "$ATC_BIN" frobnicate
-    [ "$status" -ne 0 ]
+    run atc frobnicate
+    assert_failure
 }
 
 # ---------------------------------------------------------------------------
@@ -61,15 +61,15 @@ load helpers/common
 # ---------------------------------------------------------------------------
 
 @test "atc dispatch with --config pointing to nonexistent file fails" {
-    run "$ATC_BIN" --config /tmp/does-not-exist-atc.toml dispatch tasks/test-1 implement
-    [ "$status" -ne 0 ]
+    run atc --config /tmp/does-not-exist-atc.toml dispatch tasks/test-1 implement
+    assert_failure
 }
 
 @test "atc dispatch with invalid TOML config fails" {
     local bad_config="$TEST_TMPDIR/bad.toml"
     echo "this is not valid toml [[[" > "$bad_config"
-    run "$ATC_BIN" --config "$bad_config" dispatch tasks/test-1 implement
-    [ "$status" -ne 0 ]
+    run atc --config "$bad_config" dispatch tasks/test-1 implement
+    assert_failure
 }
 
 @test "atc dispatch with valid config but missing git-kb fails without panic" {
@@ -78,13 +78,10 @@ load helpers/common
 
     # This will fail because git-kb isn't available for mode resolution,
     # but it should NOT panic — it should return a clean error.
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
-    [ "$status" -ne 0 ]
-    # Must not contain panic indicators
-    if [[ "$output" == *"panicked"* ]] || [[ "$output" == *"SIGSEGV"* ]]; then
-        echo "PANIC DETECTED in output: $output"
-        false
-    fi
+    run atc --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
+    assert_failure
+    refute_output --partial "panicked"
+    refute_output --partial "SIGSEGV"
 }
 
 # ---------------------------------------------------------------------------
@@ -96,7 +93,7 @@ load helpers/common
     for mode in "${modes[@]}"; do
         # Arg order: atc dispatch <SLUG> [MODE]
         # We just check that clap accepts the mode (it will fail later at config/git-kb).
-        run "$ATC_BIN" dispatch tasks/test-1 "$mode"
+        run atc dispatch tasks/test-1 "$mode"
         # Status 2 = clap parse error — that would be a bug
         if [ "$status" -eq 2 ]; then
             echo "Mode '$mode' rejected by clap with status 2"
@@ -115,12 +112,9 @@ load helpers/common
 
     # With ATC_CI=true, dispatch should run inline even without --inline flag.
     # It will fail (no git-kb), but the error path differs from tmux mode.
-    ATC_CI=true run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement
-    [ "$status" -ne 0 ]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    ATC_CI=true run atc --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement
+    assert_failure
+    refute_output --partial "panicked"
 }
 
 # ---------------------------------------------------------------------------
@@ -133,12 +127,9 @@ load helpers/common
 
     # Pass a slug that would be dangerous if interpolated into a shell command.
     # The binary should fail cleanly (no git-kb), NOT execute the injected command.
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" dispatch 'tasks/$(whoami)' implement --inline
-    [ "$status" -ne 0 ]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    run atc --config "$TEST_TMPDIR/atc.toml" dispatch 'tasks/$(whoami)' implement --inline
+    assert_failure
+    refute_output --partial "panicked"
 }
 
 @test "config path with spaces is handled correctly" {
@@ -146,13 +137,10 @@ load helpers/common
     mkdir -p "$dir_with_spaces"
     write_test_config "$dir_with_spaces/atc.toml" "$dir_with_spaces/atc.db"
 
-    run "$ATC_BIN" --config "$dir_with_spaces/atc.toml" dispatch tasks/test-1 implement --inline
+    run atc --config "$dir_with_spaces/atc.toml" dispatch tasks/test-1 implement --inline
     # Should fail (no git-kb), but should not panic or misparse the path
-    [ "$status" -ne 0 ]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    assert_failure
+    refute_output --partial "panicked"
 }
 
 # ---------------------------------------------------------------------------
@@ -161,23 +149,23 @@ load helpers/common
 
 @test "atc health with empty registry shows no records" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"No dispatch records found"* ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" health
+    assert_success
+    assert_output --partial "No dispatch records found"
 }
 
 @test "atc health --json with empty registry outputs empty array" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health --json
-    [ "$status" -eq 0 ]
-    [[ "$output" == "[]" ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" health --json
+    assert_success
+    assert_output "[]"
 }
 
 @test "atc health --all with empty registry shows no records" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" health --all
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"No dispatch records found"* ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" health --all
+    assert_success
+    assert_output --partial "No dispatch records found"
 }
 
 @test "config with max_retries = 0 is rejected" {
@@ -192,9 +180,9 @@ max_retries = 0
 path = "$TEST_TMPDIR/atc.db"
 EOF
     mkdir -p "$TEST_TMPDIR/workspace"
-    run "$ATC_BIN" --config "$config" health
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"max_retries"* ]]
+    run atc --config "$config" health
+    assert_failure
+    assert_output --partial "max_retries"
 }
 
 @test "config with signal_timeout_secs = 0 is rejected" {
@@ -211,9 +199,9 @@ path = "$TEST_TMPDIR/atc.db"
 signal_timeout_secs = 0
 EOF
     mkdir -p "$TEST_TMPDIR/workspace"
-    run "$ATC_BIN" --config "$config" health
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"signal_timeout_secs"* ]]
+    run atc --config "$config" health
+    assert_failure
+    assert_output --partial "signal_timeout_secs"
 }
 
 # ---------------------------------------------------------------------------
@@ -223,12 +211,9 @@ EOF
 @test "atc dispatch with empty config file fails cleanly" {
     local empty_config="$TEST_TMPDIR/empty.toml"
     : > "$empty_config"
-    run "$ATC_BIN" --config "$empty_config" dispatch tasks/test-1 implement --inline
-    [ "$status" -ne 0 ]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    run atc --config "$empty_config" dispatch tasks/test-1 implement --inline
+    assert_failure
+    refute_output --partial "panicked"
 }
 
 # ---------------------------------------------------------------------------
@@ -241,12 +226,9 @@ EOF
 
     # With RUST_LOG=debug, the tracing subscriber should emit DEBUG spans.
     # The dispatch will fail (no git-kb), but we should see debug output.
-    RUST_LOG=debug run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
-    [ "$status" -ne 0 ]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    RUST_LOG=debug run atc --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
+    assert_failure
+    refute_output --partial "panicked"
     # Debug output should contain DEBUG level traces
     [[ "$output" == *"DEBUG"* ]] || [[ "$output" == *"debug"* ]] || true
 }
@@ -256,42 +238,42 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "atc close --help exits 0 and shows usage" {
-    run "$ATC_BIN" close --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SLUG"* ]]
-    [[ "$output" == *"--pr"* ]]
+    run atc close --help
+    assert_success
+    assert_output --partial "SLUG"
+    assert_output --partial "--pr"
 }
 
 @test "atc redirect --help exits 0 and shows usage" {
-    run "$ATC_BIN" redirect --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SLUG"* ]]
-    [[ "$output" == *"MESSAGE"* ]]
+    run atc redirect --help
+    assert_success
+    assert_output --partial "ID"
+    assert_output --partial "MESSAGE"
 }
 
 @test "atc retry --help exits 0 and shows usage" {
-    run "$ATC_BIN" retry --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SLUG"* ]]
+    run atc retry --help
+    assert_success
+    assert_output --partial "ID"
 }
 
 @test "atc close with unknown slug fails cleanly" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" close tasks/nonexistent
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"no dispatch record found"* ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" close tasks/nonexistent
+    assert_failure
+    assert_output --partial "no dispatch record found"
 }
 
 @test "atc redirect with no args fails" {
-    run "$ATC_BIN" redirect
-    [ "$status" -ne 0 ]
+    run atc redirect
+    assert_failure
 }
 
 @test "atc retry with unknown slug fails cleanly" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" retry tasks/nonexistent
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"no dispatch record found"* ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" retry tasks/nonexistent
+    assert_failure
+    assert_output --partial "no dispatch record found"
 }
 
 # ---------------------------------------------------------------------------
@@ -299,24 +281,24 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "atc status --help exits 0 and shows usage" {
-    run "$ATC_BIN" status --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"--json"* ]]
-    [[ "$output" == *"--status"* ]]
+    run atc status --help
+    assert_success
+    assert_output --partial "--json"
+    assert_output --partial "--status"
 }
 
 @test "atc status with empty registry shows no records" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" status
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"No dispatch records found"* ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" status
+    assert_success
+    assert_output --partial "No dispatch records found"
 }
 
 @test "atc status --json with empty registry outputs empty array" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" status --json
-    [ "$status" -eq 0 ]
-    [[ "$output" == "[]" ]]
+    run atc --config "$TEST_TMPDIR/atc.toml" status --json
+    assert_success
+    assert_output "[]"
 }
 
 # ---------------------------------------------------------------------------
@@ -324,20 +306,17 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "atc info --help exits 0 and shows usage" {
-    run "$ATC_BIN" info --help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SLUG"* ]]
+    run atc info --help
+    assert_success
+    assert_output --partial "ID"
 }
 
 @test "atc info with nonexistent slug fails cleanly" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" info tasks/nonexistent
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"no dispatch record found"* ]]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    run atc --config "$TEST_TMPDIR/atc.toml" info tasks/nonexistent
+    assert_failure
+    assert_output --partial "no dispatch record found"
+    refute_output --partial "panicked"
 }
 
 # ---------------------------------------------------------------------------
@@ -345,18 +324,15 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "atc logs --help exits 0 and shows usage" {
-    run "$ATC_BIN" logs --help
-    [ "$status" -eq 0 ]
+    run atc logs --help
+    assert_success
     [[ "$output" == *"ARG"* ]] || [[ "$output" == *"arg"* ]] || [[ "$output" == *"slug"* ]] || [[ "$output" == *"session"* ]] || [[ "$output" == *"-f"* ]]
 }
 
 @test "atc logs with nonexistent slug fails cleanly" {
     write_test_config "$TEST_TMPDIR/atc.toml"
-    run "$ATC_BIN" --config "$TEST_TMPDIR/atc.toml" logs tasks/nonexistent
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"No log file"* ]]
-    if [[ "$output" == *"panicked"* ]]; then
-        echo "PANIC DETECTED: $output"
-        false
-    fi
+    run atc --config "$TEST_TMPDIR/atc.toml" logs tasks/nonexistent
+    assert_failure
+    assert_output --partial "No log file"
+    refute_output --partial "panicked"
 }

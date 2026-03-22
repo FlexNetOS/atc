@@ -53,10 +53,9 @@ release:
 test:
 	cargo test --workspace
 
-# Run BATS integration tests (requires bats: brew install bats-core)
+# Run BATS integration tests (auto-clones bats-core on first run)
 test-bats: build
-	@command -v bats >/dev/null 2>&1 || { echo "bats not found. Install with: brew install bats-core"; exit 1; }
-	bats tests/bats/
+	$(MAKE) -C tests/bats test
 
 # Run cargo check
 check:

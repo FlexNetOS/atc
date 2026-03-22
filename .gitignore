@@ -14,3 +14,4 @@ coverage/
 
 # Dispatch runtime
 .envrc
+tests/bats/bats/
