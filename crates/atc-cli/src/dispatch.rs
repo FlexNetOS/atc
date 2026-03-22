@@ -787,7 +787,18 @@ pub async fn dispatch(
     // }
 
     // 5. Setup log file
-    tokio::fs::create_dir_all(&log_dir).await?;
+    if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
+        rollback_claim_and_worktree(
+            slug,
+            kb_root,
+            wt_created,
+            wt_is_meta,
+            &worktree_path,
+            &workspace_root,
+        )
+        .await;
+        return Err(e.into());
+    }
     let log_file = log_dir.join(format!("{}.jsonl", dispatch_id));
 
     // Write diagnostic file

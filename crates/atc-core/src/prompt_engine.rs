@@ -50,9 +50,13 @@ pub async fn assemble_system_prompt(
 
     let assembled = parts.join("\n\n");
 
+    // Check if any component already embeds {{directive}} inline before
+    // Handlebars expansion replaces it — if so, skip the trailing append.
+    let template_owns_directive = assembled.contains("{{directive}}");
+
     // Expand partials in the assembled prompt
     let hbs = build_registry(config, worktree_path).await?;
-    let rendered = hbs
+    let mut rendered = hbs
         .render_template(
             &assembled,
             &serde_json::json!({ "slug": slug, "directive": directive }),
@@ -60,6 +64,10 @@ pub async fn assemble_system_prompt(
         .with_context(|| {
             format!("failed to expand partials in assembled prompt for mode '{mode_key}'")
         })?;
+
+    if !directive.trim().is_empty() && !template_owns_directive {
+        rendered.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
+    }
 
     Ok(rendered)
 }
@@ -123,11 +131,8 @@ pub async fn render_prompt(
     if let Some(mode_config) = config.modes.get(mode_key) {
         // Path 1: Component assembly
         if mode_config.components.is_some() {
-            let mut prompt =
+            let prompt =
                 assemble_system_prompt(mode, slug, directive, config, worktree_path).await?;
-            if !directive.trim().is_empty() {
-                prompt.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
-            }
             return Ok(prompt);
         }
 
@@ -878,6 +883,53 @@ Working on PR: {{pr}}
         assert!(
             result.contains("Slug: my-task"),
             "slug should be available in Handlebars context, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_prompt_components_directive_not_duplicated_when_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        // Component embeds {{directive}} inline — should NOT get appended again
+        std::fs::write(
+            comp_dir.join("base.md"),
+            "Inline directive: {{directive}}",
+        )
+        .unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "implement".to_string(),
+            ModeConfig {
+                components: Some(vec!["base".to_string()]),
+                ..Default::default()
+            },
+        );
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            modes,
+            ..Default::default()
+        };
+        let result =
+            render_prompt(&Mode::Implement, "tasks/t", &config, "focus on tests", None)
+                .await
+                .unwrap();
+        assert!(
+            result.contains("Inline directive: focus on tests"),
+            "directive should be expanded inline, got: {result}"
+        );
+        assert!(
+            !result.contains("Additional directive"),
+            "directive should NOT be appended when template owns it, got: {result}"
         );
     }
 
