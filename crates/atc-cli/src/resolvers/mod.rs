@@ -64,4 +64,27 @@ mod tests {
         assert_eq!(resolvers[0].name(), "prompt");
         assert_eq!(resolvers[1].name(), "template");
     }
+
+    #[test]
+    fn test_build_resolvers_all_disabled() {
+        let mut config = AtcConfig::default();
+        config.resolvers.task = ResolverEntryConfig { enabled: false };
+        config.resolvers.template = ResolverEntryConfig { enabled: false };
+        config.resolvers.prompt = ResolverEntryConfig { enabled: false };
+        let resolvers = build_resolvers(&config);
+        assert!(resolvers.is_empty());
+    }
+
+    #[test]
+    fn test_build_resolvers_unknown_name_skipped() {
+        let mut config = AtcConfig::default();
+        config.resolvers.order = vec![
+            "nonexistent".to_string(),
+            "task".to_string(),
+            "typo".to_string(),
+        ];
+        let resolvers = build_resolvers(&config);
+        assert_eq!(resolvers.len(), 1);
+        assert_eq!(resolvers[0].name(), "task");
+    }
 }

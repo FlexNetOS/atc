@@ -247,7 +247,13 @@ pub async fn run(
 
             // Parse input: if first word is "task", strip it and route to TaskResolver explicitly
             let (raw_input, force_task) = if input.first().map(|s| s.as_str()) == Some("task") {
-                (input[1..].join(" "), true)
+                let slug = input[1..].join(" ");
+                if slug.is_empty() {
+                    anyhow::bail!(
+                        "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'"
+                    );
+                }
+                (slug, true)
             } else {
                 (input.join(" "), false)
             };

@@ -66,7 +66,12 @@ impl InputResolver for PromptResolver {
         })
     }
 
-    async fn on_cleanup(&self, _record: &DispatchRecord, _config: &AtcConfig) {
+    async fn on_cleanup(
+        &self,
+        _record: &DispatchRecord,
+        _config: &AtcConfig,
+        _registry: Option<&dyn atc_core::registry::Registry>,
+    ) {
         // Raw prompts have no external state to clean up
     }
 }

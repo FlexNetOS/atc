@@ -9,7 +9,6 @@ use tracing::{info, warn};
 
 use crate::pipeline::{resolver_by_name, DispatchPipeline};
 use crate::resolve::resolve_record;
-use crate::resolvers;
 use crate::subprocess::run_cmd_with_timeout;
 
 /// Timeout for non-fatal subprocess calls (tmux, git-kb).
@@ -115,7 +114,7 @@ pub async fn run_retry(
 
         // Resolver cleanup (non-fatal)
         if let Some(resolver) = resolver_by_name(&record.resolver) {
-            resolver.on_cleanup(&record, config).await;
+            resolver.on_cleanup(&record, config, Some(registry)).await;
         }
 
         anyhow::bail!(
@@ -153,12 +152,14 @@ pub async fn run_retry(
         _ => {}
     }
 
-    // 7. Resolver cleanup (non-fatal) — replaces hardcoded git-kb unassign/set-draft
-    if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config).await;
-    }
+    // 7. Set task status to draft BEFORE cleanup/re-dispatch to avoid racing
     if let Some(ref task_slug) = record.task_slug {
         kb_set_status_draft(task_slug, config).await;
+    }
+
+    // 7b. Resolver cleanup (non-fatal) — replaces hardcoded git-kb unassign
+    if let Some(resolver) = resolver_by_name(&record.resolver) {
+        resolver.on_cleanup(&record, config, Some(registry)).await;
     }
 
     // 8. Re-dispatch via pipeline
@@ -183,9 +184,18 @@ pub async fn run_retry(
         list: false,
     };
 
-    let resolver_chain = resolvers::build_resolvers(config);
+    // Use the recorded resolver directly instead of rebuilding the full chain.
+    // This prevents resolver-order issues where e.g. a task slug might match
+    // the prompt resolver if task resolver is ordered after it.
+    let recorded_resolver = resolver_by_name(&record.resolver).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot retry dispatch {}: unknown resolver '{}'",
+            id,
+            record.resolver
+        )
+    })?;
     let pipeline = DispatchPipeline {
-        resolvers: resolver_chain,
+        resolvers: vec![recorded_resolver],
         config,
         registry,
         executor,

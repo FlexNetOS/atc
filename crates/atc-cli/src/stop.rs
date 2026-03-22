@@ -39,7 +39,7 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
 
     // 5. Resolver cleanup (replaces hardcoded git-kb unassign)
     if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config).await;
+        resolver.on_cleanup(&record, config, Some(registry)).await;
     }
 
     // 6. Print result

@@ -34,8 +34,8 @@ impl<'a> DispatchPipeline<'a> {
         // 3. Validate
         if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments) && opts.pr_url.is_none() {
             // Rollback resolver state
-            let tmp_record = self.make_tmp_record(&resolved, opts);
-            resolver.on_cleanup(&tmp_record, self.config).await;
+            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+            resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
                 "{} mode requires a PR URL (--pr-url). Cannot dispatch without it.",
                 resolved.mode.as_str()
@@ -65,8 +65,8 @@ impl<'a> DispatchPipeline<'a> {
         // Duplicate session detection
         let session_name = resolved.dispatch_id.clone();
         if !opts.force && tmux_session_alive(&session_name).await {
-            let tmp_record = self.make_tmp_record(&resolved, opts);
-            resolver.on_cleanup(&tmp_record, self.config).await;
+            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+            resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
                 "tmux session '{}' already exists. Use --force to override.",
                 session_name
@@ -78,7 +78,7 @@ impl<'a> DispatchPipeline<'a> {
             return self.dry_run(&resolved, opts, budget, turns, resolver.name());
         }
 
-        // 5. Ensure worktree
+        // 5. Ensure worktree (skip if --no-worktree)
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let meta = crate::dispatch::discover_meta(&cwd).await;
 
@@ -89,36 +89,41 @@ impl<'a> DispatchPipeline<'a> {
             .unwrap_or_else(|| cwd.clone());
         let kb_root = &workspace_root;
 
-        let repo = match dispatch_cfg.resolved_repo() {
-            Some(r) => Some(r.to_string()),
-            None => meta.as_ref().map(|m| m.repo.clone()),
-        };
+        let (worktree_path, wt_created, wt_is_meta) = if opts.no_worktree {
+            // Run in current directory, no worktree creation
+            (cwd.clone(), false, false)
+        } else {
+            let repo = match dispatch_cfg.resolved_repo() {
+                Some(r) => Some(r.to_string()),
+                None => meta.as_ref().map(|m| m.repo.clone()),
+            };
 
-        let kb_basename = workspace_root
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("workspace_root has no basename"))?
-            .to_string_lossy()
-            .into_owned();
+            let kb_basename = workspace_root
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("workspace_root has no basename"))?
+                .to_string_lossy()
+                .into_owned();
 
-        let worktree_base = dispatch_cfg.resolved_worktree_base();
-        let wt_opts = WorktreeOpts {
-            worktree_base: &worktree_base,
-            kb_basename: &kb_basename,
-            repo: repo.as_deref(),
-            branch: &resolved.branch,
-            meta_workspace_root: &workspace_root,
-            kb_root,
-            force: opts.force,
+            let worktree_base = dispatch_cfg.resolved_worktree_base();
+            let wt_opts = WorktreeOpts {
+                worktree_base: &worktree_base,
+                kb_basename: &kb_basename,
+                repo: repo.as_deref(),
+                branch: &resolved.branch,
+                meta_workspace_root: &workspace_root,
+                kb_root,
+                force: opts.force,
+            };
+            let wt_result = match ensure_worktree(&wt_opts, self.registry).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                    resolver.on_cleanup(&tmp_record, self.config, None).await;
+                    return Err(e);
+                }
+            };
+            (wt_result.path, wt_result.created, wt_result.is_meta)
         };
-        let wt_result = match ensure_worktree(&wt_opts, self.registry).await {
-            Ok(r) => r,
-            Err(e) => {
-                let tmp_record = self.make_tmp_record(&resolved, opts);
-                resolver.on_cleanup(&tmp_record, self.config).await;
-                return Err(e);
-            }
-        };
-        let worktree_path = wt_result.path;
 
         // 6. Set up environment
         let mut env = resolved.env_overrides.clone();
@@ -147,10 +152,10 @@ impl<'a> DispatchPipeline<'a> {
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
         if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
-            let tmp_record = self.make_tmp_record(&resolved, opts);
-            resolver.on_cleanup(&tmp_record, self.config).await;
-            if wt_result.created {
-                rollback_worktree(wt_result.is_meta, &worktree_path, &workspace_root).await;
+            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+            resolver.on_cleanup(&tmp_record, self.config, None).await;
+            if wt_created {
+                rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
             }
             return Err(e.into());
         }
@@ -180,10 +185,10 @@ impl<'a> DispatchPipeline<'a> {
         let handle = match self.executor.spawn(&agent_opts).await {
             Ok(h) => h,
             Err(e) => {
-                let tmp_record = self.make_tmp_record(&resolved, opts);
-                resolver.on_cleanup(&tmp_record, self.config).await;
-                if wt_result.created {
-                    rollback_worktree(wt_result.is_meta, &worktree_path, &workspace_root).await;
+                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
+                if wt_created {
+                    rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
                 }
                 return Err(e);
             }
@@ -222,7 +227,9 @@ impl<'a> DispatchPipeline<'a> {
                 .stderr(std::process::Stdio::null())
                 .status()
                 .await;
-            resolver.on_cleanup(&record, self.config).await;
+            resolver
+                .on_cleanup(&record, self.config, Some(self.registry))
+                .await;
             return Err(e);
         }
 
@@ -293,6 +300,7 @@ impl<'a> DispatchPipeline<'a> {
         &self,
         resolved: &atc_core::resolver::ResolvedInput,
         opts: &RunOpts,
+        resolver_name: &str,
     ) -> DispatchRecord {
         let now = Utc::now();
         DispatchRecord {
@@ -305,7 +313,7 @@ impl<'a> DispatchPipeline<'a> {
             status: Status::Failed,
             mode: resolved.mode.clone(),
             retries: opts.retries,
-            resolver: String::new(),
+            resolver: resolver_name.to_string(),
             pr_url: opts.pr_url.clone(),
             checks: HealthChecks::default(),
             cost_usd: None,

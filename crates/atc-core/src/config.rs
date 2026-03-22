@@ -152,6 +152,16 @@ impl AtcConfig {
                 anyhow::ensure!(turns > 0, "modes.{}.max_turns must be >= 1", key);
             }
         }
+        // Validate resolver order — warn on unknown resolver names (typos)
+        let known_resolvers = ["task", "template", "prompt"];
+        for name in &cfg.resolvers.order {
+            anyhow::ensure!(
+                known_resolvers.contains(&name.as_str()),
+                "unknown resolver '{}' in resolvers.order; valid resolvers: {}",
+                name,
+                known_resolvers.join(", ")
+            );
+        }
         Ok(cfg)
     }
 

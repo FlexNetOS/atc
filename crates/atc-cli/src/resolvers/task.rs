@@ -5,10 +5,15 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use atc_core::config::AtcConfig;
+use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{DispatchRecord, Mode, RunOpts};
 
 use crate::dispatch::{build_dispatch_id, derive_branch};
+use crate::subprocess::run_cmd_with_timeout;
+
+/// Timeout for git-kb subprocess calls.
+const KB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolver for GitKB task dispatches. Consolidates ALL `git kb` interactions.
 pub struct TaskResolver;
@@ -22,11 +27,21 @@ impl TaskResolver {
         }
 
         debug!("no CLI mode; reading directives from task frontmatter");
-        let output = tokio::process::Command::new("git-kb")
-            .args(["show", "--json", slug])
-            .env("GITKB_ROOT", kb_root)
-            .output()
-            .await?;
+        let output = tokio::time::timeout(
+            KB_TIMEOUT,
+            tokio::process::Command::new("git-kb")
+                .args(["show", "--json", slug])
+                .env("GITKB_ROOT", kb_root)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git-kb show --json {} timed out after {:?}",
+                slug,
+                KB_TIMEOUT
+            )
+        })??;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -60,11 +75,17 @@ impl TaskResolver {
 
     /// CAS-claim a task via `git kb assign`.
     async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()> {
-        let output = tokio::process::Command::new("git-kb")
-            .args(["assign", slug, session_name])
-            .env("GITKB_ROOT", kb_root)
-            .output()
-            .await?;
+        let output = tokio::time::timeout(
+            KB_TIMEOUT,
+            tokio::process::Command::new("git-kb")
+                .args(["assign", slug, session_name])
+                .env("GITKB_ROOT", kb_root)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("git-kb assign {} timed out after {:?}", slug, KB_TIMEOUT)
+        })??;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -82,17 +103,22 @@ impl TaskResolver {
         Ok(())
     }
 
-    /// Release a CAS claim. Errors are logged but not propagated.
+    /// Release a CAS claim. Errors are logged but not propagated (best-effort with timeout).
     async fn unassign_task(slug: &str, kb_root: &Path) {
-        let status = tokio::process::Command::new("git-kb")
-            .args(["unassign", slug])
-            .env("GITKB_ROOT", kb_root)
-            .status()
-            .await;
+        let status = run_cmd_with_timeout(
+            tokio::process::Command::new("git-kb")
+                .args(["unassign", slug])
+                .env("GITKB_ROOT", kb_root),
+            KB_TIMEOUT,
+        )
+        .await;
 
         match status {
-            Ok(s) if !s.success() => {
+            Ok(Some(s)) if !s.success() => {
                 warn!(slug, exit_code = ?s.code(), "git kb unassign exited with error");
+            }
+            Ok(None) => {
+                warn!(slug, "git kb unassign timed out (non-fatal)");
             }
             Err(e) => {
                 warn!(slug, error = %e, "git kb unassign failed");
@@ -124,17 +150,20 @@ impl InputResolver for TaskResolver {
             }
         };
 
-        let output = tokio::process::Command::new("git-kb")
-            .args(["show", "--json", input])
-            .env("GITKB_ROOT", &kb_root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .await;
+        let output = tokio::time::timeout(
+            KB_TIMEOUT,
+            tokio::process::Command::new("git-kb")
+                .args(["show", "--json", input])
+                .env("GITKB_ROOT", &kb_root)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output(),
+        )
+        .await;
 
         match output {
-            Ok(o) => o.status.success(),
-            Err(_) => false,
+            Ok(Ok(o)) => o.status.success(),
+            _ => false,
         }
     }
 
@@ -166,9 +195,15 @@ impl InputResolver for TaskResolver {
         Self::cas_claim(slug, &session_name, &kb_root).await?;
 
         // 4. Render system prompt
+        // Pass kb_root as worktree_path fallback so project-level .dispatch/partials/
+        // can be resolved before the actual worktree is created by the pipeline.
         let directive = opts.directives.as_deref().unwrap_or("");
         let prompt = match atc_core::prompt_engine::render_prompt(
-            &mode, slug, config, directive, None, // worktree_path filled later by pipeline
+            &mode,
+            slug,
+            config,
+            directive,
+            Some(kb_root.as_path()),
         )
         .await
         {
@@ -198,8 +233,37 @@ impl InputResolver for TaskResolver {
         })
     }
 
-    async fn on_cleanup(&self, record: &DispatchRecord, config: &AtcConfig) {
+    async fn on_cleanup(
+        &self,
+        record: &DispatchRecord,
+        config: &AtcConfig,
+        registry: Option<&dyn Registry>,
+    ) {
         if let Some(ref slug) = record.task_slug {
+            // Check if other live (non-terminal) dispatches exist for this slug.
+            // If so, don't unassign — the sibling dispatch still holds the claim.
+            if let Some(reg) = registry {
+                match reg.find_by_task_slug(slug).await {
+                    Ok(records) => {
+                        let has_other_live = records
+                            .iter()
+                            .any(|r| r.id != record.id && !r.status.is_terminal());
+                        if has_other_live {
+                            debug!(
+                                slug,
+                                id = %record.id,
+                                "skipping unassign: another live dispatch exists for this slug"
+                            );
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(slug, error = %e, "failed to check for sibling dispatches; skipping unassign for safety");
+                        return;
+                    }
+                }
+            }
+
             let kb_root = config
                 .dispatch
                 .resolved_meta_workspace_root(config.config_dir.as_deref())

@@ -66,14 +66,14 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
         removed = cleanup_worktree(worktree_path, &worktree_base).await?;
     }
 
-    // 3. Resolver cleanup (replaces hardcoded git-kb unassign)
-    if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config).await;
-    }
-
-    // 4. Update status to Stopped if not already terminal
+    // 3. Update status to Stopped if not already terminal
     if !record.status.is_terminal() {
         registry.update_status(id, Status::Stopped).await?;
+    }
+
+    // 4. Resolver cleanup (replaces hardcoded git-kb unassign)
+    if let Some(resolver) = resolver_by_name(&record.resolver) {
+        resolver.on_cleanup(&record, config, Some(registry)).await;
     }
 
     Ok(removed)

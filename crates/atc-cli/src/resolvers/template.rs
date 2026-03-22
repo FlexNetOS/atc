@@ -60,6 +60,10 @@ impl InputResolver for TemplateResolver {
     async fn can_resolve(&self, input: &str, config: &AtcConfig) -> bool {
         let dir = Self::templates_dir(config);
         let template_path = dir.join(format!("{input}.md"));
+        // Reject path traversal attempts
+        if !template_path.starts_with(&dir) {
+            return false;
+        }
         template_path.exists()
     }
 
@@ -71,6 +75,12 @@ impl InputResolver for TemplateResolver {
     ) -> Result<ResolvedInput> {
         let dir = Self::templates_dir(config);
         let template_path = dir.join(format!("{input}.md"));
+        // Reject path traversal attempts
+        anyhow::ensure!(
+            template_path.starts_with(&dir),
+            "template name must not contain path traversal components: {:?}",
+            input
+        );
 
         debug!(template = %template_path.display(), "rendering template");
 
@@ -108,7 +118,12 @@ impl InputResolver for TemplateResolver {
         })
     }
 
-    async fn on_cleanup(&self, _record: &DispatchRecord, _config: &AtcConfig) {
+    async fn on_cleanup(
+        &self,
+        _record: &DispatchRecord,
+        _config: &AtcConfig,
+        _registry: Option<&dyn atc_core::registry::Registry>,
+    ) {
         // Templates have no external state to clean up
     }
 }

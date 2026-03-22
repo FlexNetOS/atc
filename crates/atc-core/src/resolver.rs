@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::config::AtcConfig;
+use crate::registry::Registry;
 use crate::types::{DispatchRecord, Mode, RunOpts};
 
 /// Result of resolving an input string into dispatch parameters.
@@ -45,8 +46,17 @@ pub trait InputResolver: Send + Sync {
     ) -> anyhow::Result<ResolvedInput>;
 
     /// Called on stop/cleanup/close/retry for dispatches created by this resolver.
+    ///
+    /// `registry` is provided when the dispatch is already registered, allowing
+    /// resolvers to check for sibling dispatches before releasing shared resources.
+    /// It is `None` when cleaning up before registry insertion (error paths in pipeline).
     /// Default implementation is a no-op.
-    async fn on_cleanup(&self, _record: &DispatchRecord, _config: &AtcConfig) {
+    async fn on_cleanup(
+        &self,
+        _record: &DispatchRecord,
+        _config: &AtcConfig,
+        _registry: Option<&dyn Registry>,
+    ) {
         // no-op by default
     }
 }
