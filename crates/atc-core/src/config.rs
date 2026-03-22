@@ -50,6 +50,14 @@ impl AtcConfig {
             cfg.dispatch.max_retries > 0,
             "dispatch.max_retries must be >= 1"
         );
+        anyhow::ensure!(
+            cfg.watch.poll_interval_secs > 0,
+            "watch.poll_interval_secs must be >= 1"
+        );
+        anyhow::ensure!(
+            cfg.watch.cost_threshold.is_finite() && cfg.watch.cost_threshold >= 0.0,
+            "watch.cost_threshold must be a finite non-negative number"
+        );
         // Validate mode keys against known Mode variants + per-mode overrides
         for key in cfg.modes.keys() {
             key.parse::<crate::types::Mode>().map_err(|_| {
@@ -972,6 +980,39 @@ max_retries = 5
         assert!(
             err.to_string()
                 .contains("modes.research.max_turns must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_poll_interval() {
+        let toml = "[watch]\npoll_interval_secs = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("watch.poll_interval_secs must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_negative_cost_threshold() {
+        let toml = "[watch]\ncost_threshold = -1.0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("watch.cost_threshold must be a finite non-negative number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_nan_cost_threshold() {
+        let toml = "[watch]\ncost_threshold = nan";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("watch.cost_threshold must be a finite non-negative number"),
             "unexpected error: {err}"
         );
     }

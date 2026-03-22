@@ -290,8 +290,8 @@ impl ClaudeExecutor {
 
         bash_parts.push(claude_cmd);
 
-        // Capture exit code for post-completion
-        bash_parts.push("EXIT_CODE=$?".to_string());
+        // Capture Claude's exit code from: cat | claude | tee
+        bash_parts.push("EXIT_CODE=${PIPESTATUS[1]}".to_string());
 
         // Run post-completion pipeline (fire and forget — errors logged but don't fail the session)
         bash_parts.push(format!(

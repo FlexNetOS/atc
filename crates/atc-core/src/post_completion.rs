@@ -90,9 +90,7 @@ pub async fn run_post_completion(
     }
 
     // 7. Update status
-    if let Err(e) = registry.update_status(&input.dispatch_id, status).await {
-        warn!(id = %input.dispatch_id, error = %e, "failed to update status");
-    }
+    registry.update_status(&input.dispatch_id, status).await?;
 
     // 8. Store PR URL
     let pr_url = artifacts.pr_urls.first().cloned();
@@ -103,26 +101,20 @@ pub async fn run_post_completion(
     }
 
     // 9. Store artifacts as JSON blob
-    match serde_json::to_string(&artifacts) {
-        Ok(json) => {
-            if let Err(e) = registry.set_artifacts(&input.dispatch_id, &json).await {
-                warn!(id = %input.dispatch_id, error = %e, "failed to store artifacts");
-            }
-        }
-        Err(e) => {
-            warn!(id = %input.dispatch_id, error = %e, "failed to serialize artifacts");
-        }
-    }
+    let json = serde_json::to_string(&artifacts)?;
+    registry.set_artifacts(&input.dispatch_id, &json).await?;
 
     // 10. Cost threshold warning
+    let threshold = config.watch.cost_threshold;
     if let Some(cost) = artifacts.result.as_ref().and_then(|r| r.total_cost_usd) {
-        if cost > 10.0 {
+        if cost > threshold {
             warn!(
                 id = %input.dispatch_id,
                 cost_usd = cost,
-                "⚠ Dispatch {} cost ${:.2} (exceeds $10 threshold)",
+                "⚠ Dispatch {} cost ${:.2} (exceeds ${:.2} threshold)",
                 input.dispatch_id,
-                cost
+                cost,
+                threshold
             );
         }
     }
@@ -157,7 +149,8 @@ pub async fn run_post_completion(
 
     // 13. Worktree cleanup if PR merged/closed
     if let Some(ref url) = pr_url {
-        cleanup_if_pr_done(url, &record.worktree_path).await;
+        let worktree_base = config.dispatch.resolved_worktree_base();
+        cleanup_if_pr_done(url, &record.worktree_path, &worktree_base).await;
     }
 
     info!(
@@ -313,14 +306,14 @@ fn send_webhook(
 }
 
 /// Check PR state and clean up worktree if merged or closed.
-pub async fn cleanup_if_pr_done(pr_url: &str, worktree_path: &Path) {
+pub async fn cleanup_if_pr_done(pr_url: &str, worktree_path: &Path, worktree_base: &Path) {
     let state = match get_pr_state(pr_url).await {
         Some(s) => s,
         None => return,
     };
 
     if state == "MERGED" || state == "CLOSED" {
-        cleanup_worktree(worktree_path);
+        cleanup_worktree(worktree_path, worktree_base);
     }
 }
 
@@ -346,7 +339,7 @@ async fn get_pr_state(pr_url: &str) -> Option<String> {
 
 /// Remove a git worktree and its empty parent directory.
 /// Safety: only removes if path matches known worktree patterns.
-pub fn cleanup_worktree(worktree_path: &Path) {
+pub fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
     // Canonicalize to resolve symlinks and ".." before safety checks
     let canonical = match worktree_path.canonicalize() {
         Ok(p) => p,
@@ -354,13 +347,8 @@ pub fn cleanup_worktree(worktree_path: &Path) {
     };
     let path_str = canonical.to_string_lossy();
 
-    // Safety check: only remove paths that look like managed worktrees
-    let is_safe = path_str.contains("/.worktrees/")
-        || path_str.starts_with("/tmp/worktrees/")
-        || path_str.starts_with("/private/tmp/worktrees/")
-        || std::env::var("TMPDIR")
-            .map(|t| path_str.starts_with(&format!("{t}/worktrees/")))
-            .unwrap_or(false);
+    // Safety check: only remove paths under the configured worktree base or known patterns
+    let is_safe = canonical.starts_with(worktree_base) || path_str.contains("/.worktrees/");
 
     if !is_safe {
         warn!(
@@ -405,9 +393,7 @@ pub fn cleanup_worktree(worktree_path: &Path) {
             }
         }
     } else {
-        // Fallback: just remove the directory
-        warn!(path = %path_str, "could not find repo root, removing directory directly");
-        let _ = std::fs::remove_dir_all(&canonical);
+        warn!(path = %path_str, "skipping worktree cleanup: could not resolve repo root");
     }
 }
 
@@ -515,10 +501,11 @@ mod tests {
 
     #[test]
     fn test_cleanup_worktree_safety_check() {
+        let base = Path::new("/tmp/worktrees");
         // Should not panic or remove a non-worktree path
-        cleanup_worktree(Path::new("/usr/local/bin"));
+        cleanup_worktree(Path::new("/usr/local/bin"), base);
         // Should not panic — path doesn't exist but matches pattern
-        cleanup_worktree(Path::new("/tmp/worktrees/test/nonexistent"));
+        cleanup_worktree(Path::new("/tmp/worktrees/test/nonexistent"), base);
     }
 
     #[test]

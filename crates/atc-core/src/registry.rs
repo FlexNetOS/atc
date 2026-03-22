@@ -53,7 +53,9 @@ pub trait Registry: Send + Sync {
     ) -> Result<()>;
 
     /// Store full artifacts JSON blob.
-    async fn set_artifacts(&self, id: &str, artifacts_json: &str) -> Result<()>;
+    async fn set_artifacts(&self, _id: &str, _artifacts_json: &str) -> Result<()> {
+        anyhow::bail!("artifacts persistence is not implemented for this registry backend")
+    }
 
     // --- New query methods ---
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>>;
@@ -134,16 +136,22 @@ impl SqliteRegistry {
         }
 
         // Add artifacts TEXT column if missing (Phase 2 migration — safe ALTER TABLE ADD COLUMN)
-        let (has_artifacts,): (i32,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'artifacts'",
+        let (table_exists,): (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'",
         )
         .fetch_one(pool)
         .await?;
-        if has_artifacts == 0 {
-            sqlx::query("ALTER TABLE dispatches ADD COLUMN artifacts TEXT")
-                .execute(pool)
-                .await
-                .ok(); // Ignore error if table doesn't exist yet (apply_ddl will create it)
+        if table_exists > 0 {
+            let (has_artifacts,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'artifacts'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_artifacts == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN artifacts TEXT")
+                    .execute(pool)
+                    .await?;
+            }
         }
 
         Ok(())

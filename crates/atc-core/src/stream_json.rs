@@ -241,8 +241,9 @@ fn extract_commit_shas(text: &str, commits: &mut Vec<String>) {
 fn extract_kb_docs(text: &str, kb_docs: &mut Vec<String>) {
     use regex::Regex;
     use std::sync::LazyLock;
-    static KB_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:create|modify|delete) ([a-z]+/[a-z0-9/_-]+)").unwrap());
+    static KB_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:create|modify|delete) ([a-z0-9_-]+/[a-z0-9/_-]+)").unwrap()
+    });
     for cap in KB_RE.captures_iter(text) {
         let slug = cap[1].to_string();
         if !kb_docs.contains(&slug) {

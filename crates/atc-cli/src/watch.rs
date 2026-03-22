@@ -68,8 +68,10 @@ struct DispatchWatcher {
     id: String,
     log_file: PathBuf,
     lines_read: usize,
+    last_len: u64,
     cost_threshold_fired: bool,
-    completed: bool,
+    saw_result: bool,
+    finalized: bool,
 }
 
 impl DispatchWatcher {
@@ -78,14 +80,25 @@ impl DispatchWatcher {
             id,
             log_file,
             lines_read: 0,
+            last_len: 0,
             cost_threshold_fired: false,
-            completed: false,
+            saw_result: false,
+            finalized: false,
         }
     }
 
     /// Read new lines from the log file and emit events.
     fn poll_log(&mut self, cost_threshold: f64) -> Vec<WatchEvent> {
         let mut events = Vec::new();
+
+        // Reset tail state if the log file was truncated or rotated
+        if let Ok(meta) = std::fs::metadata(&self.log_file) {
+            let new_len = meta.len();
+            if new_len < self.last_len {
+                self.lines_read = 0;
+            }
+            self.last_len = new_len;
+        }
 
         let file = match std::fs::File::open(&self.log_file) {
             Ok(f) => f,
@@ -123,7 +136,7 @@ impl DispatchWatcher {
                         });
                     }
                     stream_json::StreamEvent::Result(r) => {
-                        self.completed = true;
+                        self.saw_result = true;
 
                         // Emit cost threshold before completion so consumers see it first
                         if let Some(cost) = r.total_cost_usd {
@@ -293,7 +306,7 @@ pub async fn run_watch(
         let mut all_done = true;
 
         for (id, watcher) in watchers.iter_mut() {
-            if watcher.completed {
+            if watcher.finalized {
                 continue;
             }
             all_done = false;
@@ -306,7 +319,7 @@ pub async fn run_watch(
 
             // Check tmux session liveness
             let record = records.iter().find(|r| r.id == *id).unwrap();
-            if !tmux_session_alive(&record.session).await && !watcher.completed {
+            if !tmux_session_alive(&record.session).await && !watcher.finalized {
                 // Wait a moment for final log lines to flush
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -316,7 +329,7 @@ pub async fn run_watch(
                     emit_event(&event, &output_format, &tx_clone);
                 }
 
-                if !watcher.completed {
+                if !watcher.saw_result {
                     // Session died without result event — run post-completion
                     emit_event(
                         &WatchEvent::SessionDied { id: id.clone() },
@@ -338,7 +351,7 @@ pub async fn run_watch(
                     }
                 }
 
-                watcher.completed = true;
+                watcher.finalized = true;
             }
         }
 
