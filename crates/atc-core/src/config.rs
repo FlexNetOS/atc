@@ -82,6 +82,12 @@ impl AtcConfig {
                         "modes.{}.components contains an empty component name",
                         key
                     );
+                    anyhow::ensure!(
+                        !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+                        "modes.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
+                        key,
+                        name
+                    );
                 }
             }
             if let Some(budget) = mode_cfg.max_budget_usd {
@@ -1127,5 +1133,24 @@ components = ["base", "git"]
             mode.components,
             Some(vec!["base".to_string(), "git".to_string()])
         );
+    }
+
+    #[test]
+    fn test_component_name_path_traversal_rejected() {
+        let cases = [
+            ("../secret", ".."),
+            ("foo/bar", "/"),
+            ("foo\\\\bar", "\\"),
+        ];
+        for (name, reason) in cases {
+            let toml = format!(
+                "[modes.implement]\ncomponents = [\"{name}\"]"
+            );
+            let err = AtcConfig::parse_and_validate(&toml).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid component name"),
+                "component name '{name}' (contains {reason}) should be rejected, got: {err}"
+            );
+        }
     }
 }

@@ -176,7 +176,7 @@ fn apply_legacy_tokens(template: &str, slug: &str, directive: &str) -> String {
     let rendered = template
         .replace("{{slug}}", slug)
         .replace("{{directive}}", directive);
-    if directive.is_empty() || template_owns_directive {
+    if directive.trim().is_empty() || template_owns_directive {
         rendered
     } else {
         format!("{rendered}\n\n---\nAdditional directive: {directive}")
@@ -341,7 +341,7 @@ fn strip_agent_header_line(content: &str) -> String {
     if content.starts_with("# Agent:") {
         // Skip the first line
         match content.find('\n') {
-            Some(pos) => content[pos + 1..].trim_start_matches('\n').to_string(),
+            Some(pos) => content[pos + 1..].trim_start_matches(['\r', '\n']).to_string(),
             None => String::new(),
         }
     } else {
@@ -539,6 +539,46 @@ Body content here."#;
         assert!(
             err.to_string().contains("failed to read component"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assemble_components_expands_slug() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(comp_dir.join("base.md"), "Task slug: {{slug}}").unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "implement".to_string(),
+            ModeConfig {
+                components: Some(vec!["base".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            modes,
+            ..Default::default()
+        };
+
+        let result = assemble_system_prompt(&Mode::Implement, "my-task", &config, None)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("Task slug: my-task"),
+            "slug should be expanded in component output, got: {result}"
         );
     }
 
