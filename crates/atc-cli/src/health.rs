@@ -95,7 +95,9 @@ fn print_table(records: &[DispatchRecord]) {
 pub fn collect_auto_review_candidates(results: &[HealthResult]) -> Vec<&DispatchRecord> {
     results
         .iter()
-        .filter(|r| r.record.status == Status::NeedsReview && r.record.pr_url.is_some())
+        .filter(|r| {
+            r.changed && r.record.status == Status::NeedsReview && r.record.pr_url.is_some()
+        })
         .map(|r| &r.record)
         .collect()
 }
@@ -134,7 +136,7 @@ pub async fn run_health(
     // Evaluate active records (running + needs-review)
     let results: Vec<HealthResult> = checker.run().await?;
 
-    // --- 7C: Cost threshold warnings ---
+    // --- 7A: Cost threshold warnings ---
     let cost_threshold = config.health.cost_warning_threshold;
     for r in &results {
         if let Some(msg) = cost_warning(&r.record, cost_threshold) {
@@ -142,9 +144,10 @@ pub async fn run_health(
         }
     }
 
-    // --- 7D: Stale record cleanup ---
-    // For Running records where the agent exited (signal 1 = true) but
-    // post-completion was missed, run artifact extraction now.
+    // --- 7B: Stale record cleanup ---
+    // For records that just transitioned out of Running (agent exited and checker
+    // updated status) but whose post-completion was never triggered by the watcher,
+    // run artifact extraction now as a fallback.
     for r in &results {
         if r.changed
             && r.record.checks.agent_exited_clean
@@ -173,7 +176,7 @@ pub async fn run_health(
         }
     }
 
-    // --- 7B: Auto-cleanup worktrees for Done records with merged/closed PRs ---
+    // --- 7C: Auto-cleanup worktrees for Done records with merged/closed PRs ---
     let worktree_base = config.dispatch.resolved_worktree_base();
     for r in &results {
         if r.record.status == Status::Done {
@@ -184,7 +187,7 @@ pub async fn run_health(
         }
     }
 
-    // --- 7A: Auto-remediation ---
+    // --- 7D: Auto-remediation ---
     let auto_enabled = auto_flag || config.health.auto_review;
     if auto_enabled {
         let candidates = collect_auto_review_candidates(&results);
@@ -415,7 +418,7 @@ mod tests {
         assert_eq!(signal_display(None), "-");
     }
 
-    // --- 7A: Auto-review candidate tests ---
+    // --- 7D: Auto-review candidate tests ---
 
     #[test]
     fn test_auto_review_collects_needs_review_with_pr() {
@@ -453,6 +456,29 @@ mod tests {
         let results = vec![HealthResult {
             record,
             changed: true,
+        }];
+        let candidates = collect_auto_review_candidates(&results);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_auto_review_skips_unchanged_needs_review() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            ..Default::default()
+        };
+        let record = make_record_with_pr(
+            Status::NeedsReview,
+            checks,
+            Some("https://github.com/org/repo/pull/1".to_string()),
+            None,
+        );
+        let results = vec![HealthResult {
+            record,
+            changed: false,
         }];
         let candidates = collect_auto_review_candidates(&results);
         assert!(candidates.is_empty());
