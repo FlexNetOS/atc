@@ -7,15 +7,18 @@ use std::sync::Arc;
 
 pub use args::{Args, Commands};
 
+pub mod cleanup;
 pub mod close;
 pub mod dispatch;
 pub mod health;
 pub mod info;
+pub mod kb;
 pub mod logs;
 pub mod redirect;
 pub mod resolve;
 pub mod retry;
 pub mod status;
+pub mod stop;
 pub mod subprocess;
 
 mod args {
@@ -128,6 +131,19 @@ mod args {
             #[arg(short = 'f', long)]
             follow: bool,
         },
+        /// Stop a running dispatch (kill session, mark stopped)
+        Stop {
+            /// Dispatch ID or task slug
+            id: String,
+        },
+        /// Clean up a dispatch (remove worktree, kill session)
+        Cleanup {
+            /// Dispatch ID or task slug (omit for --done mode)
+            id: Option<String>,
+            /// Clean up all Done dispatches
+            #[arg(long)]
+            done: bool,
+        },
     }
 }
 
@@ -207,5 +223,9 @@ pub async fn run(
         } => status::run_status(registry, status_filter.clone(), *json).await,
         Commands::Info { id } => info::run_info(registry, id).await,
         Commands::Logs { arg, follow } => logs::run_logs(registry, config, arg, *follow).await,
+        Commands::Stop { id } => stop::run_stop(config, registry.as_ref(), id).await,
+        Commands::Cleanup { id, done } => {
+            cleanup::run_cleanup(config, registry.as_ref(), id.as_deref(), *done).await
+        }
     }
 }

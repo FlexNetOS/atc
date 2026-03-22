@@ -55,6 +55,14 @@ pub enum Status {
 }
 
 impl Status {
+    /// Returns true for terminal states (Done, Failed, Stopped, NeedsHuman).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Status::Done | Status::Failed | Status::Stopped | Status::NeedsHuman
+        )
+    }
+
     /// Canonical string used in SQLite TEXT column and JSON serialization
     pub fn as_str(&self) -> &'static str {
         match self {
