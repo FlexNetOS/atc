@@ -5,9 +5,8 @@ use atc_core::types::Status;
 use atc_core::worktree::cleanup_worktree;
 use tracing::warn;
 
-use crate::kb::{kb_unassign, CMD_TIMEOUT};
+use crate::kb::{kb_unassign_if_sole, kill_tmux_session};
 use crate::resolve::resolve_record;
-use crate::subprocess::run_cmd_with_timeout;
 
 /// Execute the `atc cleanup` command.
 pub async fn run_cleanup(
@@ -62,14 +61,7 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
 
     // 3. Unassign task in git-kb (best-effort, only if no other live dispatch for same slug)
     if let Some(ref slug) = record.task_slug {
-        let has_other_live = registry
-            .find_by_task_slug(slug)
-            .await?
-            .into_iter()
-            .any(|r| r.id != *id && !r.status.is_terminal());
-        if !has_other_live {
-            kb_unassign(slug, config).await;
-        }
+        kb_unassign_if_sole(registry, id, slug, config).await;
     }
 
     // 4. Update status to Stopped if not already terminal
@@ -115,39 +107,6 @@ async fn cleanup_done(config: &AtcConfig, registry: &dyn Registry) -> Result<()>
         println!("Cleaned {cleaned} dispatches");
     }
     Ok(())
-}
-
-/// Best-effort tmux session kill.
-///
-/// Returns `true` if the session was confirmed killed or was already absent,
-/// `false` if the kill outcome is inconclusive (timeout, exec failure).
-async fn kill_tmux_session(session: &str) -> bool {
-    match run_cmd_with_timeout(
-        tokio::process::Command::new("tmux")
-            .args(["kill-session", "-t", session])
-            .stderr(std::process::Stdio::null()),
-        CMD_TIMEOUT,
-    )
-    .await
-    {
-        Ok(Some(s)) if !s.success() => {
-            // Non-zero exit typically means the session doesn't exist (already gone)
-            tracing::debug!(
-                session,
-                "tmux kill-session exited non-zero (may already be gone)"
-            );
-            true
-        }
-        Ok(Some(_)) => true, // success
-        Ok(None) => {
-            tracing::debug!(session, "tmux kill-session timed out");
-            false
-        }
-        Err(e) => {
-            tracing::debug!(session, error = %e, "tmux kill-session failed");
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -239,8 +198,15 @@ mod tests {
         async fn find_by_branch(&self, _: &str) -> Result<Vec<DispatchRecord>> {
             Ok(vec![])
         }
-        async fn find_by_task_slug(&self, _: &str) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
+        async fn find_by_task_slug(&self, slug: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.task_slug.as_deref() == Some(slug))
+                .cloned()
+                .collect())
         }
         async fn find_by_pr_url(&self, _: &str) -> Result<Vec<DispatchRecord>> {
             Ok(vec![])

@@ -4,9 +4,8 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::warn;
 
-use crate::kb::{kb_unassign, CMD_TIMEOUT};
+use crate::kb::{kb_unassign_if_sole, kill_tmux_session};
 use crate::resolve::resolve_record;
-use crate::subprocess::run_cmd_with_timeout;
 
 /// Execute the `atc stop` command.
 pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) -> Result<()> {
@@ -24,38 +23,7 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     }
 
     // 3. Kill tmux session (best-effort)
-    match run_cmd_with_timeout(
-        tokio::process::Command::new("tmux")
-            .args(["kill-session", "-t", &record.session])
-            .stderr(std::process::Stdio::null()),
-        CMD_TIMEOUT,
-    )
-    .await
-    {
-        Ok(Some(s)) if !s.success() => {
-            tracing::debug!(
-                id,
-                session = %record.session,
-                "tmux kill-session exited non-zero (may already be gone)"
-            );
-        }
-        Ok(None) => {
-            tracing::debug!(
-                id,
-                session = %record.session,
-                "tmux kill-session timed out"
-            );
-        }
-        Err(e) => {
-            tracing::debug!(
-                id,
-                session = %record.session,
-                error = %e,
-                "tmux kill-session failed"
-            );
-        }
-        _ => {}
-    }
+    let _ = kill_tmux_session(&record.session).await;
 
     // 4. Update status to Stopped (only if not already terminal)
     if !record.status.is_terminal() {
@@ -64,14 +32,7 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
 
     // 5. Unassign task in git-kb (best-effort, only if no other live dispatch for same slug)
     if let Some(ref slug) = record.task_slug {
-        let has_other_live = registry
-            .find_by_task_slug(slug)
-            .await?
-            .into_iter()
-            .any(|r| r.id != *id && !r.status.is_terminal());
-        if !has_other_live {
-            kb_unassign(slug, config).await;
-        }
+        kb_unassign_if_sole(registry, id, slug, config).await;
     }
 
     // 6. Print result
@@ -130,8 +91,21 @@ mod tests {
                 .find(|r| r.id == id)
                 .cloned())
         }
-        async fn list(&self, _filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
-            Ok(self.records.lock().unwrap().clone())
+        async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
+            let records = self.records.lock().unwrap();
+            Ok(match filter {
+                StatusFilter::All => records.clone(),
+                StatusFilter::One(status) => records
+                    .iter()
+                    .filter(|r| r.status == status)
+                    .cloned()
+                    .collect(),
+                StatusFilter::Any(ref statuses) => records
+                    .iter()
+                    .filter(|r| statuses.contains(&r.status))
+                    .cloned()
+                    .collect(),
+            })
         }
         async fn update_health(
             &self,
@@ -157,8 +131,15 @@ mod tests {
         async fn find_by_branch(&self, _: &str) -> Result<Vec<DispatchRecord>> {
             Ok(vec![])
         }
-        async fn find_by_task_slug(&self, _: &str) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
+        async fn find_by_task_slug(&self, slug: &str) -> Result<Vec<DispatchRecord>> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.task_slug.as_deref() == Some(slug))
+                .cloned()
+                .collect())
         }
         async fn find_by_pr_url(&self, _: &str) -> Result<Vec<DispatchRecord>> {
             Ok(vec![])
