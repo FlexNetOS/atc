@@ -177,18 +177,28 @@ pub async fn run_health(
     }
 
     // --- 7C: Auto-cleanup worktrees for Done records with merged/closed PRs ---
-    let worktree_base = config.dispatch.resolved_worktree_base();
-    for r in &results {
-        if r.record.status == Status::Done {
-            if let Some(ref url) = r.record.pr_url {
-                post_completion::cleanup_if_pr_done(url, &r.record.worktree_path, &worktree_base)
+    let auto_enabled = auto_flag || config.health.auto_review;
+    if auto_enabled {
+        let worktree_base = config.dispatch.resolved_worktree_base();
+        for r in &results {
+            if r.record.status == Status::Done {
+                if let Some(ref url) = r.record.pr_url {
+                    // Skip records whose worktree has already been cleaned up
+                    if !r.record.worktree_path.exists() {
+                        continue;
+                    }
+                    post_completion::cleanup_if_pr_done(
+                        url,
+                        &r.record.worktree_path,
+                        &worktree_base,
+                    )
                     .await;
+                }
             }
         }
     }
 
     // --- 7D: Auto-remediation ---
-    let auto_enabled = auto_flag || config.health.auto_review;
     if auto_enabled {
         let candidates = collect_auto_review_candidates(&results);
         for record in &candidates {
