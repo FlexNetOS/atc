@@ -119,10 +119,7 @@ pub async fn render_prompt(
         if mode_config.components.is_some() {
             let mut prompt = assemble_system_prompt(mode, config, worktree_path).await?;
             if !directive.trim().is_empty() {
-                prompt.push_str(&format!(
-                    "\n\n---\nAdditional directive: {}",
-                    directive
-                ));
+                prompt.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
             }
             return Ok(prompt);
         }
