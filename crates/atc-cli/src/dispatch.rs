@@ -807,7 +807,15 @@ pub async fn dispatch(
     {
         Ok(p) => p,
         Err(e) => {
-            rollback_claim_and_worktree(slug, kb_root, wt_created, wt_is_meta, &worktree_path, &workspace_root).await;
+            rollback_claim_and_worktree(
+                slug,
+                kb_root,
+                wt_created,
+                wt_is_meta,
+                &worktree_path,
+                &workspace_root,
+            )
+            .await;
             return Err(e);
         }
     };
@@ -831,7 +839,15 @@ pub async fn dispatch(
     let handle = match executor.spawn(&agent_opts).await {
         Ok(h) => h,
         Err(e) => {
-            rollback_claim_and_worktree(slug, kb_root, wt_created, wt_is_meta, &worktree_path, &workspace_root).await;
+            rollback_claim_and_worktree(
+                slug,
+                kb_root,
+                wt_created,
+                wt_is_meta,
+                &worktree_path,
+                &workspace_root,
+            )
+            .await;
             return Err(e);
         }
     };

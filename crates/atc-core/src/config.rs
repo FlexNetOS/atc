@@ -1137,15 +1137,9 @@ components = ["base", "git"]
 
     #[test]
     fn test_component_name_path_traversal_rejected() {
-        let cases = [
-            ("../secret", ".."),
-            ("foo/bar", "/"),
-            ("foo\\\\bar", "\\"),
-        ];
+        let cases = [("../secret", ".."), ("foo/bar", "/"), ("foo\\\\bar", "\\")];
         for (name, reason) in cases {
-            let toml = format!(
-                "[modes.implement]\ncomponents = [\"{name}\"]"
-            );
+            let toml = format!("[modes.implement]\ncomponents = [\"{name}\"]");
             let err = AtcConfig::parse_and_validate(&toml).unwrap_err();
             assert!(
                 err.to_string().contains("invalid component name"),

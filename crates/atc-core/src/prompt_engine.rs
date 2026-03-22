@@ -225,8 +225,7 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
         offset += line.len();
     }
 
-    let yaml_end =
-        yaml_end.with_context(|| "template has opening `---` but no closing `---`")?;
+    let yaml_end = yaml_end.with_context(|| "template has opening `---` but no closing `---`")?;
     let body_start = body_start.expect("closing fence sets body_start");
     let yaml_str = &after_open[..yaml_end];
     let body = after_open[body_start..].trim_start_matches(['\r', '\n']);
@@ -341,7 +340,9 @@ fn strip_agent_header_line(content: &str) -> String {
     if content.starts_with("# Agent:") {
         // Skip the first line
         match content.find('\n') {
-            Some(pos) => content[pos + 1..].trim_start_matches(['\r', '\n']).to_string(),
+            Some(pos) => content[pos + 1..]
+                .trim_start_matches(['\r', '\n'])
+                .to_string(),
             None => String::new(),
         }
     } else {
@@ -401,7 +402,8 @@ Body content here."#;
 
     #[test]
     fn test_split_frontmatter_crlf_line_endings() {
-        let raw = "---\r\ndescription: \"hello\"\r\ndirectives: [code-read]\r\n---\r\nBody with CRLF.";
+        let raw =
+            "---\r\ndescription: \"hello\"\r\ndirectives: [code-read]\r\n---\r\nBody with CRLF.";
         let (fm, body) = split_frontmatter(raw).unwrap();
         assert_eq!(fm.description.as_deref(), Some("hello"));
         assert_eq!(fm.directives, vec!["code-read"]);
