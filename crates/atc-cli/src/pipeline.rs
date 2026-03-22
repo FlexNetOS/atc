@@ -73,8 +73,10 @@ impl<'a> DispatchPipeline<'a> {
             );
         }
 
-        // 4. Dry run
+        // 4. Dry run — release any resolver state (e.g. CAS claim) before returning
         if opts.dry_run {
+            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+            resolver.on_cleanup(&tmp_record, self.config, None).await;
             return self.dry_run(&resolved, opts, budget, turns, resolver.name());
         }
 
@@ -153,10 +155,10 @@ impl<'a> DispatchPipeline<'a> {
         let log_dir = dispatch_cfg.resolved_log_dir();
         if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-            resolver.on_cleanup(&tmp_record, self.config, None).await;
             if wt_created {
                 rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
             }
+            resolver.on_cleanup(&tmp_record, self.config, None).await;
             return Err(e.into());
         }
         let log_file = log_dir.join(format!("{}.jsonl", resolved.dispatch_id));
@@ -186,10 +188,10 @@ impl<'a> DispatchPipeline<'a> {
             Ok(h) => h,
             Err(e) => {
                 let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                resolver.on_cleanup(&tmp_record, self.config, None).await;
                 if wt_created {
                     rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
                 }
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
                 return Err(e);
             }
         };
@@ -213,6 +215,7 @@ impl<'a> DispatchPipeline<'a> {
             retries: opts.retries,
             resolver: resolver.name().to_string(),
             pr_url: opts.pr_url.clone(),
+            no_worktree: opts.no_worktree,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,
@@ -315,6 +318,7 @@ impl<'a> DispatchPipeline<'a> {
             retries: opts.retries,
             resolver: resolver_name.to_string(),
             pr_url: opts.pr_url.clone(),
+            no_worktree: opts.no_worktree,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,
@@ -357,13 +361,9 @@ impl<'a> DispatchPipeline<'a> {
 }
 
 /// Instantiate a resolver by name for use in stop/cleanup/close/retry.
+/// Delegates to the centralized factory in `resolvers::make_resolver`.
 pub fn resolver_by_name(name: &str) -> Option<Box<dyn InputResolver>> {
-    match name {
-        "task" => Some(Box::new(crate::resolvers::task::TaskResolver)),
-        "template" => Some(Box::new(crate::resolvers::template::TemplateResolver)),
-        "prompt" => Some(Box::new(crate::resolvers::prompt::PromptResolver)),
-        _ => None,
-    }
+    crate::resolvers::make_resolver(name)
 }
 
 /// Print post-dispatch confirmation block.

@@ -72,8 +72,13 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
     }
 
     // 4. Resolver cleanup (replaces hardcoded git-kb unassign)
-    if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config, Some(registry)).await;
+    match resolver_by_name(&record.resolver) {
+        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+        None => warn!(
+            id = %record.id,
+            resolver = %record.resolver,
+            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+        ),
     }
 
     Ok(removed)
@@ -259,6 +264,7 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

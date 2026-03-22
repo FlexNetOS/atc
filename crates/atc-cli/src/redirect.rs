@@ -186,6 +186,7 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

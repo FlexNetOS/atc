@@ -5,24 +5,34 @@ pub mod template;
 use atc_core::config::AtcConfig;
 use atc_core::resolver::InputResolver;
 
+/// Single source of truth: instantiate a resolver by name.
+///
+/// Used by `build_resolvers` (config-driven chain) and `resolver_by_name`
+/// (stop/cleanup/close/retry lookups). Add new resolvers here only.
+pub fn make_resolver(name: &str) -> Option<Box<dyn InputResolver>> {
+    match name {
+        "task" => Some(Box::new(task::TaskResolver)),
+        "template" => Some(Box::new(template::TemplateResolver)),
+        "prompt" => Some(Box::new(prompt::PromptResolver)),
+        _ => None,
+    }
+}
+
 /// Build the resolver chain from config, respecting order and enabled flags.
 pub fn build_resolvers(config: &AtcConfig) -> Vec<Box<dyn InputResolver>> {
     let rc = &config.resolvers;
     let mut resolvers: Vec<Box<dyn InputResolver>> = Vec::new();
 
     for name in &rc.order {
-        match name.as_str() {
-            "task" if rc.task.enabled => {
-                resolvers.push(Box::new(task::TaskResolver));
-            }
-            "template" if rc.template.enabled => {
-                resolvers.push(Box::new(template::TemplateResolver));
-            }
-            "prompt" if rc.prompt.enabled => {
-                resolvers.push(Box::new(prompt::PromptResolver));
-            }
-            _ => {
-                // Unknown or disabled resolver — skip silently
+        let enabled = match name.as_str() {
+            "task" => rc.task.enabled,
+            "template" => rc.template.enabled,
+            "prompt" => rc.prompt.enabled,
+            _ => false,
+        };
+        if enabled {
+            if let Some(r) = make_resolver(name) {
+                resolvers.push(r);
             }
         }
     }

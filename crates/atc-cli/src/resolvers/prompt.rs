@@ -39,7 +39,8 @@ impl InputResolver for PromptResolver {
         // Build a unique branch name from timestamp
         let ts = Utc::now().timestamp_millis();
         let seq = PROMPT_SEQ.fetch_add(1, Ordering::Relaxed);
-        let branch = format!("prompt-{ts}-{seq}");
+        let pid = std::process::id();
+        let branch = format!("prompt-{ts}-{pid}-{seq}");
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

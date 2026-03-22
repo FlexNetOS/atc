@@ -38,8 +38,13 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     }
 
     // 5. Resolver cleanup (replaces hardcoded git-kb unassign)
-    if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config, Some(registry)).await;
+    match resolver_by_name(&record.resolver) {
+        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+        None => warn!(
+            id,
+            resolver = %record.resolver,
+            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+        ),
     }
 
     // 6. Print result
@@ -182,6 +187,7 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

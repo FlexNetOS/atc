@@ -211,6 +211,7 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
             checks: HealthChecks::default(),
             cost_usd: Some(1.50),
             num_turns: Some(10),

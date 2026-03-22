@@ -97,7 +97,10 @@ impl InputResolver for TemplateResolver {
         let mode = if let Some(ref m) = opts.mode {
             m.clone()
         } else if let Some(first_directive) = output.directives.first() {
-            first_directive.parse::<Mode>().unwrap_or(Mode::Implement)
+            first_directive.parse::<Mode>().unwrap_or_else(|_| {
+                debug!(directive = %first_directive, "unrecognized mode directive, defaulting to implement");
+                Mode::Implement
+            })
         } else {
             Mode::Implement
         };

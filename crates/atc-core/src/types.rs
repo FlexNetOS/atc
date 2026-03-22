@@ -19,6 +19,8 @@ pub struct DispatchRecord {
     /// Which InputResolver created this dispatch ("task", "template", "prompt").
     pub resolver: String,
     pub pr_url: Option<String>,
+    /// Whether the dispatch was created with `--no-worktree` (run in current directory).
+    pub no_worktree: bool,
     pub checks: HealthChecks,
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,

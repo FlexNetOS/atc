@@ -113,8 +113,13 @@ pub async fn run_retry(
         registry.update_status(id, Status::NeedsHuman).await?;
 
         // Resolver cleanup (non-fatal)
-        if let Some(resolver) = resolver_by_name(&record.resolver) {
-            resolver.on_cleanup(&record, config, Some(registry)).await;
+        match resolver_by_name(&record.resolver) {
+            Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+            None => warn!(
+                id,
+                resolver = %record.resolver,
+                "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+            ),
         }
 
         anyhow::bail!(
@@ -153,13 +158,35 @@ pub async fn run_retry(
     }
 
     // 7. Set task status to draft BEFORE cleanup/re-dispatch to avoid racing
+    // Guard: only reset to draft if no other live dispatch exists for this slug
     if let Some(ref task_slug) = record.task_slug {
-        kb_set_status_draft(task_slug, config).await;
+        let has_other_live = match registry.find_by_task_slug(task_slug).await {
+            Ok(records) => records
+                .iter()
+                .any(|r| r.id != *id && !r.status.is_terminal()),
+            Err(e) => {
+                warn!(id, error = %e, "failed to check sibling dispatches; skipping status=draft for safety");
+                true // conservative: skip draft reset
+            }
+        };
+        if !has_other_live {
+            kb_set_status_draft(task_slug, config).await;
+        } else {
+            info!(
+                id,
+                task_slug, "skipping status=draft: another live dispatch exists for this slug"
+            );
+        }
     }
 
     // 7b. Resolver cleanup (non-fatal) — replaces hardcoded git-kb unassign
-    if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config, Some(registry)).await;
+    match resolver_by_name(&record.resolver) {
+        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+        None => warn!(
+            id,
+            resolver = %record.resolver,
+            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+        ),
     }
 
     // 8. Re-dispatch via pipeline
@@ -177,7 +204,7 @@ pub async fn run_retry(
         force: false,
         dry_run: false,
         directives: None,
-        no_worktree: false,
+        no_worktree: record.no_worktree,
         max_budget_usd: max_budget_override,
         max_turns: max_turns_override,
         retries: record.retries + 1,
@@ -405,6 +432,7 @@ mod tests {
             retries,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

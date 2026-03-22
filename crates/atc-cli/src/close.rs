@@ -65,11 +65,17 @@ pub async fn run_close(
     registry.update_status(id, Status::Done).await?;
 
     // 6. Resolver cleanup (replaces hardcoded git-kb unassign) + close-specific git-kb set
-    if let Some(resolver) = resolver_by_name(&record.resolver) {
-        resolver.on_cleanup(&record, config, Some(registry)).await;
+    match resolver_by_name(&record.resolver) {
+        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+        None => warn!(
+            id,
+            resolver = %record.resolver,
+            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+        ),
     }
 
     // Close-specific: set task status to completed in git-kb (non-fatal)
+    // Guard: only mark completed if no other non-terminal dispatch exists for this slug
     if record.resolver == "task" {
         let kb_root = config
             .dispatch
@@ -78,26 +84,45 @@ pub async fn run_close(
 
         if let Some(ref kb_root) = kb_root {
             if let Some(ref slug) = record.task_slug {
-                let status = run_cmd_with_timeout(
-                    tokio::process::Command::new("git-kb")
-                        .args(["set", slug, "status=completed"])
-                        .env("GITKB_ROOT", kb_root),
-                    CMD_TIMEOUT,
-                )
-                .await;
-
-                match status {
-                    Ok(Some(s)) if !s.success() => {
-                        warn!(id, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
-                    }
-                    Ok(None) => {
-                        warn!(id, "git-kb set status=completed timed out (non-fatal)");
+                // Check for sibling dispatches before marking completed
+                let should_complete = match registry.find_by_task_slug(slug).await {
+                    Ok(records) => {
+                        let has_other_live = records
+                            .iter()
+                            .any(|r| r.id != *id && !r.status.is_terminal());
+                        if has_other_live {
+                            info!(id, slug, "skipping status=completed: another live dispatch exists for this slug");
+                        }
+                        !has_other_live
                     }
                     Err(e) => {
-                        warn!(id, error = %e, "git-kb set status=completed failed (non-fatal)");
+                        warn!(id, error = %e, "failed to check sibling dispatches; skipping status=completed for safety");
+                        false
                     }
-                    _ => {
-                        info!(id, "git-kb status set to completed");
+                };
+
+                if should_complete {
+                    let status = run_cmd_with_timeout(
+                        tokio::process::Command::new("git-kb")
+                            .args(["set", slug, "status=completed"])
+                            .env("GITKB_ROOT", kb_root),
+                        CMD_TIMEOUT,
+                    )
+                    .await;
+
+                    match status {
+                        Ok(Some(s)) if !s.success() => {
+                            warn!(id, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
+                        }
+                        Ok(None) => {
+                            warn!(id, "git-kb set status=completed timed out (non-fatal)");
+                        }
+                        Err(e) => {
+                            warn!(id, error = %e, "git-kb set status=completed failed (non-fatal)");
+                        }
+                        _ => {
+                            info!(id, "git-kb status set to completed");
+                        }
                     }
                 }
             }
@@ -360,6 +385,7 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

@@ -27,21 +27,24 @@ impl TaskResolver {
         }
 
         debug!("no CLI mode; reading directives from task frontmatter");
-        let output = tokio::time::timeout(
-            KB_TIMEOUT,
-            tokio::process::Command::new("git-kb")
-                .args(["show", "--json", slug])
-                .env("GITKB_ROOT", kb_root)
-                .output(),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "git-kb show --json {} timed out after {:?}",
-                slug,
-                KB_TIMEOUT
-            )
-        })??;
+        let child = tokio::process::Command::new("git-kb")
+            .args(["show", "--json", slug])
+            .env("GITKB_ROOT", kb_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        // kill_on_drop(true) ensures the child is killed if the timeout fires
+        let output = tokio::time::timeout(KB_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "git-kb show --json {} timed out after {:?}",
+                    slug,
+                    KB_TIMEOUT
+                )
+            })??;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -75,17 +78,20 @@ impl TaskResolver {
 
     /// CAS-claim a task via `git kb assign`.
     async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()> {
-        let output = tokio::time::timeout(
-            KB_TIMEOUT,
-            tokio::process::Command::new("git-kb")
-                .args(["assign", slug, session_name])
-                .env("GITKB_ROOT", kb_root)
-                .output(),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("git-kb assign {} timed out after {:?}", slug, KB_TIMEOUT)
-        })??;
+        let child = tokio::process::Command::new("git-kb")
+            .args(["assign", slug, session_name])
+            .env("GITKB_ROOT", kb_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        // kill_on_drop(true) ensures the child is killed if the timeout fires
+        let output = tokio::time::timeout(KB_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("git-kb assign {} timed out after {:?}", slug, KB_TIMEOUT)
+            })??;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -150,20 +156,20 @@ impl InputResolver for TaskResolver {
             }
         };
 
-        let output = tokio::time::timeout(
-            KB_TIMEOUT,
-            tokio::process::Command::new("git-kb")
-                .args(["show", "--json", input])
-                .env("GITKB_ROOT", &kb_root)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .output(),
-        )
-        .await;
+        let child = tokio::process::Command::new("git-kb")
+            .args(["show", "--json", input])
+            .env("GITKB_ROOT", &kb_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
 
-        match output {
-            Ok(Ok(o)) => o.status.success(),
-            _ => false,
+        match child {
+            Ok(child) => match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
+                Ok(Ok(o)) => o.status.success(),
+                _ => false,
+            },
+            Err(_) => false,
         }
     }
 
@@ -264,12 +270,19 @@ impl InputResolver for TaskResolver {
                 }
             }
 
+            // Use the same kb_root fallback as resolve() — config → cwd
             let kb_root = config
                 .dispatch
                 .resolved_meta_workspace_root(config.config_dir.as_deref())
-                .ok();
+                .ok()
+                .or_else(|| std::env::current_dir().ok());
             if let Some(kb_root) = kb_root {
                 Self::unassign_task(slug, &kb_root).await;
+            } else {
+                warn!(
+                    slug,
+                    "could not resolve kb_root for unassign (no config, no cwd)"
+                );
             }
         }
     }
