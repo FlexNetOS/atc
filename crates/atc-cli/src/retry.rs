@@ -49,8 +49,10 @@ pub async fn run_retry(
         );
     }
 
-    // 4. Classify failure: read last result event
-    match stream_json::read_last_result(&record.log_file) {
+    // 4. Classify failure and compute budget/turns adjustments
+    let (max_budget_override, max_turns_override) = match stream_json::read_last_result(
+        &record.log_file,
+    ) {
         Ok(Some(event)) => {
             info!(
                 id,
@@ -58,14 +60,44 @@ pub async fn run_retry(
                 "last result event: subtype={}",
                 event.subtype
             );
+            match event.subtype.as_str() {
+                "error_max_turns" => {
+                    let current = config
+                        .modes
+                        .get(record.mode.as_str())
+                        .and_then(|m| m.max_turns)
+                        .unwrap_or(config.dispatch.max_turns);
+                    let halved = (current / 2).max(1);
+                    println!("  Failure: max turns reached. Retrying with halved max_turns ({current} → {halved}).");
+                    (None, Some(halved))
+                }
+                "error_max_budget_usd" => {
+                    let current = config
+                        .modes
+                        .get(record.mode.as_str())
+                        .and_then(|m| m.max_budget_usd)
+                        .unwrap_or(config.dispatch.max_budget_usd);
+                    let doubled = current * 2.0;
+                    println!("  Failure: budget exceeded. Retrying with doubled budget (${current:.2} → ${doubled:.2}).");
+                    (Some(doubled), None)
+                }
+                other => {
+                    println!("  Failure: {other}. Retrying with same configuration.");
+                    (None, None)
+                }
+            }
         }
         Ok(None) => {
             warn!(id, log_file = %record.log_file.display(), "no result event found in log");
+            println!("  No result event found. Retrying with same configuration.");
+            (None, None)
         }
         Err(e) => {
             warn!(id, error = %e, "failed to read log file for failure classification");
+            println!("  Could not read log. Retrying with same configuration.");
+            (None, None)
         }
-    }
+    };
 
     let slug = record.task_slug.as_deref().ok_or_else(|| {
         anyhow::anyhow!("cannot retry dispatch {id}: this dispatch has no task slug")
@@ -110,8 +142,8 @@ pub async fn run_retry(
         inline: false,
         force: false,
         dry_run: false,
-        max_budget_override: None,
-        max_turns_override: None,
+        max_budget_override,
+        max_turns_override,
         retries: record.retries + 1,
     };
 
