@@ -1087,4 +1087,45 @@ max_turns = 500
         assert_eq!(mode.max_budget_usd, Some(10.0));
         assert_eq!(mode.max_turns, Some(500));
     }
+
+    #[test]
+    fn test_empty_components_list_rejected() {
+        let toml = r#"
+[modes.implement]
+components = []
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must contain at least one component"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_blank_component_name_rejected() {
+        let toml = r#"
+[modes.implement]
+components = ["base", "  "]
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("empty component name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_components_accepted() {
+        let toml = r#"
+[modes.implement]
+components = ["base", "git"]
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        let mode = cfg.modes.get("implement").unwrap();
+        assert_eq!(
+            mode.components,
+            Some(vec!["base".to_string(), "git".to_string()])
+        );
+    }
 }

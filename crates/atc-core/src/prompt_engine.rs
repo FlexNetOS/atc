@@ -384,6 +384,14 @@ Body content here."#;
     }
 
     #[test]
+    fn test_split_frontmatter_with_dashes_in_yaml_value() {
+        let raw = "---\ndescription: |\n  --- this line starts with dashes\ndirectives: [code-read]\n---\nBody here.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.directives, vec!["code-read"]);
+        assert_eq!(body, "Body here.");
+    }
+
+    #[test]
     fn test_split_frontmatter_empty_directives() {
         let raw = "---\ndescription: \"hello\"\n---\nBody.";
         let (fm, body) = split_frontmatter(raw).unwrap();
@@ -669,6 +677,76 @@ Working on PR: {{pr}}
             .unwrap();
         assert!(result.contains("Component content."));
         assert!(!result.contains("Inline fallback"));
+    }
+
+    #[tokio::test]
+    async fn test_render_prompt_components_with_directive() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(comp_dir.join("base.md"), "Component content.").unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "implement".to_string(),
+            ModeConfig {
+                components: Some(vec!["base".to_string()]),
+                ..Default::default()
+            },
+        );
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            modes,
+            ..Default::default()
+        };
+        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "focus on tests", None)
+            .await
+            .unwrap();
+        assert!(result.contains("Component content."));
+        assert!(result.contains("Additional directive: focus on tests"));
+    }
+
+    #[tokio::test]
+    async fn test_render_prompt_components_empty_directive_not_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(comp_dir.join("base.md"), "Component content.").unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "implement".to_string(),
+            ModeConfig {
+                components: Some(vec!["base".to_string()]),
+                ..Default::default()
+            },
+        );
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            modes,
+            ..Default::default()
+        };
+        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
+            .await
+            .unwrap();
+        assert!(result.contains("Component content."));
+        assert!(!result.contains("Additional directive"));
     }
 
     #[tokio::test]
