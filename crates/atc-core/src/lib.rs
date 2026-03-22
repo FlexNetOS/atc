@@ -2,6 +2,7 @@ pub mod config;
 pub mod executor;
 pub mod health;
 pub mod post_completion;
+pub mod prompt_engine;
 pub mod registry;
 pub mod stream_json;
 pub mod templates;

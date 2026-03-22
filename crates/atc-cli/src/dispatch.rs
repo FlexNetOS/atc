@@ -344,6 +344,71 @@ async fn unassign_task(slug: &str, kb_root: &Path) {
     }
 }
 
+/// Roll back the CAS claim and (if newly created) the worktree on early failure.
+///
+/// Shared by prompt-rendering and agent-spawn error paths so that a failure
+/// after `cas_claim()` / `ensure_worktree()` doesn't leave orphaned state.
+async fn rollback_claim_and_worktree(
+    slug: &str,
+    kb_root: &Path,
+    wt_created: bool,
+    wt_is_meta: bool,
+    worktree_path: &Path,
+    workspace_root: &Path,
+) {
+    unassign_task(slug, kb_root).await;
+    // Only tear down worktrees we created; reused checkouts may have
+    // local changes or be shared with other dispatches.
+    if wt_created {
+        let cmd = if wt_is_meta { "meta" } else { "git" };
+        let mut args: Vec<&str> = Vec::new();
+        if wt_is_meta {
+            args.extend(["git", "worktree", "remove", "--force"]);
+        } else {
+            args.extend(["worktree", "remove", "--force"]);
+        }
+        let wt_str = worktree_path.to_string_lossy();
+        args.push(&wt_str);
+        let timeout = std::time::Duration::from_secs(30);
+        match tokio::process::Command::new(cmd)
+            .args(&args)
+            .current_dir(workspace_root)
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(mut child) => match tokio::time::timeout(timeout, child.wait()).await {
+                Ok(Ok(status)) if !status.success() => {
+                    warn!(
+                        worktree = %worktree_path.display(),
+                        "rollback worktree remove exited with {status}"
+                    );
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        worktree = %worktree_path.display(),
+                        "rollback worktree remove failed: {e}"
+                    );
+                }
+                Err(_) => {
+                    let _ = child.kill().await;
+                    warn!(
+                        worktree = %worktree_path.display(),
+                        "rollback worktree remove timed out after {}s",
+                        timeout.as_secs()
+                    );
+                }
+                _ => {}
+            },
+            Err(e) => {
+                warn!(
+                    worktree = %worktree_path.display(),
+                    "failed to spawn worktree remove: {e}"
+                );
+            }
+        }
+    }
+}
+
 /// Check running dispatches on a worktree path: mark stale records as Failed,
 /// bail on live sessions unless `force` is set.
 ///
@@ -716,6 +781,8 @@ pub async fn dispatch(
             return Err(e);
         }
     };
+    let wt_created = wt_result.created;
+    let wt_is_meta = wt_result.is_meta;
     let worktree_path = wt_result.path;
 
     // 4. Resolve GH_TOKEN and agent env
@@ -752,7 +819,18 @@ pub async fn dispatch(
     // }
 
     // 5. Setup log file
-    tokio::fs::create_dir_all(&log_dir).await?;
+    if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
+        rollback_claim_and_worktree(
+            slug,
+            kb_root,
+            wt_created,
+            wt_is_meta,
+            &worktree_path,
+            &workspace_root,
+        )
+        .await;
+        return Err(e.into());
+    }
     let log_file = log_dir.join(format!("{}.jsonl", dispatch_id));
 
     // Write diagnostic file
@@ -761,7 +839,29 @@ pub async fn dispatch(
 
     // Render system prompt from mode template + config overrides
     let directive = opts.directive.as_deref().unwrap_or("");
-    let prompt = atc_core::templates::render_prompt(&mode, slug, config, directive).await?;
+    let prompt = match atc_core::prompt_engine::render_prompt(
+        &mode,
+        slug,
+        config,
+        directive,
+        Some(worktree_path.as_path()),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            rollback_claim_and_worktree(
+                slug,
+                kb_root,
+                wt_created,
+                wt_is_meta,
+                &worktree_path,
+                &workspace_root,
+            )
+            .await;
+            return Err(e);
+        }
+    };
 
     // 6. Build agent opts and spawn
     let agent_opts = AgentOpts {
@@ -782,35 +882,15 @@ pub async fn dispatch(
     let handle = match executor.spawn(&agent_opts).await {
         Ok(h) => h,
         Err(e) => {
-            unassign_task(slug, kb_root).await;
-            // Only tear down worktrees we created; reused checkouts may have
-            // local changes or be shared with other dispatches.
-            if wt_result.created {
-                if wt_result.is_meta {
-                    let _ = tokio::process::Command::new("meta")
-                        .args([
-                            "git",
-                            "worktree",
-                            "remove",
-                            "--force",
-                            &worktree_path.to_string_lossy(),
-                        ])
-                        .current_dir(&workspace_root)
-                        .status()
-                        .await;
-                } else {
-                    let _ = tokio::process::Command::new("git")
-                        .args([
-                            "worktree",
-                            "remove",
-                            "--force",
-                            &worktree_path.to_string_lossy(),
-                        ])
-                        .current_dir(&workspace_root)
-                        .status()
-                        .await;
-                }
-            }
+            rollback_claim_and_worktree(
+                slug,
+                kb_root,
+                wt_created,
+                wt_is_meta,
+                &worktree_path,
+                &workspace_root,
+            )
+            .await;
             return Err(e);
         }
     };

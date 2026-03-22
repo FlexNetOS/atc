@@ -26,6 +26,7 @@ pub mod watch;
 mod args {
     use atc_core::types::Mode;
     use clap::{Parser, Subcommand};
+    use std::path::PathBuf;
 
     #[derive(Parser)]
     #[command(name = "atc", about = "Air Traffic Control — agent orchestrator")]
@@ -89,6 +90,9 @@ mod args {
             /// Additional directive passed into prompt rendering
             #[arg(long)]
             directive: Option<String>,
+            /// Worktree path for resolving project-level partials
+            #[arg(long)]
+            worktree_path: Option<PathBuf>,
         },
         /// Mark a task as complete, remove worktree, update git-kb
         Close {
@@ -226,12 +230,14 @@ pub async fn run(
             mode,
             slug,
             directive,
+            worktree_path,
         } => {
-            let prompt = atc_core::templates::render_prompt(
+            let prompt = atc_core::prompt_engine::render_prompt(
                 mode,
                 slug,
                 config,
                 directive.as_deref().unwrap_or(""),
+                worktree_path.as_deref(),
             )
             .await?;
             println!("{prompt}");

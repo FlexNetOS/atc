@@ -198,6 +198,7 @@ fn test_modes() -> HashMap<String, ModeConfig> {
                 template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
                 max_budget_usd: None,
                 max_turns: None,
+                components: None,
             },
         );
     }

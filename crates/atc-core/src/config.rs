@@ -22,6 +22,9 @@ pub struct AtcConfig {
     pub notifications: Option<NotificationsConfig>,
     #[serde(default)]
     pub watch: WatchConfig,
+    /// Prompt engine configuration (components, templates, partials directories).
+    #[serde(default)]
+    pub prompt: PromptConfig,
     /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
@@ -67,6 +70,26 @@ impl AtcConfig {
                 )
             })?;
             let mode_cfg = cfg.modes.get(key).unwrap();
+            if let Some(components) = &mode_cfg.components {
+                anyhow::ensure!(
+                    !components.is_empty(),
+                    "modes.{}.components must contain at least one component name",
+                    key
+                );
+                for name in components {
+                    anyhow::ensure!(
+                        !name.trim().is_empty(),
+                        "modes.{}.components contains an empty component name",
+                        key
+                    );
+                    anyhow::ensure!(
+                        !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+                        "modes.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
+                        key,
+                        name
+                    );
+                }
+            }
             if let Some(budget) = mode_cfg.max_budget_usd {
                 anyhow::ensure!(
                     budget > 0.0 && budget.is_finite(),
@@ -343,6 +366,47 @@ pub struct ModeConfig {
     pub max_budget_usd: Option<f64>,
     /// Per-mode turns override. Takes precedence over global dispatch.max_turns.
     pub max_turns: Option<u32>,
+    /// Ordered list of component names. Each name maps to `<components_dir>/<name>.md`.
+    /// When set, the system prompt is assembled by concatenating these components.
+    #[serde(default)]
+    pub components: Option<Vec<String>>,
+}
+
+/// `[prompt]` section — paths to prompt components, templates, and partials.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PromptConfig {
+    /// Directory containing component `.md` files.
+    /// Default: `.claude/prompts/components`
+    #[serde(default = "default_components_dir")]
+    pub components_dir: String,
+    /// Directory containing template `.md` files.
+    /// Default: `.claude/prompts/templates`
+    #[serde(default = "default_templates_dir")]
+    pub templates_dir: String,
+    /// Directory containing partial `.md` files.
+    /// Default: `.claude/prompts/partials`
+    #[serde(default = "default_partials_dir")]
+    pub partials_dir: String,
+}
+
+fn default_components_dir() -> String {
+    ".claude/prompts/components".to_string()
+}
+fn default_templates_dir() -> String {
+    ".claude/prompts/templates".to_string()
+}
+fn default_partials_dir() -> String {
+    ".claude/prompts/partials".to_string()
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self {
+            components_dir: default_components_dir(),
+            templates_dir: default_templates_dir(),
+            partials_dir: default_partials_dir(),
+        }
+    }
 }
 
 /// `[notifications]` section
@@ -1028,5 +1092,59 @@ max_turns = 500
         let mode = cfg.modes.get("implement").unwrap();
         assert_eq!(mode.max_budget_usd, Some(10.0));
         assert_eq!(mode.max_turns, Some(500));
+    }
+
+    #[test]
+    fn test_empty_components_list_rejected() {
+        let toml = r#"
+[modes.implement]
+components = []
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must contain at least one component"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_blank_component_name_rejected() {
+        let toml = r#"
+[modes.implement]
+components = ["base", "  "]
+"#;
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("empty component name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_components_accepted() {
+        let toml = r#"
+[modes.implement]
+components = ["base", "git"]
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        let mode = cfg.modes.get("implement").unwrap();
+        assert_eq!(
+            mode.components,
+            Some(vec!["base".to_string(), "git".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_component_name_path_traversal_rejected() {
+        let cases = [("../secret", ".."), ("foo/bar", "/"), ("foo\\\\bar", "\\")];
+        for (name, reason) in cases {
+            let toml = format!("[modes.implement]\ncomponents = [\"{name}\"]");
+            let err = AtcConfig::parse_and_validate(&toml).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid component name"),
+                "component name '{name}' (contains {reason}) should be rejected, got: {err}"
+            );
+        }
     }
 }
