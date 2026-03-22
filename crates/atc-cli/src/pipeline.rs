@@ -77,10 +77,9 @@ impl<'a> DispatchPipeline<'a> {
             );
         }
 
-        // 4. Dry run — release any resolver state (e.g. CAS claim) before returning
+        // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
+        //    when dry_run is set), so we can return immediately.
         if opts.dry_run {
-            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-            resolver.on_cleanup(&tmp_record, self.config, None).await;
             return self.dry_run(&resolved, opts, budget, turns, resolver.name());
         }
 

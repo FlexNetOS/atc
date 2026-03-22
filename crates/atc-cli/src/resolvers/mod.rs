@@ -28,7 +28,10 @@ pub fn build_resolvers(config: &AtcConfig) -> Vec<Box<dyn InputResolver>> {
             "task" => rc.task.enabled,
             "template" => rc.template.enabled,
             "prompt" => rc.prompt.enabled,
-            _ => false,
+            _ => {
+                tracing::warn!(resolver = %name, "unknown resolver name in [resolvers].order; skipping");
+                false
+            }
         };
         if enabled {
             if let Some(r) = make_resolver(name) {

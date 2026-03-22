@@ -197,8 +197,10 @@ impl InputResolver for TaskResolver {
         let dispatch_id = build_dispatch_id(&branch, &mode);
         let session_name = dispatch_id.clone();
 
-        // 3. CAS-claim the task
-        Self::cas_claim(slug, &session_name, &kb_root).await?;
+        // 3. CAS-claim the task (skip for dry-run to avoid transient state mutation)
+        if !opts.dry_run {
+            Self::cas_claim(slug, &session_name, &kb_root).await?;
+        }
 
         // 4. Render system prompt
         // Pass kb_root as worktree_path fallback so project-level .dispatch/partials/
@@ -215,8 +217,10 @@ impl InputResolver for TaskResolver {
         {
             Ok(p) => p,
             Err(e) => {
-                // Rollback CAS claim on prompt failure
-                Self::unassign_task(slug, &kb_root).await;
+                // Rollback CAS claim on prompt failure (only if we claimed)
+                if !opts.dry_run {
+                    Self::unassign_task(slug, &kb_root).await;
+                }
                 return Err(e);
             }
         };
