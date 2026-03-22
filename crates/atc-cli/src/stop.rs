@@ -23,7 +23,13 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     }
 
     // 3. Kill tmux session (best-effort)
-    let _ = kill_tmux_session(&record.session).await;
+    let session_killed = kill_tmux_session(&record.session).await;
+    if !session_killed && !record.status.is_terminal() {
+        anyhow::bail!(
+            "failed to confirm tmux session '{}' was stopped; leaving dispatch state unchanged",
+            record.session
+        );
+    }
 
     // 4. Update status to Stopped (only if not already terminal)
     if !record.status.is_terminal() {

@@ -105,6 +105,17 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) -> any
     }
 }
 
+/// Returns true if a path has at least 2 non-root normal components.
+///
+/// This prevents shallow paths like `/tmp` or `/home` from being accepted as
+/// a worktree base, which would make `starts_with` too permissive.
+fn is_deep_enough(p: &Path) -> bool {
+    p.components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count()
+        >= 2
+}
+
 /// Check whether a worktree path is safe to remove.
 ///
 /// A path is considered safe if:
@@ -122,8 +133,11 @@ pub fn is_safe_worktree_path(worktree_path: &Path, worktree_base: &Path) -> bool
 
     let path_str = worktree_path.to_string_lossy();
 
-    // Reject root as worktree_base — starts_with("/") is true for all absolute paths
-    if worktree_base != Path::new("/") && worktree_path.starts_with(worktree_base) {
+    // Under configured worktree_base (must be deep enough and strictly deeper than base)
+    if is_deep_enough(worktree_base)
+        && worktree_path.starts_with(worktree_base)
+        && worktree_path != worktree_base
+    {
         return true;
     }
 
@@ -226,9 +240,23 @@ mod tests {
     }
 
     #[test]
-    fn test_worktree_base_itself_is_safe() {
+    fn test_unsafe_shallow_worktree_base() {
+        // A shallow base like "/tmp" or "/home" has only 1 normal component,
+        // which is too permissive for starts_with checks.
+        let base = PathBuf::from("/home");
+        let path = PathBuf::from("/home/sensitive-file");
+        assert!(!is_safe_worktree_path(&path, &base));
+
+        let base = PathBuf::from("/tmp");
+        let path = PathBuf::from("/tmp/anything");
+        assert!(!is_safe_worktree_path(&path, &base));
+    }
+
+    #[test]
+    fn test_worktree_base_itself_is_not_safe() {
+        // The base directory itself should not be removable — only paths strictly under it.
         let base = PathBuf::from("/tmp/worktrees");
         let path = PathBuf::from("/tmp/worktrees");
-        assert!(is_safe_worktree_path(&path, &base));
+        assert!(!is_safe_worktree_path(&path, &base));
     }
 }

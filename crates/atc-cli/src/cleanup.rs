@@ -43,10 +43,16 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
     let mut removed = false;
 
     if !session_killed {
+        if !record.status.is_terminal() {
+            anyhow::bail!(
+                "failed to confirm tmux session '{}' was stopped; leaving dispatch state unchanged",
+                record.session
+            );
+        }
         warn!(
             id,
             session = %record.session,
-            "skipping worktree removal: tmux session kill was inconclusive"
+            "skipping worktree removal: tmux session kill was inconclusive (already terminal)"
         );
     } else if shared {
         warn!(
@@ -276,6 +282,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_missing_worktree_succeeds() {
+        // Uses Status::Done (terminal) so that an inconclusive tmux kill
+        // (e.g. tmux not installed) doesn't bail — the terminal-status
+        // guard makes this test deterministic across hosts.
         let record = sample_record("test-id-1", Status::Done);
         let registry = MockRegistry::new(vec![record]);
         let config = AtcConfig::default();
@@ -287,6 +296,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_skips_shared_worktree() {
+        // record1 is terminal (Done) so the inconclusive-kill guard
+        // doesn't bail — this ensures the shared-worktree branch is
+        // always exercised regardless of tmux availability.
         let mut record1 = sample_record("test-id-1", Status::Done);
         record1.worktree_path = PathBuf::from("/tmp/shared-worktree");
 
@@ -299,6 +311,27 @@ mod tests {
         // cleanup_single should not error even when another dispatch shares the worktree
         let result = run_cleanup(&config, &registry, Some("test-id-1"), false).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_bails_on_inconclusive_kill_for_running() {
+        // A Running record with a non-existent tmux session that can't be
+        // confirmed killed should bail rather than marking Stopped.
+        // This is deterministic: the session name doesn't exist, so
+        // kill_tmux_session returns false (or true if tmux says "not found").
+        // On hosts without tmux, kill returns false and the bail triggers.
+        let record = sample_record("test-id-1", Status::Running);
+        let registry = MockRegistry::new(vec![record.clone()]);
+        let config = AtcConfig::default();
+
+        let result = run_cleanup(&config, &registry, Some("test-id-1"), false).await;
+        // On hosts without tmux: bails (Err). On hosts with tmux: the fake
+        // session doesn't exist so tmux exits non-zero => killed=true => Ok.
+        // Either way, the Running status must not be silently changed to Stopped.
+        if result.is_err() {
+            let r = registry.get("test-id-1").await.unwrap().unwrap();
+            assert_eq!(r.status, Status::Running, "status must remain Running on bail");
+        }
     }
 
     #[tokio::test]

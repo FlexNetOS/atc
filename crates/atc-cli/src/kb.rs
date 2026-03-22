@@ -51,7 +51,14 @@ pub(crate) async fn kb_unassign_if_sole(
         Ok(records) => records
             .into_iter()
             .any(|r| r.id != id && !r.status.is_terminal()),
-        Err(_) => return, // can't determine — skip unassign to be safe
+        Err(e) => {
+            warn!(
+                slug,
+                error = %e,
+                "skipping git-kb unassign: failed to check for other live dispatches"
+            );
+            return;
+        }
     };
     if !has_other_live {
         kb_unassign(slug, config).await;
