@@ -236,9 +236,7 @@ load helpers/common
     mkdir -p "$worktree_dir"
 
     # Insert a Done dispatch whose worktree is in our temp dir
-    local now
-    now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
-    sqlite3 "$TEST_TMPDIR/atc.db" "INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, mode, retries, resolver, dispatched_at, updated_at) VALUES ('disp-001', 'tasks/test-1', 'test-branch', '$worktree_dir', 'disp-001', '$TEST_TMPDIR/disp-001.jsonl', 'done', 'implement', 0, 'task', '$now', '$now');"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
 
     # The cleanup will attempt to remove the worktree dir — it may or may not
     # succeed depending on safety checks (path must be under worktree base).
@@ -284,9 +282,8 @@ load helpers/common
 @test "retry: max retries exceeded marks NeedsHuman" {
     setup_lifecycle
     # Insert a failed dispatch with retries = 3 (default max_retries = 3)
-    local now
-    now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
-    sqlite3 "$TEST_TMPDIR/atc.db" "INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, mode, retries, resolver, dispatched_at, updated_at) VALUES ('disp-001', 'tasks/test-1', 'test-branch', '$TEST_TMPDIR/worktree', 'disp-001', '$TEST_TMPDIR/disp-001.jsonl', 'failed', 'implement', 3, 'task', '$now', '$now');"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "failed"
+    sqlite3 "$TEST_TMPDIR/atc.db" "UPDATE dispatches SET retries = 3 WHERE id = 'disp-001';"
 
     run atc --config "$TEST_TMPDIR/atc.toml" retry disp-001
     assert_failure
