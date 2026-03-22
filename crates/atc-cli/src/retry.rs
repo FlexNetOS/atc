@@ -120,15 +120,16 @@ pub async fn run_retry(
         );
     }
 
-    // 4. Classify failure and compute budget/turns adjustments
-    let (max_budget_override, max_turns_override) =
-        classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
-
+    // 4. Require a task slug before doing any I/O
     let slug = record.task_slug.as_deref().ok_or_else(|| {
         anyhow::anyhow!("cannot retry dispatch {id}: this dispatch has no task slug")
     })?;
 
-    // 5. Kill old tmux session (non-fatal, with timeout)
+    // 5. Classify failure and compute budget/turns adjustments
+    let (max_budget_override, max_turns_override) =
+        classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
+
+    // 6. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
@@ -149,13 +150,13 @@ pub async fn run_retry(
         _ => {}
     }
 
-    // 6. Clear git-kb claim (non-fatal)
+    // 7. Clear git-kb claim (non-fatal)
     if let Some(ref task_slug) = record.task_slug {
         kb_unassign(task_slug, config).await;
         kb_set_status_draft(task_slug, config).await;
     }
 
-    // 7. Re-dispatch
+    // 8. Re-dispatch
     let retry_num = record.retries + 1;
     println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
 
