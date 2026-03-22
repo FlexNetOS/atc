@@ -892,11 +892,7 @@ Working on PR: {{pr}}
         let comp_dir = dir.path().join("components");
         std::fs::create_dir_all(&comp_dir).unwrap();
         // Component embeds {{directive}} inline — should NOT get appended again
-        std::fs::write(
-            comp_dir.join("base.md"),
-            "Inline directive: {{directive}}",
-        )
-        .unwrap();
+        std::fs::write(comp_dir.join("base.md"), "Inline directive: {{directive}}").unwrap();
 
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
@@ -919,10 +915,9 @@ Working on PR: {{pr}}
             modes,
             ..Default::default()
         };
-        let result =
-            render_prompt(&Mode::Implement, "tasks/t", &config, "focus on tests", None)
-                .await
-                .unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "focus on tests", None)
+            .await
+            .unwrap();
         assert!(
             result.contains("Inline directive: focus on tests"),
             "directive should be expanded inline, got: {result}"
