@@ -281,7 +281,6 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
 
 // --- Partial resolution ---
 
-/// Build a Handlebars registry with partials registered from the 3-level priority chain.
 /// Build a Handlebars registry with partials from components, root, and
 /// project directories.
 ///
