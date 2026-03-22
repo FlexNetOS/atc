@@ -282,6 +282,12 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
 // --- Partial resolution ---
 
 /// Build a Handlebars registry with partials registered from the 3-level priority chain.
+/// Build a Handlebars registry with partials from components, root, and
+/// project directories.
+///
+/// **Performance note:** This rescans the filesystem on every call. If you are
+/// rendering multiple prompts with the same configuration (e.g. batch dispatch),
+/// consider calling this once and reusing the returned registry.
 async fn build_registry(
     config: &AtcConfig,
     worktree_path: Option<&Path>,
@@ -355,7 +361,12 @@ async fn register_partials_from_dir(
             content
         };
         if let Err(e) = hbs.register_partial(&name, &content) {
-            tracing::warn!(name = %name, error = %e, "failed to register partial");
+            tracing::warn!(
+                name = %name,
+                path = %path.display(),
+                error = %e,
+                "failed to register partial; templates referencing {{{{> {name}}}}} will fail at render time",
+            );
         }
     }
 }
