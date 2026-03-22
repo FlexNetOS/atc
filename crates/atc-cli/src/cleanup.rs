@@ -108,7 +108,9 @@ async fn cleanup_done(config: &AtcConfig, registry: &dyn Registry) -> Result<()>
     }
 
     if failed > 0 {
-        println!("Cleaned {cleaned} dispatches ({failed} failed — run with RUST_LOG=warn for details)");
+        println!(
+            "Cleaned {cleaned} dispatches ({failed} failed — run with RUST_LOG=warn for details)"
+        );
     } else {
         println!("Cleaned {cleaned} dispatches");
     }
