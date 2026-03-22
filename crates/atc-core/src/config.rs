@@ -70,6 +70,20 @@ impl AtcConfig {
                 )
             })?;
             let mode_cfg = cfg.modes.get(key).unwrap();
+            if let Some(components) = &mode_cfg.components {
+                anyhow::ensure!(
+                    !components.is_empty(),
+                    "modes.{}.components must contain at least one component name",
+                    key
+                );
+                for name in components {
+                    anyhow::ensure!(
+                        !name.trim().is_empty(),
+                        "modes.{}.components contains an empty component name",
+                        key
+                    );
+                }
+            }
             if let Some(budget) = mode_cfg.max_budget_usd {
                 anyhow::ensure!(
                     budget > 0.0 && budget.is_finite(),

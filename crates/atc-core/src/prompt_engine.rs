@@ -60,6 +60,12 @@ pub async fn assemble_system_prompt(
 
 /// Render a Handlebars template file with YAML frontmatter.
 ///
+/// This is a standalone entry point for callers that need full Handlebars
+/// rendering (variables + partials) from a template file. It is **not** used
+/// by the legacy `template_path` dispatch path, which intentionally uses
+/// simple `{{slug}}`/`{{directive}}` token replacement for backward
+/// compatibility. Use this function directly when you need rich templating.
+///
 /// Returns the rendered body and the list of directives from the frontmatter.
 /// Template files have the format:
 /// ```text
@@ -104,13 +110,21 @@ pub async fn render_prompt(
     slug: &str,
     config: &AtcConfig,
     directive: &str,
+    worktree_path: Option<&Path>,
 ) -> Result<String> {
     let mode_key = mode.as_str();
 
     if let Some(mode_config) = config.modes.get(mode_key) {
         // Path 1: Component assembly
         if mode_config.components.is_some() {
-            return assemble_system_prompt(mode, config, None).await;
+            let mut prompt = assemble_system_prompt(mode, config, worktree_path).await?;
+            if !directive.trim().is_empty() {
+                prompt.push_str(&format!(
+                    "\n\n---\nAdditional directive: {}",
+                    directive
+                ));
+            }
+            return Ok(prompt);
         }
 
         // Path 2: template_path (backward compat with simple token replacement)
@@ -187,10 +201,22 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
         return Ok((Frontmatter::default(), raw));
     }
 
-    // Find the closing `---`
+    // Find the closing `---` delimiter: must be a line containing only `---`
+    // (with optional trailing whitespace). This avoids false matches on YAML
+    // values that contain `---` within block scalars.
     let after_first = &trimmed[3..];
     let closing = after_first
-        .find("\n---")
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.trim() == "---")
+        .map(|(i, _)| {
+            // Calculate byte offset: sum of preceding lines + newlines
+            after_first
+                .lines()
+                .take(i)
+                .map(|l| l.len() + 1) // +1 for the '\n'
+                .sum::<usize>()
+        })
         .with_context(|| "template has opening `---` but no closing `---`")?;
 
     let yaml_str = &after_first[..closing];
@@ -267,7 +293,15 @@ async fn register_partials_from_dir(
         Err(_) => return, // Directory doesn't exist — skip silently
     };
 
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "error iterating partials directory");
+                break;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
@@ -571,7 +605,7 @@ Working on PR: {{pr}}
             modes,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/abc", &config, "")
+        let result = render_prompt(&Mode::Implement, "tasks/abc", &config, "", None)
             .await
             .unwrap();
         assert_eq!(result, "Task: tasks/abc");
@@ -595,7 +629,7 @@ Working on PR: {{pr}}
             modes,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "")
+        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap();
         assert_eq!(result, "File: tasks/t.");
@@ -630,7 +664,7 @@ Working on PR: {{pr}}
             modes,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "")
+        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap();
         assert!(result.contains("Component content."));
@@ -640,7 +674,7 @@ Working on PR: {{pr}}
     #[tokio::test]
     async fn test_render_prompt_no_config_errors() {
         let config = AtcConfig::default();
-        let err = render_prompt(&Mode::Implement, "tasks/t", &config, "")
+        let err = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap_err();
         assert!(

@@ -761,7 +761,7 @@ pub async fn dispatch(
 
     // Render system prompt from mode template + config overrides
     let directive = opts.directive.as_deref().unwrap_or("");
-    let prompt = atc_core::prompt_engine::render_prompt(&mode, slug, config, directive).await?;
+    let prompt = atc_core::prompt_engine::render_prompt(&mode, slug, config, directive, Some(worktree_path.as_path())).await?;
 
     // 6. Build agent opts and spawn
     let agent_opts = AgentOpts {
