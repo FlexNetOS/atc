@@ -12,6 +12,77 @@ use crate::subprocess::run_cmd_with_timeout;
 /// Timeout for non-fatal subprocess calls (tmux, git-kb).
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Compute budget/turns overrides based on the failure subtype from the last
+/// result event in the log file.
+///
+/// Returns `(max_budget_override, max_turns_override)`.
+///
+/// Strategy: give the agent more runway on resource-limit failures by doubling
+/// the relevant limit from the *static config* value. This is a one-step
+/// increase (not exponential across retries) — `max_retries` bounds total spend.
+fn classify_failure_overrides(
+    config: &AtcConfig,
+    mode: &str,
+    log_file: &std::path::Path,
+    id: &str,
+) -> (Option<f64>, Option<u32>) {
+    match stream_json::read_last_result(log_file) {
+        Ok(Some(event)) => {
+            info!(
+                id,
+                subtype = %event.subtype,
+                "last result event: subtype={}",
+                event.subtype
+            );
+            compute_overrides(config, mode, &event.subtype)
+        }
+        Ok(None) => {
+            warn!(id, log_file = %log_file.display(), "no result event found in log");
+            println!("  No result event found. Retrying with same configuration.");
+            (None, None)
+        }
+        Err(e) => {
+            warn!(id, error = %e, "failed to read log file for failure classification");
+            println!("  Could not read log. Retrying with same configuration.");
+            (None, None)
+        }
+    }
+}
+
+/// Pure computation of overrides from a failure subtype. Separated for testability.
+fn compute_overrides(config: &AtcConfig, mode: &str, subtype: &str) -> (Option<f64>, Option<u32>) {
+    match subtype {
+        "error_max_turns" => {
+            let current = config
+                .modes
+                .get(mode)
+                .and_then(|m| m.max_turns)
+                .unwrap_or(config.dispatch.max_turns);
+            let doubled = current.saturating_mul(2);
+            println!(
+                "  Failure: max turns reached. Retrying with doubled max_turns ({current} → {doubled})."
+            );
+            (None, Some(doubled))
+        }
+        "error_max_budget_usd" => {
+            let current = config
+                .modes
+                .get(mode)
+                .and_then(|m| m.max_budget_usd)
+                .unwrap_or(config.dispatch.max_budget_usd);
+            let doubled = current * 2.0;
+            println!(
+                "  Failure: budget exceeded. Retrying with doubled budget (${current:.2} → ${doubled:.2})."
+            );
+            (Some(doubled), None)
+        }
+        other => {
+            println!("  Failure: {other}. Retrying with same configuration.");
+            (None, None)
+        }
+    }
+}
+
 /// Execute the `atc retry` command.
 pub async fn run_retry(
     config: &AtcConfig,
@@ -49,29 +120,16 @@ pub async fn run_retry(
         );
     }
 
-    // 4. Classify failure: read last result event
-    match stream_json::read_last_result(&record.log_file) {
-        Ok(Some(event)) => {
-            info!(
-                id,
-                subtype = %event.subtype,
-                "last result event: subtype={}",
-                event.subtype
-            );
-        }
-        Ok(None) => {
-            warn!(id, log_file = %record.log_file.display(), "no result event found in log");
-        }
-        Err(e) => {
-            warn!(id, error = %e, "failed to read log file for failure classification");
-        }
-    }
-
+    // 4. Require a task slug before doing any I/O
     let slug = record.task_slug.as_deref().ok_or_else(|| {
         anyhow::anyhow!("cannot retry dispatch {id}: this dispatch has no task slug")
     })?;
 
-    // 5. Kill old tmux session (non-fatal, with timeout)
+    // 5. Classify failure and compute budget/turns adjustments
+    let (max_budget_override, max_turns_override) =
+        classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
+
+    // 6. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
@@ -92,13 +150,13 @@ pub async fn run_retry(
         _ => {}
     }
 
-    // 6. Clear git-kb claim (non-fatal)
+    // 7. Clear git-kb claim (non-fatal)
     if let Some(ref task_slug) = record.task_slug {
         kb_unassign(task_slug, config).await;
         kb_set_status_draft(task_slug, config).await;
     }
 
-    // 7. Re-dispatch
+    // 8. Re-dispatch
     let retry_num = record.retries + 1;
     println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
 
@@ -110,8 +168,8 @@ pub async fn run_retry(
         inline: false,
         force: false,
         dry_run: false,
-        max_budget_override: None,
-        max_turns_override: None,
+        max_budget_override,
+        max_turns_override,
         retries: record.retries + 1,
     };
 
@@ -481,5 +539,72 @@ mod tests {
             err.contains("no task slug"),
             "expected no-task-slug error, got: {err}"
         );
+    }
+
+    // --- Failure classification tests ---
+
+    #[test]
+    fn test_compute_overrides_error_max_turns_doubles() {
+        let config = AtcConfig::default(); // max_turns = 10_000
+        let (budget, turns) = compute_overrides(&config, "implement", "error_max_turns");
+        assert_eq!(budget, None);
+        assert_eq!(turns, Some(20_000));
+    }
+
+    #[test]
+    fn test_compute_overrides_error_max_budget_doubles() {
+        let config = AtcConfig::default(); // max_budget_usd = 25.0
+        let (budget, turns) = compute_overrides(&config, "implement", "error_max_budget_usd");
+        assert_eq!(budget, Some(50.0));
+        assert_eq!(turns, None);
+    }
+
+    #[test]
+    fn test_compute_overrides_unknown_subtype_no_overrides() {
+        let config = AtcConfig::default();
+        let (budget, turns) = compute_overrides(&config, "implement", "error_something_else");
+        assert_eq!(budget, None);
+        assert_eq!(turns, None);
+    }
+
+    #[test]
+    fn test_compute_overrides_success_no_overrides() {
+        let config = AtcConfig::default();
+        let (budget, turns) = compute_overrides(&config, "implement", "success");
+        assert_eq!(budget, None);
+        assert_eq!(turns, None);
+    }
+
+    #[test]
+    fn test_compute_overrides_uses_mode_specific_config() {
+        let mut config = AtcConfig::default();
+        config.modes.insert(
+            "research".to_string(),
+            atc_core::config::ModeConfig {
+                template_path: None,
+                template_inline: None,
+                max_turns: Some(500),
+                max_budget_usd: Some(5.0),
+            },
+        );
+
+        let (budget, turns) = compute_overrides(&config, "research", "error_max_turns");
+        assert_eq!(turns, Some(1_000)); // 500 * 2
+        assert_eq!(budget, None);
+
+        let (budget, turns) = compute_overrides(&config, "research", "error_max_budget_usd");
+        assert_eq!(budget, Some(10.0)); // 5.0 * 2
+        assert_eq!(turns, None);
+    }
+
+    #[test]
+    fn test_compute_overrides_falls_back_to_dispatch_defaults() {
+        let config = AtcConfig::default();
+        // "nonexistent" mode falls back to dispatch defaults
+        let (_, turns) = compute_overrides(&config, "nonexistent", "error_max_turns");
+        assert_eq!(turns, Some(config.dispatch.max_turns * 2));
+
+        let (budget, _) = compute_overrides(&config, "nonexistent", "error_max_budget_usd");
+        assert_eq!(budget, Some(config.dispatch.max_budget_usd * 2.0));
     }
 }
