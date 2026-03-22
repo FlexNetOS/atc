@@ -99,8 +99,7 @@ pub async fn render_template(
 ) -> Result<TemplateOutput> {
     // Resolve relative template paths against `prompt.templates_dir`.
     let resolved = if template_path.is_relative() {
-        resolve_dir(&config.prompt.templates_dir, config.config_dir.as_deref())
-            .join(template_path)
+        resolve_dir(&config.prompt.templates_dir, config.config_dir.as_deref()).join(template_path)
     } else {
         template_path.to_path_buf()
     };
@@ -952,11 +951,7 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
         // The partial itself embeds {{directive}}.
-        std::fs::write(
-            partials_dir.join("instructions.md"),
-            "Focus: {{directive}}",
-        )
-        .unwrap();
+        std::fs::write(partials_dir.join("instructions.md"), "Focus: {{directive}}").unwrap();
 
         let mut modes = HashMap::new();
         modes.insert(
@@ -976,10 +971,9 @@ Working on PR: {{pr}}
             modes,
             ..Default::default()
         };
-        let result =
-            render_prompt(&Mode::Implement, "tasks/t", &config, "write tests", None)
-                .await
-                .unwrap();
+        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "write tests", None)
+            .await
+            .unwrap();
         assert!(
             result.contains("Focus: write tests"),
             "partial should expand directive, got: {result}"
