@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info};
 
 use atc_core::config::AtcConfig;
@@ -10,6 +11,9 @@ use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{DispatchRecord, Mode, RunOpts};
 
 use crate::dispatch::build_dispatch_id;
+
+/// Per-process monotonic counter for template branch uniqueness.
+static TPL_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Check whether `s` contains only characters safe for use in a Git refname.
 /// Rejects spaces and characters forbidden by `git check-ref-format`:
@@ -150,7 +154,9 @@ impl InputResolver for TemplateResolver {
         // Include a timestamp so concurrent dispatches of the same template
         // get distinct branches (similar to PromptResolver).
         let ts = chrono::Utc::now().timestamp_millis();
-        let branch = format!("tpl--{}-{}", input, ts);
+        let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let branch = format!("tpl--{}-{}-{}-{}", input, ts, pid, seq);
         let dispatch_id = build_dispatch_id(&branch, &mode);
 
         Ok(ResolvedInput {
