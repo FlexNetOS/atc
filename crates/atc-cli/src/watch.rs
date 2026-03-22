@@ -334,9 +334,7 @@ pub async fn run_watch(
                 // user may have stopped the dispatch manually.
                 let needs_finalize = registry
                     .get(id)
-                    .await
-                    .ok()
-                    .flatten()
+                    .await?
                     .is_some_and(|r| !r.status.is_terminal());
 
                 if needs_finalize {
@@ -359,6 +357,7 @@ pub async fn run_watch(
                             .await
                     {
                         warn!(id = %id, error = %e, "post-completion failed for dead session");
+                        continue;
                     }
                 }
 

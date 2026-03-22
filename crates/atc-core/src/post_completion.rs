@@ -108,9 +108,10 @@ pub async fn run_post_completion(
         registry.update_status(&input.dispatch_id, status).await?;
     }
 
-    // 8. Store PR URL
-    let pr_url = artifacts.pr_urls.first().cloned();
-    if let Some(ref url) = pr_url {
+    // 8. Store PR URL (prefer extracted URL, fall back to registry record)
+    let extracted_pr_url = artifacts.pr_urls.first().cloned();
+    let pr_url = extracted_pr_url.clone().or_else(|| record.pr_url.clone());
+    if let Some(ref url) = extracted_pr_url {
         if let Err(e) = registry.set_pr_url(&input.dispatch_id, url).await {
             warn!(id = %input.dispatch_id, error = %e, "failed to set PR URL");
         }
