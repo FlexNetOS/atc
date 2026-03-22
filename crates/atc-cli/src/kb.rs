@@ -48,7 +48,9 @@ pub(crate) async fn kb_unassign_if_sole(
     config: &AtcConfig,
 ) {
     let has_other_live = match registry.find_by_task_slug(slug).await {
-        Ok(records) => records.into_iter().any(|r| r.id != id && !r.status.is_terminal()),
+        Ok(records) => records
+            .into_iter()
+            .any(|r| r.id != id && !r.status.is_terminal()),
         Err(_) => return, // can't determine — skip unassign to be safe
     };
     if !has_other_live {
