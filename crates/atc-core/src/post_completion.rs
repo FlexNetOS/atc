@@ -315,8 +315,13 @@ fn send_webhook(
             "POST",
             "-H",
             "Content-Type: application/json",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "10",
             "-d",
             &payload_str,
+            "--",
             webhook_url,
         ])
         .spawn(); // fire and forget

@@ -59,7 +59,11 @@ impl Status {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Status::Done | Status::Failed | Status::Stopped | Status::NeedsHuman
+            Status::Done
+                | Status::Failed
+                | Status::NeedsHuman
+                | Status::NeedsReview
+                | Status::Stopped
         )
     }
 
