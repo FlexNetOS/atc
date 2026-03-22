@@ -20,6 +20,7 @@ pub struct TemplateOutput {
 /// partial tags are expanded via the 3-level partial resolver.
 pub async fn assemble_system_prompt(
     mode: &Mode,
+    slug: &str,
     config: &AtcConfig,
     worktree_path: Option<&Path>,
 ) -> Result<String> {
@@ -50,7 +51,7 @@ pub async fn assemble_system_prompt(
     // Expand partials in the assembled prompt
     let hbs = build_registry(config, worktree_path).await?;
     let rendered = hbs
-        .render_template(&assembled, &serde_json::json!({}))
+        .render_template(&assembled, &serde_json::json!({ "slug": slug }))
         .with_context(|| {
             format!("failed to expand partials in assembled prompt for mode '{mode_key}'")
         })?;
@@ -117,7 +118,7 @@ pub async fn render_prompt(
     if let Some(mode_config) = config.modes.get(mode_key) {
         // Path 1: Component assembly
         if mode_config.components.is_some() {
-            let mut prompt = assemble_system_prompt(mode, config, worktree_path).await?;
+            let mut prompt = assemble_system_prompt(mode, slug, config, worktree_path).await?;
             if !directive.trim().is_empty() {
                 prompt.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
             }
@@ -193,32 +194,42 @@ struct Frontmatter {
 
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
     let trimmed = raw.trim_start();
-    if !trimmed.starts_with("---") {
+
+    // The opening fence must be exactly `---` followed by a newline (LF or CRLF).
+    let after_open = if let Some(rest) = trimmed.strip_prefix("---\n") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("---\r\n") {
+        rest
+    } else {
         // No frontmatter — entire content is the body
         return Ok((Frontmatter::default(), raw));
+    };
+
+    // Scan for the closing fence: an unindented line containing only `---`
+    // (with optional trailing whitespace). Uses `split_inclusive` to preserve
+    // exact byte boundaries regardless of LF vs CRLF line endings.
+    let mut yaml_end = None;
+    let mut body_start = None;
+    let mut offset = 0usize;
+    for line in after_open.split_inclusive('\n') {
+        let line_no_nl = line.strip_suffix('\n').unwrap_or(line);
+        let logical_line = line_no_nl
+            .strip_suffix('\r')
+            .unwrap_or(line_no_nl)
+            .trim_end_matches([' ', '\t']);
+        if logical_line == "---" {
+            yaml_end = Some(offset);
+            body_start = Some(offset + line.len());
+            break;
+        }
+        offset += line.len();
     }
 
-    // Find the closing `---` delimiter: must be a line containing only `---`
-    // (with optional trailing whitespace). This avoids false matches on YAML
-    // values that contain `---` within block scalars.
-    let after_first = &trimmed[3..];
-    let closing = after_first
-        .lines()
-        .enumerate()
-        .find(|(_, line)| line.trim() == "---")
-        .map(|(i, _)| {
-            // Calculate byte offset: sum of preceding lines + newlines
-            after_first
-                .lines()
-                .take(i)
-                .map(|l| l.len() + 1) // +1 for the '\n'
-                .sum::<usize>()
-        })
-        .with_context(|| "template has opening `---` but no closing `---`")?;
-
-    let yaml_str = &after_first[..closing];
-    let body_start = 3 + closing + 4; // skip "\n---"
-    let body = trimmed[body_start..].trim_start_matches('\n');
+    let yaml_end =
+        yaml_end.with_context(|| "template has opening `---` but no closing `---`")?;
+    let body_start = body_start.expect("closing fence sets body_start");
+    let yaml_str = &after_open[..yaml_end];
+    let body = after_open[body_start..].trim_start_matches(['\r', '\n']);
 
     // Parse YAML
     let yaml: serde_yaml::Value =
@@ -296,7 +307,7 @@ async fn register_partials_from_dir(
             Ok(None) => break,
             Err(e) => {
                 tracing::warn!(dir = %dir.display(), error = %e, "error iterating partials directory");
-                break;
+                continue;
             }
         };
         let path = entry.path();
@@ -389,6 +400,24 @@ Body content here."#;
     }
 
     #[test]
+    fn test_split_frontmatter_crlf_line_endings() {
+        let raw = "---\r\ndescription: \"hello\"\r\ndirectives: [code-read]\r\n---\r\nBody with CRLF.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.description.as_deref(), Some("hello"));
+        assert_eq!(fm.directives, vec!["code-read"]);
+        assert_eq!(body, "Body with CRLF.");
+    }
+
+    #[test]
+    fn test_split_frontmatter_indented_dashes_not_closing_fence() {
+        // Indented `---` inside a YAML block scalar must NOT be treated as the closing fence.
+        let raw = "---\ndescription: |\n  ---\n  indented dashes\ndirectives: []\n---\nBody.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert!(fm.description.is_some());
+        assert_eq!(body, "Body.");
+    }
+
+    #[test]
     fn test_split_frontmatter_empty_directives() {
         let raw = "---\ndescription: \"hello\"\n---\nBody.";
         let (fm, body) = split_frontmatter(raw).unwrap();
@@ -466,7 +495,7 @@ Body content here."#;
             ..Default::default()
         };
 
-        let result = assemble_system_prompt(&Mode::Implement, &config, None)
+        let result = assemble_system_prompt(&Mode::Implement, "test-slug", &config, None)
             .await
             .unwrap();
         assert!(result.contains("Base content."));
@@ -504,7 +533,7 @@ Body content here."#;
             ..Default::default()
         };
 
-        let err = assemble_system_prompt(&Mode::Implement, &config, None)
+        let err = assemble_system_prompt(&Mode::Implement, "test-slug", &config, None)
             .await
             .unwrap_err();
         assert!(
