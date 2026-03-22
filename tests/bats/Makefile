@@ -23,6 +23,10 @@ FILE ?=
 # Find test files, optionally filtered by FILE pattern
 TEST_FILES := $(shell find . -maxdepth 1 -name '*$(FILE)*.bats' | sort)
 
+ifeq ($(TEST_FILES),)
+$(error No test files matching '*$(FILE)*.bats' found)
+endif
+
 all: test
 
 setup:

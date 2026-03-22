@@ -129,7 +129,10 @@ insert_test_dispatch() {
     # Use RFC 3339 timestamps — atc's registry deserializes with parse_from_rfc3339
     local now
     now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
-    sqlite3 "$db" "INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, mode, retries, resolver, dispatched_at, updated_at) VALUES ('$id', '$task_slug', 'test-branch', '$TEST_TMPDIR/worktree', '$id', '$TEST_TMPDIR/$id.jsonl', '$status', '$mode', 0, 'task', '$now', '$now');"
+    sqlite3 "$db" <<SQL
+INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, mode, retries, resolver, dispatched_at, updated_at)
+VALUES ('${id//\'/\'\'}', '${task_slug//\'/\'\'}', 'test-branch', '${TEST_TMPDIR//\'/\'\'}/worktree', '${id//\'/\'\'}', '${TEST_TMPDIR//\'/\'\'}/${id//\'/\'\'}.jsonl', '${status//\'/\'\'}', '${mode//\'/\'\'}', 0, 'task', '$now', '$now');
+SQL
 }
 
 # ---------------------------------------------------------------------------
@@ -159,5 +162,6 @@ setup_lifecycle() {
 # ---------------------------------------------------------------------------
 query_dispatch_field() {
     local db="$1" id="$2" field="$3"
-    sqlite3 "$db" "SELECT $field FROM dispatches WHERE id = '$id';"
+    # NOTE: Assumes trusted input — $field is a column name, $id is a dispatch UUID
+    sqlite3 "$db" "SELECT $field FROM dispatches WHERE id = '${id//\'/\'\'}';"
 }
