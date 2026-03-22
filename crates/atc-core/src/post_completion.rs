@@ -365,8 +365,12 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
     };
     let path_str = canonical.to_string_lossy();
 
-    // Safety check: only remove paths under the configured worktree base or known patterns
-    let is_safe = canonical.starts_with(worktree_base) || path_str.contains("/.worktrees/");
+    // Safety check: only remove paths under the configured worktree base or known patterns.
+    // Canonicalize worktree_base too — it may contain symlinks (e.g. /tmp → /private/tmp on macOS).
+    let canonical_base = worktree_base
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_base.to_path_buf());
+    let is_safe = canonical.starts_with(&canonical_base) || path_str.contains("/.worktrees/");
 
     if !is_safe {
         warn!(
