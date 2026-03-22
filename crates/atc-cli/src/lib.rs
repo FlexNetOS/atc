@@ -227,7 +227,7 @@ pub async fn run(
             slug,
             directive,
         } => {
-            let prompt = atc_core::templates::render_prompt(
+            let prompt = atc_core::prompt_engine::render_prompt(
                 mode,
                 slug,
                 config,

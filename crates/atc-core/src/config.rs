@@ -22,6 +22,9 @@ pub struct AtcConfig {
     pub notifications: Option<NotificationsConfig>,
     #[serde(default)]
     pub watch: WatchConfig,
+    /// Prompt engine configuration (components, templates, partials directories).
+    #[serde(default)]
+    pub prompt: PromptConfig,
     /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
@@ -343,6 +346,47 @@ pub struct ModeConfig {
     pub max_budget_usd: Option<f64>,
     /// Per-mode turns override. Takes precedence over global dispatch.max_turns.
     pub max_turns: Option<u32>,
+    /// Ordered list of component names. Each name maps to `<components_dir>/<name>.md`.
+    /// When set, the system prompt is assembled by concatenating these components.
+    #[serde(default)]
+    pub components: Option<Vec<String>>,
+}
+
+/// `[prompt]` section — paths to prompt components, templates, and partials.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PromptConfig {
+    /// Directory containing component `.md` files.
+    /// Default: `.claude/prompts/components`
+    #[serde(default = "default_components_dir")]
+    pub components_dir: String,
+    /// Directory containing template `.md` files.
+    /// Default: `.claude/prompts/templates`
+    #[serde(default = "default_templates_dir")]
+    pub templates_dir: String,
+    /// Directory containing partial `.md` files.
+    /// Default: `.claude/prompts/partials`
+    #[serde(default = "default_partials_dir")]
+    pub partials_dir: String,
+}
+
+fn default_components_dir() -> String {
+    ".claude/prompts/components".to_string()
+}
+fn default_templates_dir() -> String {
+    ".claude/prompts/templates".to_string()
+}
+fn default_partials_dir() -> String {
+    ".claude/prompts/partials".to_string()
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self {
+            components_dir: default_components_dir(),
+            templates_dir: default_templates_dir(),
+            partials_dir: default_partials_dir(),
+        }
+    }
 }
 
 /// `[notifications]` section

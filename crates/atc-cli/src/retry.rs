@@ -585,6 +585,7 @@ mod tests {
                 template_inline: None,
                 max_turns: Some(500),
                 max_budget_usd: Some(5.0),
+                components: None,
             },
         );
 
