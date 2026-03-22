@@ -321,7 +321,7 @@ mod tests {
         // kill_tmux_session returns false (or true if tmux says "not found").
         // On hosts without tmux, kill returns false and the bail triggers.
         let record = sample_record("test-id-1", Status::Running);
-        let registry = MockRegistry::new(vec![record.clone()]);
+        let registry = MockRegistry::new(vec![record]);
         let config = AtcConfig::default();
 
         let result = run_cleanup(&config, &registry, Some("test-id-1"), false).await;
