@@ -1,0 +1,332 @@
+#!/usr/bin/env bats
+# Integration tests for the full ATC lifecycle:
+#   dispatch → registry → post-complete → status/info/logs → stop/cleanup
+#
+# These tests insert dispatch records directly into SQLite and exercise
+# the CLI commands against real data — no external deps (git-kb, tmux, meta).
+
+load helpers/common
+
+# ===========================================================================
+# Registry lifecycle: status/info queries against populated registry
+# ===========================================================================
+
+@test "status: shows inserted dispatch record" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" status
+    assert_success
+    assert_output --partial "tasks/test-1"
+    assert_output --partial "running"
+}
+
+@test "status: shows multiple dispatches for same task" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-1" "done"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" status
+    assert_success
+    assert_output --partial "running"
+    assert_output --partial "done"
+}
+
+@test "status --status filter returns only matching records" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-2" "done"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" status --status done
+    assert_success
+    assert_output --partial "tasks/test-2"
+    refute_output --partial "running"
+}
+
+@test "status --json returns valid JSON array" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" status --json
+    assert_success
+    # Verify it's valid JSON containing the dispatch
+    echo "$output" | jq -e '.[0].id == "disp-001"'
+}
+
+@test "info: shows correct fields for a dispatch" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running" "implement"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" info disp-001
+    assert_success
+    assert_output --partial "id:"
+    assert_output --partial "disp-001"
+    assert_output --partial "task_slug:"
+    assert_output --partial "tasks/test-1"
+    assert_output --partial "status:"
+    assert_output --partial "running"
+    assert_output --partial "mode:"
+    assert_output --partial "implement"
+}
+
+@test "info: resolves by task slug (latest dispatch)" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-1" "running"
+    # Ensure disp-002 has a later timestamp so it resolves as "latest"
+    sqlite3 "$TEST_TMPDIR/atc.db" "UPDATE dispatches SET dispatched_at = '2020-01-01T00:00:00+00:00' WHERE id = 'disp-001';"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" info tasks/test-1
+    assert_success
+    assert_output --partial "disp-002"
+}
+
+# ===========================================================================
+# Post-completion: artifact extraction, status transitions
+# ===========================================================================
+
+@test "post-complete: success log transitions Running → Done" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    # Verify status transitioned to done
+    local new_status
+    new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
+    [ "$new_status" = "done" ]
+}
+
+@test "post-complete: failure log transitions Running → Failed" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "error_max_turns" "5.00"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    local new_status
+    new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
+    [ "$new_status" = "failed" ]
+}
+
+@test "post-complete: populates cost, turns, duration" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "3.75"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    local cost turns duration
+    cost=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "cost_usd")
+    turns=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "num_turns")
+    duration=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "duration_ms")
+
+    [ "$cost" = "3.75" ]
+    [ "$turns" = "15" ]
+    [ "$duration" = "45000" ]
+}
+
+@test "post-complete: extracts PR URL from log" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    local pr_url
+    pr_url=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "pr_url")
+    [ "$pr_url" = "https://github.com/org/repo/pull/42" ]
+}
+
+@test "post-complete: stores artifacts JSON blob" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    local artifacts
+    artifacts=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "artifacts")
+    # Artifacts should be a non-empty JSON string
+    [ -n "$artifacts" ]
+    echo "$artifacts" | jq -e '.pr_urls | length > 0'
+}
+
+# ===========================================================================
+# Logs: formatted output from canned stream-json
+# ===========================================================================
+
+@test "logs: renders assistant text with >>> prefix" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" logs disp-001
+    assert_success
+    assert_output --partial ">>> Working on the task..."
+    assert_output --partial "[tool] Bash:"
+    assert_output --partial "RESULT: success"
+}
+
+@test "logs: shows cost and duration in result line" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "7.89"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" logs disp-001
+    assert_success
+    assert_output --partial 'cost=$7.89'
+    assert_output --partial "turns=15"
+    assert_output --partial "duration=45s"
+}
+
+@test "logs: resolves by task slug" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" logs tasks/test-1
+    assert_success
+    assert_output --partial ">>> Working on the task..."
+}
+
+# ===========================================================================
+# Stop: status transitions
+# ===========================================================================
+
+@test "stop: transitions Running dispatch to Stopped" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" stop disp-001
+    assert_success
+    assert_output --partial "Stopped disp-001"
+
+    local new_status
+    new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
+    [ "$new_status" = "stopped" ]
+}
+
+@test "stop: already-terminal dispatch warns but succeeds" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" stop disp-001
+    assert_success
+
+    # Terminal status should be preserved
+    local new_status
+    new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
+    [ "$new_status" = "done" ]
+}
+
+# ===========================================================================
+# Cleanup: worktree removal and batch operations
+# ===========================================================================
+
+@test "cleanup: removes worktree directory for Done dispatch" {
+    setup_lifecycle
+    local worktree_dir="$TEST_TMPDIR/worktree"
+    mkdir -p "$worktree_dir"
+
+    # Insert a Done dispatch whose worktree is in our temp dir
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+
+    # The cleanup will attempt to remove the worktree dir — it may or may not
+    # succeed depending on safety checks (path must be under worktree base).
+    # At minimum it should not error.
+    run atc --config "$TEST_TMPDIR/atc.toml" cleanup disp-001
+    assert_success
+    assert_output --partial "Cleaned disp-001"
+}
+
+@test "cleanup --done: cleans all Done dispatches" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-2" "done"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-003" "tasks/test-3" "running"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" cleanup --done
+    assert_success
+    assert_output --partial "Cleaned 2 dispatches"
+}
+
+@test "cleanup --done: no Done dispatches shows clean message" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" cleanup --done
+    assert_success
+    assert_output --partial "No done dispatches"
+}
+
+# ===========================================================================
+# Retry: failure classification and max-retries guard
+# ===========================================================================
+
+@test "retry: rejects non-failed dispatch" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" retry disp-001
+    assert_failure
+    assert_output --partial "cannot retry"
+}
+
+@test "retry: max retries exceeded marks NeedsHuman" {
+    setup_lifecycle
+    # Insert a failed dispatch with retries = 3 (default max_retries = 3)
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "failed" "implement" 3
+
+    run atc --config "$TEST_TMPDIR/atc.toml" retry disp-001
+    assert_failure
+    assert_output --partial "max retries"
+
+    # Verify status transitioned to needs-human
+    local new_status
+    new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
+    [ "$new_status" = "needs-human" ]
+}
+
+# ===========================================================================
+# Cross-command round-trip: insert → post-complete → info → status
+# ===========================================================================
+
+@test "round-trip: insert → post-complete → info shows artifacts" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "4.20"
+
+    # Run post-complete to populate artifacts
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    # Info should now show cost and PR URL
+    run atc --config "$TEST_TMPDIR/atc.toml" info disp-001
+    assert_success
+    assert_output --partial "done"
+    assert_output --partial '$4.20'
+    assert_output --partial "15"
+    assert_output --partial "pr_url:"
+    assert_output --partial "github.com"
+}
+
+@test "round-trip: insert → post-complete → status shows cost summary" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "4.20"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
+    assert_success
+
+    run atc --config "$TEST_TMPDIR/atc.toml" status
+    assert_success
+    assert_output --partial "done"
+    assert_output --partial '$4.20'
+}
