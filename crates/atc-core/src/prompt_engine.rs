@@ -21,6 +21,7 @@ pub struct TemplateOutput {
 pub async fn assemble_system_prompt(
     mode: &Mode,
     slug: &str,
+    directive: &str,
     config: &AtcConfig,
     worktree_path: Option<&Path>,
 ) -> Result<String> {
@@ -43,7 +44,8 @@ pub async fn assemble_system_prompt(
         let content = tokio::fs::read_to_string(&path).await.with_context(|| {
             format!("failed to read component '{name}' at '{}'", path.display())
         })?;
-        parts.push(content);
+        // Strip `# Agent: ...` header for consistency with partial rendering
+        parts.push(strip_agent_header_line(&content));
     }
 
     let assembled = parts.join("\n\n");
@@ -51,7 +53,10 @@ pub async fn assemble_system_prompt(
     // Expand partials in the assembled prompt
     let hbs = build_registry(config, worktree_path).await?;
     let rendered = hbs
-        .render_template(&assembled, &serde_json::json!({ "slug": slug }))
+        .render_template(
+            &assembled,
+            &serde_json::json!({ "slug": slug, "directive": directive }),
+        )
         .with_context(|| {
             format!("failed to expand partials in assembled prompt for mode '{mode_key}'")
         })?;
@@ -118,7 +123,8 @@ pub async fn render_prompt(
     if let Some(mode_config) = config.modes.get(mode_key) {
         // Path 1: Component assembly
         if mode_config.components.is_some() {
-            let mut prompt = assemble_system_prompt(mode, slug, config, worktree_path).await?;
+            let mut prompt =
+                assemble_system_prompt(mode, slug, directive, config, worktree_path).await?;
             if !directive.trim().is_empty() {
                 prompt.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
             }
@@ -497,13 +503,20 @@ Body content here."#;
             ..Default::default()
         };
 
-        let result = assemble_system_prompt(&Mode::Implement, "test-slug", &config, None)
+        let result = assemble_system_prompt(&Mode::Implement, "test-slug", "", &config, None)
             .await
             .unwrap();
         assert!(result.contains("Base content."));
         assert!(result.contains("Git content."));
-        // Components are concatenated with \n\n
-        assert!(result.contains("Base content.\n\n# Agent: Git"));
+        // Agent headers are stripped for consistency with partial rendering
+        assert!(
+            !result.contains("# Agent: Base"),
+            "agent header should be stripped"
+        );
+        assert!(
+            !result.contains("# Agent: Git"),
+            "agent header should be stripped"
+        );
     }
 
     #[tokio::test]
@@ -535,7 +548,7 @@ Body content here."#;
             ..Default::default()
         };
 
-        let err = assemble_system_prompt(&Mode::Implement, "test-slug", &config, None)
+        let err = assemble_system_prompt(&Mode::Implement, "test-slug", "", &config, None)
             .await
             .unwrap_err();
         assert!(
@@ -575,7 +588,7 @@ Body content here."#;
             ..Default::default()
         };
 
-        let result = assemble_system_prompt(&Mode::Implement, "my-task", &config, None)
+        let result = assemble_system_prompt(&Mode::Implement, "my-task", "", &config, None)
             .await
             .unwrap();
         assert!(
@@ -815,6 +828,94 @@ Working on PR: {{pr}}
             .unwrap();
         assert!(result.contains("Component content."));
         assert!(!result.contains("Additional directive"));
+    }
+
+    #[tokio::test]
+    async fn test_assemble_directive_available_in_handlebars_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(
+            comp_dir.join("base.md"),
+            "Directive: {{directive}}, Slug: {{slug}}",
+        )
+        .unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "implement".to_string(),
+            ModeConfig {
+                components: Some(vec!["base".to_string()]),
+                ..Default::default()
+            },
+        );
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            modes,
+            ..Default::default()
+        };
+
+        let result =
+            assemble_system_prompt(&Mode::Implement, "my-task", "focus on tests", &config, None)
+                .await
+                .unwrap();
+        assert!(
+            result.contains("Directive: focus on tests"),
+            "directive should be available in Handlebars context, got: {result}"
+        );
+        assert!(
+            result.contains("Slug: my-task"),
+            "slug should be available in Handlebars context, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assemble_strips_agent_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(comp_dir.join("base.md"), "# Agent: Base\n\nBase body.").unwrap();
+        std::fs::write(comp_dir.join("git.md"), "# Agent: Git\n\nGit body.").unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "implement".to_string(),
+            ModeConfig {
+                components: Some(vec!["base".to_string(), "git".to_string()]),
+                ..Default::default()
+            },
+        );
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            modes,
+            ..Default::default()
+        };
+
+        let result = assemble_system_prompt(&Mode::Implement, "s", "", &config, None)
+            .await
+            .unwrap();
+        assert!(
+            !result.contains("# Agent:"),
+            "agent headers should be stripped in assembled output, got: {result}"
+        );
+        assert!(result.contains("Base body."));
+        assert!(result.contains("Git body."));
     }
 
     #[tokio::test]
