@@ -34,7 +34,7 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
     let id = &record.id;
 
     // 1. Kill tmux session (best-effort)
-    kill_tmux_session(&record.session).await;
+    let session_killed = kill_tmux_session(&record.session).await;
 
     // 2. Check if other Running dispatches share this worktree
     let worktree_path = &record.worktree_path;
@@ -43,7 +43,13 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
 
     let mut removed = false;
 
-    if shared {
+    if !session_killed {
+        warn!(
+            id,
+            session = %record.session,
+            "skipping worktree removal: tmux session kill was inconclusive"
+        );
+    } else if shared {
         warn!(
             id,
             worktree = %worktree_path.display(),
@@ -54,12 +60,19 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
         removed = cleanup_worktree(worktree_path, &worktree_base).await?;
     }
 
-    // 3. Unassign task in git-kb (best-effort)
+    // 3. Unassign task in git-kb (best-effort, only if no other live dispatch for same slug)
     if let Some(ref slug) = record.task_slug {
-        kb_unassign(slug, config).await;
+        let has_other_live = registry
+            .find_by_task_slug(slug)
+            .await?
+            .into_iter()
+            .any(|r| r.id != *id && !r.status.is_terminal());
+        if !has_other_live {
+            kb_unassign(slug, config).await;
+        }
     }
 
-    // 4. Update status to Stopped if still running (cleanup implies shutdown)
+    // 4. Update status to Stopped if not already terminal
     if !record.status.is_terminal() {
         registry.update_status(id, Status::Stopped).await?;
     }
@@ -97,7 +110,10 @@ async fn cleanup_done(config: &AtcConfig, registry: &dyn Registry) -> Result<()>
 }
 
 /// Best-effort tmux session kill.
-async fn kill_tmux_session(session: &str) {
+///
+/// Returns `true` if the session was confirmed killed or was already absent,
+/// `false` if the kill outcome is inconclusive (timeout, exec failure).
+async fn kill_tmux_session(session: &str) -> bool {
     match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", session])
@@ -107,18 +123,22 @@ async fn kill_tmux_session(session: &str) {
     .await
     {
         Ok(Some(s)) if !s.success() => {
+            // Non-zero exit typically means the session doesn't exist (already gone)
             tracing::debug!(
                 session,
                 "tmux kill-session exited non-zero (may already be gone)"
             );
+            true
         }
+        Ok(Some(_)) => true, // success
         Ok(None) => {
             tracing::debug!(session, "tmux kill-session timed out");
+            false
         }
         Err(e) => {
             tracing::debug!(session, error = %e, "tmux kill-session failed");
+            false
         }
-        _ => {}
     }
 }
 

@@ -3,7 +3,11 @@
 //! Used by `atc cleanup`, post-completion (Phase 2), and health checks (Phase 7).
 
 use std::path::Path;
+use std::time::Duration;
 use tracing::{info, warn};
+
+/// Timeout for `git worktree remove` (consistent with CMD_TIMEOUT elsewhere).
+const WORKTREE_REMOVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Known safe base directories for worktree removal.
 const KNOWN_BASES: &[&str] = &["/tmp/worktrees/"];
@@ -35,18 +39,35 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) -> any
         return Ok(false);
     }
 
-    // Use `git worktree remove --force` to remove the worktree
-    let status = tokio::process::Command::new("git")
+    // Use `git worktree remove --force` to remove the worktree (with timeout)
+    let mut child = tokio::process::Command::new("git")
         .args(["worktree", "remove", "--force"])
         .arg(worktree_path)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true)
-        .status()
-        .await;
+        .spawn();
+
+    let status = match child {
+        Ok(ref mut c) => match tokio::time::timeout(WORKTREE_REMOVE_TIMEOUT, c.wait()).await {
+            Ok(result) => result.map(Some),
+            Err(_) => {
+                // Timeout — kill_on_drop will clean up the child
+                warn!(
+                    worktree = %worktree_path.display(),
+                    "git worktree remove timed out after {}s",
+                    WORKTREE_REMOVE_TIMEOUT.as_secs()
+                );
+                // Explicitly kill to be safe
+                let _ = c.kill().await;
+                Ok(None)
+            }
+        },
+        Err(e) => Err(e),
+    };
 
     match status {
-        Ok(s) if s.success() => {
+        Ok(Some(s)) if s.success() => {
             info!(
                 worktree = %worktree_path.display(),
                 "worktree removed"
@@ -61,12 +82,16 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) -> any
 
             Ok(true)
         }
-        Ok(s) => {
+        Ok(Some(s)) => {
             warn!(
                 worktree = %worktree_path.display(),
                 exit_code = ?s.code(),
                 "git worktree remove failed"
             );
+            Ok(false)
+        }
+        Ok(None) => {
+            // Timeout case already logged above
             Ok(false)
         }
         Err(e) => {

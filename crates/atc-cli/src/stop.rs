@@ -57,12 +57,21 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
         _ => {}
     }
 
-    // 4. Update status to Stopped
-    registry.update_status(id, Status::Stopped).await?;
+    // 4. Update status to Stopped (only if not already terminal)
+    if !record.status.is_terminal() {
+        registry.update_status(id, Status::Stopped).await?;
+    }
 
-    // 5. Unassign task in git-kb (best-effort)
+    // 5. Unassign task in git-kb (best-effort, only if no other live dispatch for same slug)
     if let Some(ref slug) = record.task_slug {
-        kb_unassign(slug, config).await;
+        let has_other_live = registry
+            .find_by_task_slug(slug)
+            .await?
+            .into_iter()
+            .any(|r| r.id != *id && !r.status.is_terminal());
+        if !has_other_live {
+            kb_unassign(slug, config).await;
+        }
     }
 
     // 6. Print result
@@ -230,8 +239,9 @@ mod tests {
         let result = run_stop(&config, &registry, "test-id-1").await;
         assert!(result.is_ok());
 
+        // Terminal status should be preserved, not overwritten to Stopped
         let r = registry.get("test-id-1").await.unwrap().unwrap();
-        assert_eq!(r.status, Status::Stopped);
+        assert_eq!(r.status, Status::Done);
     }
 
     #[tokio::test]
