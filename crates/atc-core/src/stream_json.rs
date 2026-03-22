@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 /// A result event from a Claude stream-json log.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResultEvent {
     pub subtype: String,
     pub total_cost_usd: Option<f64>,
@@ -169,13 +169,14 @@ pub fn parse_result_event(line: &str) -> Option<ResultEvent> {
 }
 
 /// Artifacts extracted from a stream-json log.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Artifacts {
     /// PR URLs found in tool_use outputs (gh pr create, etc.)
     pub pr_urls: Vec<String>,
     /// Commit SHAs mentioned in output.
-    /// TODO(phase-2): populate via commit SHA extraction from assistant text.
     pub commits: Vec<String>,
+    /// KB documents created/modified/deleted during the session.
+    pub kb_docs: Vec<String>,
     /// The last result event, if any
     pub result: Option<ResultEvent>,
     /// Agent summary text (last assistant text block before result)
@@ -214,6 +215,43 @@ fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
     }
 }
 
+/// Extract commit SHAs from text.
+/// Full 40-char SHAs match unconditionally; shorter SHAs (7-39 chars) require
+/// a preceding git-context word (commit, committed, HEAD, merge, etc.) to
+/// reduce false positives from arbitrary hex tokens.
+fn extract_commit_shas(text: &str, commits: &mut Vec<String>) {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static SHA_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i:commit(?:ted)?|HEAD|merged?|cherry-pick(?:ed)?)\s+([0-9a-f]{7,40})\b|\b([0-9a-f]{40})\b",
+        )
+        .unwrap()
+    });
+    for cap in SHA_RE.captures_iter(text) {
+        let sha = cap.get(1).or(cap.get(2)).unwrap().as_str().to_string();
+        if !commits.contains(&sha) {
+            commits.push(sha);
+        }
+    }
+}
+
+/// Extract KB document slugs from assistant text blocks.
+/// Matches patterns like `create tasks/harmony-42`, `modify context/active`, etc.
+fn extract_kb_docs(text: &str, kb_docs: &mut Vec<String>) {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static KB_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:create|modify|delete) ([a-z0-9_-]+/[a-z0-9/_-]+)").unwrap()
+    });
+    for cap in KB_RE.captures_iter(text) {
+        let slug = cap[1].to_string();
+        if !kb_docs.contains(&slug) {
+            kb_docs.push(slug);
+        }
+    }
+}
+
 /// Extract artifacts from parsed stream events.
 /// Used by post-completion (Phase 2A) and stale record recovery (Phase 7D).
 pub fn extract_artifacts(log_path: &Path) -> Artifacts {
@@ -236,6 +274,8 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
             match &event {
                 StreamEvent::AssistantText(text) => {
                     extract_pr_urls(text, &mut artifacts.pr_urls);
+                    extract_commit_shas(text, &mut artifacts.commits);
+                    extract_kb_docs(text, &mut artifacts.kb_docs);
                     last_text = Some(text.clone());
                 }
                 StreamEvent::ToolUse { input, .. } => {
@@ -538,6 +578,105 @@ mod tests {
             &mut urls,
         );
         assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_commit_shas() {
+        let mut commits = Vec::new();
+        extract_commit_shas(
+            "Committed abc1234 and deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            &mut commits,
+        );
+        assert_eq!(
+            commits,
+            vec!["abc1234", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
+        );
+    }
+
+    #[test]
+    fn test_extract_commit_shas_deduplicates() {
+        let mut commits = Vec::new();
+        extract_commit_shas("commit abc1234 and commit abc1234 again", &mut commits);
+        assert_eq!(commits, vec!["abc1234"]);
+    }
+
+    #[test]
+    fn test_extract_commit_shas_rejects_bare_short_hex() {
+        let mut commits = Vec::new();
+        extract_commit_shas("error code deadbee and id 550e8400", &mut commits);
+        assert!(commits.is_empty(), "bare short hex tokens should not match");
+    }
+
+    #[test]
+    fn test_extract_kb_docs() {
+        let mut docs = Vec::new();
+        extract_kb_docs(
+            "create tasks/harmony-42 and modify context/active",
+            &mut docs,
+        );
+        assert_eq!(docs, vec!["tasks/harmony-42", "context/active"]);
+    }
+
+    #[test]
+    fn test_extract_kb_docs_delete() {
+        let mut docs = Vec::new();
+        extract_kb_docs("delete tasks/old-task", &mut docs);
+        assert_eq!(docs, vec!["tasks/old-task"]);
+    }
+
+    #[test]
+    fn test_extract_artifacts_full_canned_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I'll create tasks/harmony-99 first."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git commit -m 'fix: resolve issue'"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Committed abc1234def. Created https://github.com/org/repo/pull/99"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"All done. Summary of changes."}]}}
+{"type":"result","subtype":"success","total_cost_usd":5.50,"num_turns":15,"duration_ms":120000}
+"#;
+        std::fs::write(&path, content).unwrap();
+        let artifacts = extract_artifacts(&path);
+
+        // PR URL extracted
+        assert_eq!(
+            artifacts.pr_urls,
+            vec!["https://github.com/org/repo/pull/99"]
+        );
+        // Commits extracted
+        assert!(artifacts.commits.contains(&"abc1234def".to_string()));
+        // KB docs extracted
+        assert!(artifacts.kb_docs.contains(&"tasks/harmony-99".to_string()));
+        // Result present
+        assert!(artifacts.result.is_some());
+        let result = artifacts.result.unwrap();
+        assert_eq!(result.subtype, "success");
+        assert_eq!(result.total_cost_usd, Some(5.50));
+        assert_eq!(result.num_turns, Some(15));
+        assert_eq!(result.duration_ms, Some(120000));
+        // Summary is last assistant text
+        assert_eq!(
+            artifacts.summary.as_deref(),
+            Some("All done. Summary of changes.")
+        );
+    }
+
+    #[test]
+    fn test_extract_artifacts_serialization_roundtrip() {
+        let artifacts = Artifacts {
+            pr_urls: vec!["https://github.com/org/repo/pull/1".to_string()],
+            commits: vec!["abc1234".to_string()],
+            kb_docs: vec!["tasks/foo".to_string()],
+            result: Some(ResultEvent {
+                subtype: "success".to_string(),
+                total_cost_usd: Some(2.5),
+                num_turns: Some(10),
+                duration_ms: Some(60000),
+            }),
+            summary: Some("Done".to_string()),
+        };
+        let json = serde_json::to_string(&artifacts).unwrap();
+        let deserialized: Artifacts = serde_json::from_str(&json).unwrap();
+        assert_eq!(artifacts, deserialized);
     }
 
     #[test]

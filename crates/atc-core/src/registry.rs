@@ -52,6 +52,11 @@ pub trait Registry: Send + Sync {
         new_dispatched_at: DateTime<Utc>,
     ) -> Result<()>;
 
+    /// Store full artifacts JSON blob.
+    async fn set_artifacts(&self, _id: &str, _artifacts_json: &str) -> Result<()> {
+        anyhow::bail!("artifacts persistence is not implemented for this registry backend")
+    }
+
     // --- New query methods ---
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>>;
     async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>>;
@@ -87,6 +92,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   cost_usd                  REAL,
   num_turns                 INTEGER,
   duration_ms               INTEGER,
+  artifacts                 TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );
@@ -128,6 +134,26 @@ impl SqliteRegistry {
                     .await?;
             }
         }
+
+        // Add artifacts TEXT column if missing (Phase 2 migration — safe ALTER TABLE ADD COLUMN)
+        let (table_exists,): (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if table_exists > 0 {
+            let (has_artifacts,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'artifacts'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_artifacts == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN artifacts TEXT")
+                    .execute(pool)
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -411,6 +437,22 @@ impl Registry for SqliteRegistry {
         let result =
             sqlx::query("UPDATE dispatches SET pr_url = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(url)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for id: {id}"
+        );
+        Ok(())
+    }
+
+    async fn set_artifacts(&self, id: &str, artifacts_json: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE dispatches SET artifacts = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(artifacts_json)
                 .bind(&now)
                 .bind(id)
                 .execute(&self.pool)

@@ -18,6 +18,10 @@ pub struct AtcConfig {
     pub batch: BatchConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    #[serde(default)]
+    pub notifications: Option<NotificationsConfig>,
+    #[serde(default)]
+    pub watch: WatchConfig,
     /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
     #[serde(default)]
     pub modes: HashMap<String, ModeConfig>,
@@ -45,6 +49,14 @@ impl AtcConfig {
         anyhow::ensure!(
             cfg.dispatch.max_retries > 0,
             "dispatch.max_retries must be >= 1"
+        );
+        anyhow::ensure!(
+            cfg.watch.poll_interval_secs > 0,
+            "watch.poll_interval_secs must be >= 1"
+        );
+        anyhow::ensure!(
+            cfg.watch.cost_threshold.is_finite() && cfg.watch.cost_threshold >= 0.0,
+            "watch.cost_threshold must be a finite non-negative number"
         );
         // Validate mode keys against known Mode variants + per-mode overrides
         for key in cfg.modes.keys() {
@@ -331,6 +343,47 @@ pub struct ModeConfig {
     pub max_budget_usd: Option<f64>,
     /// Per-mode turns override. Takes precedence over global dispatch.max_turns.
     pub max_turns: Option<u32>,
+}
+
+/// `[notifications]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NotificationsConfig {
+    /// Enable macOS notifications. Default: true.
+    #[serde(default = "default_true")]
+    pub macos: bool,
+    /// Webhook URL for POST notifications. Empty = disabled.
+    pub webhook_url: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `[watch]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WatchConfig {
+    /// Tmux session check interval in seconds. Default: 5.
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Emit CostThreshold event at this USD level. Default: 10.0.
+    #[serde(default = "default_cost_threshold")]
+    pub cost_threshold: f64,
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+fn default_cost_threshold() -> f64 {
+    10.0
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_poll_interval_secs(),
+            cost_threshold: default_cost_threshold(),
+        }
+    }
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
@@ -927,6 +980,39 @@ max_retries = 5
         assert!(
             err.to_string()
                 .contains("modes.research.max_turns must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_poll_interval() {
+        let toml = "[watch]\npoll_interval_secs = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("watch.poll_interval_secs must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_negative_cost_threshold() {
+        let toml = "[watch]\ncost_threshold = -1.0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("watch.cost_threshold must be a finite non-negative number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_nan_cost_threshold() {
+        let toml = "[watch]\ncost_threshold = nan";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("watch.cost_threshold must be a finite non-negative number"),
             "unexpected error: {err}"
         );
     }

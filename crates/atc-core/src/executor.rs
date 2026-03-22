@@ -18,6 +18,7 @@ pub struct AgentOpts {
     pub log_file: PathBuf,            // stream-json output destination
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
     pub session_name: String,         // tmux session name (derived from slug)
+    pub dispatch_id: String,          // stable registry ID (used for post-complete --id)
     pub sandbox: bool, // false = pass --settings with sandbox.enabled=false to claude
     pub inline: bool,  // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
@@ -234,6 +235,9 @@ impl ClaudeExecutor {
 
         let mut bash_parts = Vec::new();
 
+        // Ensure pipe failures propagate (so EXIT_CODE captures claude's exit, not tee's)
+        bash_parts.push("set -o pipefail".to_string());
+
         // Export env vars (keys are validated to prevent shell injection)
         // Empty value = unset the variable from the inherited environment.
         for (k, v) in &opts.env {
@@ -287,8 +291,17 @@ impl ClaudeExecutor {
 
         bash_parts.push(claude_cmd);
 
+        // Capture Claude's exit code from: cat | claude | tee
+        bash_parts.push("EXIT_CODE=${PIPESTATUS[1]}".to_string());
+
+        // Run post-completion pipeline (fire and forget — errors logged but don't fail the session)
+        bash_parts.push(format!(
+            "atc post-complete --id '{}' --exit-code $EXIT_CODE --log '{}' 2>/dev/null || true",
+            shell_escape(&opts.dispatch_id)?,
+            shell_escape(&log_file_str)?,
+        ));
+
         // Cleanup temp files
-        bash_parts.push("EXIT_CODE=$?".to_string());
         bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)?));
         bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)?));
         if let Some(ref sp) = sandbox_path {
@@ -420,6 +433,7 @@ mod tests {
             log_file: PathBuf::from("/tmp/log.jsonl"),
             env: HashMap::new(),
             session_name: "test".to_string(),
+            dispatch_id: "test".to_string(),
             sandbox: false,
             inline: true,
             max_turns: 10_000,

@@ -14,12 +14,14 @@ pub mod health;
 pub mod info;
 pub mod kb;
 pub mod logs;
+pub mod post_complete;
 pub mod redirect;
 pub mod resolve;
 pub mod retry;
 pub mod status;
 pub mod stop;
 pub mod subprocess;
+pub mod watch;
 
 mod args {
     use atc_core::types::Mode;
@@ -144,6 +146,33 @@ mod args {
             #[arg(long)]
             done: bool,
         },
+        /// Run post-completion pipeline (extract artifacts, update registry, notify)
+        PostComplete {
+            /// Dispatch ID (default: most recent Running)
+            #[arg(long)]
+            id: Option<String>,
+            /// Exit code from the agent process (inferred from log if not provided)
+            #[arg(long)]
+            exit_code: Option<i32>,
+            /// Path to stream-json log file (resolved from registry if not provided)
+            #[arg(long)]
+            log: Option<std::path::PathBuf>,
+        },
+        /// Watch running agent sessions and emit structured events
+        Watch {
+            /// Dispatch ID to watch (default: most recent Running)
+            #[arg(long)]
+            id: Option<String>,
+            /// Watch all running dispatches
+            #[arg(long)]
+            all_running: bool,
+            /// Output format: ndjson or human
+            #[arg(long, default_value = "auto")]
+            format: String,
+            /// Unix socket path for multi-consumer mode
+            #[arg(long)]
+            socket: Option<std::path::PathBuf>,
+        },
     }
 }
 
@@ -226,6 +255,32 @@ pub async fn run(
         Commands::Stop { id } => stop::run_stop(config, registry.as_ref(), id).await,
         Commands::Cleanup { id, done } => {
             cleanup::run_cleanup(config, registry.as_ref(), id.as_deref(), *done).await
+        }
+        Commands::PostComplete { id, exit_code, log } => {
+            post_complete::run_post_complete(
+                config,
+                registry.as_ref(),
+                id.as_deref(),
+                *exit_code,
+                log.clone(),
+            )
+            .await
+        }
+        Commands::Watch {
+            id,
+            all_running,
+            format,
+            socket,
+        } => {
+            watch::run_watch(
+                config,
+                registry.clone(),
+                id.as_deref(),
+                *all_running,
+                format,
+                socket.clone(),
+            )
+            .await
         }
     }
 }
