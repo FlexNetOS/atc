@@ -39,14 +39,9 @@ pub async fn assemble_system_prompt(
     let mut parts = Vec::with_capacity(components.len());
     for name in components {
         let path = components_dir.join(format!("{name}.md"));
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to read component '{name}' at '{}'",
-                    path.display()
-                )
-            })?;
+        let content = tokio::fs::read_to_string(&path).await.with_context(|| {
+            format!("failed to read component '{name}' at '{}'", path.display())
+        })?;
         parts.push(content);
     }
 
@@ -56,7 +51,9 @@ pub async fn assemble_system_prompt(
     let hbs = build_registry(config, worktree_path).await?;
     let rendered = hbs
         .render_template(&assembled, &serde_json::json!({}))
-        .with_context(|| format!("failed to expand partials in assembled prompt for mode '{mode_key}'"))?;
+        .with_context(|| {
+            format!("failed to expand partials in assembled prompt for mode '{mode_key}'")
+        })?;
 
     Ok(rendered)
 }
@@ -80,24 +77,14 @@ pub async fn render_template(
 ) -> Result<TemplateOutput> {
     let raw = tokio::fs::read_to_string(template_path)
         .await
-        .with_context(|| {
-            format!(
-                "failed to read template file '{}'",
-                template_path.display()
-            )
-        })?;
+        .with_context(|| format!("failed to read template file '{}'", template_path.display()))?;
 
     let (frontmatter, body) = split_frontmatter(&raw)?;
 
     let hbs = build_registry(config, worktree_path).await?;
     let rendered = hbs
         .render_template(body, params)
-        .with_context(|| {
-            format!(
-                "failed to render template '{}'",
-                template_path.display()
-            )
-        })?;
+        .with_context(|| format!("failed to render template '{}'", template_path.display()))?;
 
     Ok(TemplateOutput {
         body: rendered,
@@ -395,11 +382,7 @@ Body content here."#;
 
     #[test]
     fn test_legacy_tokens_directive_in_template() {
-        let result = apply_legacy_tokens(
-            "Task: {{slug}} dir: {{directive}}",
-            "tasks/t-1",
-            "focus",
-        );
+        let result = apply_legacy_tokens("Task: {{slug}} dir: {{directive}}", "tasks/t-1", "focus");
         assert_eq!(result, "Task: tasks/t-1 dir: focus");
         assert!(!result.contains("Additional directive"));
     }
@@ -516,7 +499,10 @@ Working on PR: {{pr}}
         std::fs::write(&tmpl_path, template).unwrap();
 
         let mut params = BTreeMap::new();
-        params.insert("pr".to_string(), "https://github.com/foo/bar/pull/42".to_string());
+        params.insert(
+            "pr".to_string(),
+            "https://github.com/foo/bar/pull/42".to_string(),
+        );
 
         let config = AtcConfig {
             config_dir: Some(dir.path().to_path_buf()),
@@ -672,8 +658,16 @@ Working on PR: {{pr}}
         // Components (level 3)
         let comp_dir = dir.path().join("components");
         std::fs::create_dir_all(&comp_dir).unwrap();
-        std::fs::write(comp_dir.join("verify.md"), "# Agent: Verify\n\nComponent verify.").unwrap();
-        std::fs::write(comp_dir.join("only-comp.md"), "# Agent: OnlyComp\n\nOnly in components.").unwrap();
+        std::fs::write(
+            comp_dir.join("verify.md"),
+            "# Agent: Verify\n\nComponent verify.",
+        )
+        .unwrap();
+        std::fs::write(
+            comp_dir.join("only-comp.md"),
+            "# Agent: OnlyComp\n\nOnly in components.",
+        )
+        .unwrap();
 
         // Root partials (level 2) — overrides component
         let partials_dir = dir.path().join("partials");
@@ -716,7 +710,11 @@ Working on PR: {{pr}}
 
         let comp_dir = dir.path().join("components");
         std::fs::create_dir_all(&comp_dir).unwrap();
-        std::fs::write(comp_dir.join("verify.md"), "# Agent: Verify\n\nComponent verify.").unwrap();
+        std::fs::write(
+            comp_dir.join("verify.md"),
+            "# Agent: Verify\n\nComponent verify.",
+        )
+        .unwrap();
 
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
