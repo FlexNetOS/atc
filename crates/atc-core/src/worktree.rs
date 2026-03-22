@@ -122,8 +122,8 @@ pub fn is_safe_worktree_path(worktree_path: &Path, worktree_base: &Path) -> bool
 
     let path_str = worktree_path.to_string_lossy();
 
-    // Under configured worktree_base
-    if worktree_path.starts_with(worktree_base) {
+    // Reject root as worktree_base — starts_with("/") is true for all absolute paths
+    if worktree_base != Path::new("/") && worktree_path.starts_with(worktree_base) {
         return true;
     }
 
@@ -213,6 +213,15 @@ mod tests {
         let base = PathBuf::from("/some/base");
         let path = PathBuf::from("/home/project/.worktrees/../../important-dir");
         // ".." components are rejected even when .worktrees is present
+        assert!(!is_safe_worktree_path(&path, &base));
+    }
+
+    #[test]
+    fn test_unsafe_root_worktree_base() {
+        // When worktree_base is "/", starts_with("/") is true for all absolute paths.
+        // The guard must reject this to prevent bypassing safety checks.
+        let base = PathBuf::from("/");
+        let path = PathBuf::from("/etc/passwd");
         assert!(!is_safe_worktree_path(&path, &base));
     }
 
