@@ -127,10 +127,14 @@ pub async fn run_retry(
         );
     }
 
-    // 4. Require a task slug before doing any I/O
-    let slug = record.task_slug.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("cannot retry dispatch {id}: this dispatch has no task slug")
-    })?;
+    // 4. Require either original_input or task_slug so we know what to re-dispatch
+    let slug = record
+        .original_input
+        .as_deref()
+        .or(record.task_slug.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot retry dispatch {id}: no original_input or task slug recorded")
+        })?;
 
     // 5. Classify failure and compute budget/turns adjustments
     let (max_budget_override, max_turns_override) =
@@ -193,8 +197,12 @@ pub async fn run_retry(
     let retry_num = record.retries + 1;
     println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
 
-    // Build the input string for the pipeline — "task <slug>" for task resolver
-    let input = slug.to_string();
+    // Recover the original input for faithful retry. Falls back to task slug
+    // for records created before original_input was persisted.
+    let input = record
+        .original_input
+        .clone()
+        .unwrap_or_else(|| slug.to_string());
     let opts = RunOpts {
         input: input.clone(),
         mode: Some(record.mode.clone()),
@@ -433,6 +441,7 @@ mod tests {
             resolver: "task".to_string(),
             pr_url: None,
             no_worktree: false,
+            original_input: None,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,
@@ -549,9 +558,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_rejects_no_task_slug() {
+    async fn test_retry_rejects_no_input_or_slug() {
         let mut record = sample_record("test-id-1", 0);
         record.task_slug = None;
+        record.original_input = None;
         let registry = MockRegistry::new(vec![record]);
         let executor = MockExecutor;
         let config = AtcConfig::default();
@@ -560,8 +570,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("no task slug"),
-            "expected no-task-slug error, got: {err}"
+            err.contains("no original_input or task slug"),
+            "expected no-input error, got: {err}"
         );
     }
 

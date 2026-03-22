@@ -43,7 +43,11 @@ impl<'a> DispatchPipeline<'a> {
         }
 
         // Validate branch name
-        validate_branch_name(&resolved.branch).await?;
+        if let Err(e) = validate_branch_name(&resolved.branch).await {
+            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+            resolver.on_cleanup(&tmp_record, self.config, None).await;
+            return Err(e);
+        }
 
         // Resolve per-mode budget/turns
         let dispatch_cfg = &self.config.dispatch;
@@ -100,11 +104,14 @@ impl<'a> DispatchPipeline<'a> {
                 None => meta.as_ref().map(|m| m.repo.clone()),
             };
 
-            let kb_basename = workspace_root
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("workspace_root has no basename"))?
-                .to_string_lossy()
-                .into_owned();
+            let kb_basename = match workspace_root.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                None => {
+                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                    resolver.on_cleanup(&tmp_record, self.config, None).await;
+                    anyhow::bail!("workspace_root has no basename");
+                }
+            };
 
             let worktree_base = dispatch_cfg.resolved_worktree_base();
             let wt_opts = WorktreeOpts {
@@ -216,6 +223,7 @@ impl<'a> DispatchPipeline<'a> {
             resolver: resolver.name().to_string(),
             pr_url: opts.pr_url.clone(),
             no_worktree: opts.no_worktree,
+            original_input: Some(input.to_string()),
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,
@@ -225,14 +233,18 @@ impl<'a> DispatchPipeline<'a> {
         };
         if let Err(e) = self.registry.insert(&record).await {
             warn!(id = %resolved.dispatch_id, error = %e, "registry insert failed; killing orphan session");
-            let _ = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", &handle.session])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
-            resolver
-                .on_cleanup(&record, self.config, Some(self.registry))
-                .await;
+            let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
+            if session_killed {
+                resolver
+                    .on_cleanup(&record, self.config, Some(self.registry))
+                    .await;
+            } else {
+                warn!(
+                    id = %resolved.dispatch_id,
+                    session = %handle.session,
+                    "tmux kill inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
+                );
+            }
             return Err(e);
         }
 
@@ -292,9 +304,8 @@ impl<'a> DispatchPipeline<'a> {
             }
         }
         anyhow::bail!(
-            "no resolver can handle input: {:?}. \
-             Check that resolvers are enabled in [resolvers] config.",
-            input
+            "no resolver can handle the provided input. \
+             Check that resolvers are enabled in [resolvers] config."
         );
     }
 
@@ -319,6 +330,7 @@ impl<'a> DispatchPipeline<'a> {
             resolver: resolver_name.to_string(),
             pr_url: opts.pr_url.clone(),
             no_worktree: opts.no_worktree,
+            original_input: None,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

@@ -9,7 +9,7 @@ use atc_core::prompt_engine;
 use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{DispatchRecord, Mode, RunOpts};
 
-use crate::dispatch::{build_dispatch_id, derive_branch};
+use crate::dispatch::build_dispatch_id;
 
 /// Resolver for template-based dispatches.
 ///
@@ -107,8 +107,10 @@ impl InputResolver for TemplateResolver {
 
         info!(template = input, mode = %mode.as_str(), "template resolved");
 
-        // Use template name as branch basis
-        let branch = derive_branch(input);
+        // Use template name with a resolver-specific prefix to avoid collisions
+        // with task-derived branches (derive_branch is bijective only for valid
+        // GitKB slugs that contain '/').
+        let branch = format!("tpl--{}", input);
         let dispatch_id = build_dispatch_id(&branch, &mode);
 
         Ok(ResolvedInput {
@@ -323,6 +325,6 @@ mod tests {
             .system_prompt
             .contains("https://github.com/org/repo/pull/1"));
         assert!(result.task_slug.is_none());
-        assert_eq!(result.branch, "review");
+        assert_eq!(result.branch, "tpl--review");
     }
 }

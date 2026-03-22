@@ -21,6 +21,9 @@ pub struct DispatchRecord {
     pub pr_url: Option<String>,
     /// Whether the dispatch was created with `--no-worktree` (run in current directory).
     pub no_worktree: bool,
+    /// The raw input string passed to the pipeline (slug, template name, or prompt).
+    /// Used by retry to faithfully reconstruct the original `RunOpts`.
+    pub original_input: Option<String>,
     pub checks: HealthChecks,
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
@@ -157,23 +160,7 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// Options for a single dispatch invocation (legacy — used by retry internals).
-#[derive(Debug, Clone, PartialEq)]
-pub struct DispatchOpts {
-    pub slug: String,
-    pub cli_mode: Option<Mode>,
-    pub directive: Option<String>,
-    pub pr_url: Option<String>,
-    pub inline: bool,
-    pub force: bool,
-    pub dry_run: bool,
-    pub max_budget_override: Option<f64>,
-    pub max_turns_override: Option<u32>,
-    /// Retry count to propagate into the new dispatch record (default 0).
-    pub retries: u32,
-}
-
-/// Options for an `atc run` invocation. Supersedes `DispatchOpts`.
+/// Options for an `atc run` invocation.
 #[derive(Debug, Clone)]
 pub struct RunOpts {
     /// Raw input string (joined from CLI positional args).
