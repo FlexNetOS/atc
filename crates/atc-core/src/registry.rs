@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   pr_url                    TEXT,
   no_worktree               INTEGER NOT NULL DEFAULT 0,
   original_input            TEXT,
+  kb_root                   TEXT,
   check_agent_exited_clean  INTEGER NOT NULL DEFAULT 0,
   check_branch_pushed       INTEGER NOT NULL DEFAULT 0,
   check_pr_created          INTEGER NOT NULL DEFAULT 0,
@@ -180,6 +181,18 @@ impl SqliteRegistry {
                     .execute(pool)
                     .await?;
             }
+
+            // Add kb_root column if missing (multi-KB discovery migration)
+            let (has_kb_root,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'kb_root'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_kb_root == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN kb_root TEXT")
+                    .execute(pool)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -263,6 +276,7 @@ impl SqliteRegistry {
                 reviews_approved: row.get::<i32, _>("check_reviews_approved") != 0,
                 threads_resolved: row.get::<i32, _>("check_threads_resolved") != 0,
             },
+            kb_root: row.get::<Option<String>, _>("kb_root").map(PathBuf::from),
             cost_usd: row.get("cost_usd"),
             num_turns: row
                 .get::<Option<i32>, _>("num_turns")
@@ -287,13 +301,13 @@ impl Registry for SqliteRegistry {
         sqlx::query(
             r#"INSERT INTO dispatches (
                 id, task_slug, branch, worktree_path, session, log_file, status, mode, retries,
-                resolver, pr_url, no_worktree, original_input, check_agent_exited_clean,
-                check_branch_pushed, check_pr_created, check_ci_passed, check_reviews_approved,
-                check_threads_resolved, cost_usd, num_turns, duration_ms, dispatched_at,
-                updated_at
+                resolver, pr_url, no_worktree, original_input, kb_root,
+                check_agent_exited_clean, check_branch_pushed, check_pr_created,
+                check_ci_passed, check_reviews_approved, check_threads_resolved,
+                cost_usd, num_turns, duration_ms, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
             )"#,
         )
         .bind(&record.id)
@@ -319,6 +333,7 @@ impl Registry for SqliteRegistry {
         .bind(&record.pr_url)
         .bind(record.no_worktree as i32)
         .bind(&record.original_input)
+        .bind(record.kb_root.as_ref().and_then(|p| p.to_str()))
         .bind(record.checks.agent_exited_clean as i32)
         .bind(record.checks.branch_pushed as i32)
         .bind(record.checks.pr_created as i32)
@@ -640,6 +655,7 @@ mod tests {
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),
+            kb_root: None,
             cost_usd: None,
             num_turns: None,
             duration_ms: None,

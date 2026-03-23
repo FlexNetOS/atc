@@ -517,18 +517,21 @@ impl InputResolver for TaskResolver {
                 }
             }
 
-            // Re-discover the actual KB root for this slug rather than assuming
-            // primary_kb_root — with multi-KB discovery the task may live in a
-            // sub-project KB.
-            let primary = Self::primary_kb_root(config);
-            let kb_root = match Self::discover_kb_root(slug, &primary).await {
-                Some(found) => found,
-                None => {
-                    warn!(
-                        slug,
-                        "could not re-discover KB root for unassign; task may remain assigned"
-                    );
-                    return;
+            // Use the persisted KB root when available, falling back to
+            // re-discovery for records created before the field existed.
+            let kb_root = if let Some(ref root) = record.kb_root {
+                root.clone()
+            } else {
+                let primary = Self::primary_kb_root(config);
+                match Self::discover_kb_root(slug, &primary).await {
+                    Some(found) => found,
+                    None => {
+                        warn!(
+                            slug,
+                            "could not re-discover KB root for unassign; task may remain assigned"
+                        );
+                        return;
+                    }
                 }
             };
             Self::unassign_task(slug, &kb_root, Some(record.branch.as_str())).await;

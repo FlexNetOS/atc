@@ -214,6 +214,7 @@ mod tests {
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),
+            kb_root: None,
             cost_usd: Some(1.50),
             num_turns: Some(10),
             duration_ms: Some(592_000),
