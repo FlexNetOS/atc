@@ -296,6 +296,21 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_keys_last_wins() {
+        let input = "FOO=first\nFOO=second";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "second");
+    }
+
+    #[test]
+    fn test_windows_line_endings() {
+        let input = "FOO=bar\r\nBAZ=qux\r\n";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
     fn test_parse_env_file_nonexistent() {
         let result = parse_env_file(Path::new("/nonexistent/.dispatch/env"));
         assert!(result.is_err());

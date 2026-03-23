@@ -58,9 +58,19 @@ impl TaskResolver {
         match child {
             Ok(child) => match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
                 Ok(Ok(o)) => o.status.success(),
-                _ => false,
+                Ok(Err(e)) => {
+                    debug!(slug, ?kb_root, error = %e, "git-kb show failed");
+                    false
+                }
+                Err(_) => {
+                    debug!(slug, ?kb_root, "git-kb show timed out");
+                    false
+                }
             },
-            Err(_) => false,
+            Err(e) => {
+                debug!(slug, ?kb_root, error = %e, "failed to spawn git-kb");
+                false
+            }
         }
     }
 
