@@ -554,16 +554,13 @@ mod tests {
         let result = executor.spawn_inline(&opts).await;
         // It may fail because 'echo' doesn't behave exactly like claude,
         // but it should NOT fail with a GITKB_ROOT error
-        match &result {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    !msg.contains("GITKB_ROOT"),
-                    "should not require GITKB_ROOT when stdin_content is set, got: {}",
-                    msg
-                );
-            }
-            Ok(_) => {} // success is fine too
+        if let Err(e) = &result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("GITKB_ROOT"),
+                "should not require GITKB_ROOT when stdin_content is set, got: {}",
+                msg
+            );
         }
     }
 
@@ -602,16 +599,13 @@ mod tests {
         // spawn_tmux will likely fail because tmux isn't available in test,
         // but it should NOT fail with "GITKB_ROOT not set"
         let result = executor.spawn_tmux(&opts).await;
-        match &result {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    !msg.contains("GITKB_ROOT"),
-                    "should not require GITKB_ROOT when stdin_content is set, got: {}",
-                    msg
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = &result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("GITKB_ROOT"),
+                "should not require GITKB_ROOT when stdin_content is set, got: {}",
+                msg
+            );
         }
     }
 
