@@ -23,8 +23,14 @@ pub struct AgentOpts {
     pub inline: bool,  // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
     pub max_budget_usd: f64,
+    /// Pre-built stdin content from the pipeline (for non-task dispatches).
+    /// When set, the executor pipes this directly to claude stdin instead of
+    /// calling `git kb show`. When None, falls back to fetching the task
+    /// document from git-kb (legacy task dispatch path).
+    pub stdin_content: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct AgentHandle {
     pub session: String,               // tmux session name or pid string
     pub inline_exit_code: Option<i32>, // set immediately when inline = true
@@ -68,29 +74,35 @@ impl ClaudeExecutor {
     async fn spawn_inline(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         use tokio::process::Command;
 
-        // 1. Read task document via subprocess
-        let kb_root = opts
-            .env
-            .get("GITKB_ROOT")
-            .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
+        // 1. Get stdin content: use pre-built content or fetch from git-kb
+        let stdin_bytes = if let Some(ref content) = opts.stdin_content {
+            content.as_bytes().to_vec()
+        } else {
+            // Legacy path: fetch task document from git-kb (task dispatches only)
+            let kb_root = opts
+                .env
+                .get("GITKB_ROOT")
+                .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
 
-        let task_doc = Command::new("git-kb")
-            .args(["show", &opts.slug])
-            .env("GITKB_ROOT", kb_root)
-            .output()
-            .await?;
+            let task_doc = Command::new("git-kb")
+                .args(["show", &opts.slug])
+                .env("GITKB_ROOT", kb_root)
+                .output()
+                .await?;
 
-        if !task_doc.status.success() {
-            anyhow::bail!(
-                "git kb show {} failed (exit {:?}): {}",
-                opts.slug,
-                task_doc.status.code(),
-                String::from_utf8_lossy(&task_doc.stderr)
-            );
-        }
-        if task_doc.stdout.is_empty() {
-            warn!(slug = %opts.slug, "git kb show returned empty output");
-        }
+            if !task_doc.status.success() {
+                anyhow::bail!(
+                    "git kb show {} failed (exit {:?}): {}",
+                    opts.slug,
+                    task_doc.status.code(),
+                    String::from_utf8_lossy(&task_doc.stderr)
+                );
+            }
+            if task_doc.stdout.is_empty() {
+                warn!(slug = %opts.slug, "git kb show returned empty output");
+            }
+            task_doc.stdout
+        };
 
         // 2. Create log file parent dirs
         if let Some(parent) = opts.log_file.parent() {
@@ -151,10 +163,10 @@ impl ClaudeExecutor {
         info!(slug = %opts.slug, "spawning claude (inline)");
         let mut child = cmd.spawn()?;
 
-        // Write task doc to stdin
+        // Write stdin content (task doc or pre-built content) to claude stdin
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(&task_doc.stdout).await?;
+            stdin.write_all(&stdin_bytes).await?;
             drop(stdin);
         }
 
@@ -202,11 +214,6 @@ impl ClaudeExecutor {
     async fn spawn_tmux(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         use tokio::process::Command;
 
-        let kb_root = opts
-            .env
-            .get("GITKB_ROOT")
-            .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
-
         // 1. Write system prompt to a stable path (must outlive this process)
         let log_dir = opts
             .log_file
@@ -252,18 +259,28 @@ impl ClaudeExecutor {
         // cd to worktree
         bash_parts.push(format!("cd '{}'", shell_escape(&worktree_str)?));
 
-        // Fetch task doc to a temp file to avoid shell expansion of content.
+        // Write stdin content to a temp file to avoid shell expansion.
         // Writing to a file (rather than a shell variable + echo) prevents
-        // command injection via $(), backticks, or other expansion in the
-        // task document body.
+        // command injection via $(), backticks, or other expansion in the content.
         let task_doc_path = log_dir.join(format!("{}.taskdoc", opts.session_name));
         let task_doc_path_str = task_doc_path.to_string_lossy();
-        bash_parts.push(format!(
-            "GITKB_ROOT='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
-            shell_escape(kb_root)?,
-            shell_escape(&opts.slug)?,
-            shell_escape(&task_doc_path_str)?,
-        ));
+
+        if let Some(ref content) = opts.stdin_content {
+            // Pre-built stdin content: write directly to the temp file
+            tokio::fs::write(&task_doc_path, content).await?;
+        } else {
+            // Legacy path: fetch task document from git-kb (task dispatches only)
+            let kb_root = opts
+                .env
+                .get("GITKB_ROOT")
+                .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
+            bash_parts.push(format!(
+                "GITKB_ROOT='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
+                shell_escape(kb_root)?,
+                shell_escape(&opts.slug)?,
+                shell_escape(&task_doc_path_str)?,
+            ));
+        }
 
         // Build the claude pipeline — pipe task doc file to claude
         let mut claude_cmd = format!(
@@ -438,6 +455,7 @@ mod tests {
             inline: true,
             max_turns: 10_000,
             max_budget_usd: 25.0,
+            stdin_content: None,
         };
         let prompt = ClaudeExecutor::build_user_prompt(&opts);
         assert!(prompt.contains("Directive: implement"));
@@ -498,5 +516,127 @@ mod tests {
         assert!(validate_env_key("has space").is_err());
         assert!(validate_env_key("has-dash").is_err());
         assert!(validate_env_key("$(cmd)").is_err());
+    }
+
+    /// Helper to create AgentOpts for tests.
+    fn make_test_opts(stdin_content: Option<String>, env: HashMap<String, String>) -> AgentOpts {
+        AgentOpts {
+            slug: "test-slug".to_string(),
+            worktree_path: PathBuf::from("/tmp/test"),
+            prompt: "test system prompt".to_string(),
+            mode: Mode::Implement,
+            log_file: PathBuf::from("/tmp/test.jsonl"),
+            env,
+            session_name: "test-session".to_string(),
+            dispatch_id: "test-dispatch".to_string(),
+            sandbox: false,
+            inline: true,
+            max_turns: 100,
+            max_budget_usd: 5.0,
+            stdin_content,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_inline_with_stdin_content_skips_gitkb() {
+        // When stdin_content is set, executor should NOT require GITKB_ROOT
+        // and should NOT call git-kb show. We can verify by not setting
+        // GITKB_ROOT and confirming no error about it.
+        let executor = ClaudeExecutor {
+            claude_bin: PathBuf::from("echo"), // use echo as a harmless command
+        };
+        let opts = make_test_opts(
+            Some("Hello from stdin content".to_string()),
+            HashMap::new(), // No GITKB_ROOT
+        );
+
+        // This should not fail with "GITKB_ROOT not set" error
+        let result = executor.spawn_inline(&opts).await;
+        // It may fail because 'echo' doesn't behave exactly like claude,
+        // but it should NOT fail with a GITKB_ROOT error
+        match &result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("GITKB_ROOT"),
+                    "should not require GITKB_ROOT when stdin_content is set, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => {} // success is fine too
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_inline_without_stdin_content_requires_gitkb_root() {
+        // When stdin_content is None, executor should require GITKB_ROOT
+        let executor = ClaudeExecutor::default();
+        let opts = make_test_opts(None, HashMap::new()); // No GITKB_ROOT
+
+        let result = executor.spawn_inline(&opts).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("GITKB_ROOT not set"),
+            "should require GITKB_ROOT when stdin_content is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_tmux_with_stdin_content_skips_gitkb() {
+        // When stdin_content is set, tmux spawn should NOT require GITKB_ROOT
+        // for the git-kb show step (it writes content directly to file)
+        let executor = ClaudeExecutor::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_file = tmp.path().join("test.jsonl");
+        let opts = AgentOpts {
+            stdin_content: Some("Hello from stdin content".to_string()),
+            env: HashMap::new(), // No GITKB_ROOT
+            log_file,
+            worktree_path: tmp.path().to_path_buf(),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        // spawn_tmux will likely fail because tmux isn't available in test,
+        // but it should NOT fail with "GITKB_ROOT not set"
+        let result = executor.spawn_tmux(&opts).await;
+        match &result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("GITKB_ROOT"),
+                    "should not require GITKB_ROOT when stdin_content is set, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_tmux_without_stdin_content_requires_gitkb_root() {
+        // When stdin_content is None, tmux spawn should require GITKB_ROOT
+        let executor = ClaudeExecutor::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_file = tmp.path().join("test.jsonl");
+        let opts = AgentOpts {
+            stdin_content: None,
+            env: HashMap::new(), // No GITKB_ROOT
+            log_file,
+            worktree_path: tmp.path().to_path_buf(),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let result = executor.spawn_tmux(&opts).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("GITKB_ROOT not set"),
+            "should require GITKB_ROOT when stdin_content is None"
+        );
     }
 }

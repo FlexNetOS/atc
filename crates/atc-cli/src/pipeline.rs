@@ -322,18 +322,28 @@ impl<'a> DispatchPipeline<'a> {
             env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
         }
 
-        // GITKB_ROOT: re-assert from the resolver-validated kb_root so that
-        // project env or provider env cannot redirect git-kb to an arbitrary path.
-        env.insert(
-            "GITKB_ROOT".to_string(),
-            kb_root.to_string_lossy().into_owned(),
-        );
+        // GITKB_ROOT: only set for task dispatches where git-kb is needed.
+        // Re-assert from the resolver-validated kb_root so that project env
+        // or provider env cannot redirect git-kb to an arbitrary path.
+        if resolved.task_slug.is_some() {
+            env.insert(
+                "GITKB_ROOT".to_string(),
+                kb_root.to_string_lossy().into_owned(),
+            );
+        }
 
         // CLAUDECODE: always clear to prevent recursive agent-spawning.
         env.insert("CLAUDECODE".to_string(), String::new());
 
         // 9. Build agent opts and spawn
         let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
+        // For non-task dispatches (prompt/template), provide the resolved system
+        // prompt as stdin content so the executor doesn't call `git kb show`.
+        let stdin_content = if resolved.task_slug.is_some() {
+            None // task dispatches: executor fetches from git-kb
+        } else {
+            Some(resolved.system_prompt.clone())
+        };
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
@@ -347,6 +357,7 @@ impl<'a> DispatchPipeline<'a> {
             inline: opts.inline,
             max_turns: turns,
             max_budget_usd: budget,
+            stdin_content,
         };
 
         let handle = match self.executor.spawn(&agent_opts).await {
