@@ -156,6 +156,17 @@ impl AtcConfig {
             if let Some(turns) = mode_cfg.max_turns {
                 anyhow::ensure!(turns > 0, "modes.{}.max_turns must be >= 1", key);
             }
+            if let Some(providers) = &mode_cfg.providers {
+                for name in providers {
+                    anyhow::ensure!(
+                        crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
+                        "unknown provider '{}' in modes.{}.providers; valid providers: {}",
+                        name,
+                        key,
+                        crate::providers::KNOWN_PROVIDERS.join(", ")
+                    );
+                }
+            }
         }
         // Validate resolver order — warn on unknown resolver names (typos)
         let known_resolvers = ["task", "template", "prompt"];
@@ -450,6 +461,10 @@ pub struct ModeConfig {
     /// When set, the system prompt is assembled by concatenating these components.
     #[serde(default)]
     pub components: Option<Vec<String>>,
+    /// Ordered list of context provider names to run before agent spawn.
+    /// Valid names: "pr-context", "kb-context", "rebase".
+    #[serde(default)]
+    pub providers: Option<Vec<String>>,
 }
 
 /// `[prompt]` section — paths to prompt components, templates, and partials.

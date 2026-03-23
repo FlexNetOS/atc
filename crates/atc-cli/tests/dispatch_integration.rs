@@ -203,11 +203,8 @@ fn test_modes() -> HashMap<String, ModeConfig> {
         modes.insert(
             key.to_string(),
             ModeConfig {
-                template_path: None,
                 template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
-                max_budget_usd: None,
-                max_turns: None,
-                components: None,
+                ..Default::default()
             },
         );
     }

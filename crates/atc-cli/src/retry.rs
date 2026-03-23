@@ -622,11 +622,9 @@ mod tests {
         config.modes.insert(
             "research".to_string(),
             atc_core::config::ModeConfig {
-                template_path: None,
-                template_inline: None,
                 max_turns: Some(500),
                 max_budget_usd: Some(5.0),
-                components: None,
+                ..Default::default()
             },
         );
 
