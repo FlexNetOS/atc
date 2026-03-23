@@ -135,15 +135,18 @@ impl TaskResolver {
     /// Tries the primary KB root first, then discovers sub-repos via `meta`.
     /// Returns the KB root path if found.
     async fn discover_kb_root(slug: &str, primary_kb_root: &Path) -> Option<PathBuf> {
-        // Try primary KB root first
-        if Self::kb_show_succeeds(slug, primary_kb_root).await {
-            return Some(primary_kb_root.to_path_buf());
-        }
+        // Prefer the primary KB root, but keep scanning so we can still warn
+        // if the same slug exists in multiple KBs.
+        let mut found = if Self::kb_show_succeeds(slug, primary_kb_root).await {
+            Some(primary_kb_root.to_path_buf())
+        } else {
+            None
+        };
 
         // Try multi-KB discovery via meta
         let sub_projects = Self::discover_meta_projects(primary_kb_root).await;
         if sub_projects.is_empty() {
-            return None;
+            return found;
         }
 
         debug!(
@@ -153,6 +156,8 @@ impl TaskResolver {
 
         // Check sub-projects concurrently with a bounded concurrency limit
         // to avoid exhausting file descriptors in large monorepos.
+        // Use `buffered` (not `buffer_unordered`) to preserve input order,
+        // giving deterministic "first match wins" semantics.
         use futures::stream::{self, StreamExt};
         let slug_owned = slug.to_string();
         let results: Vec<(PathBuf, bool)> = stream::iter(sub_projects.into_iter())
@@ -163,11 +168,10 @@ impl TaskResolver {
                     (p, hit)
                 }
             })
-            .buffer_unordered(16)
+            .buffered(16)
             .collect()
             .await;
 
-        let mut found: Option<PathBuf> = None;
         for (path, hit) in results {
             if hit {
                 if let Some(ref first) = found {

@@ -49,11 +49,31 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
         let key = key.trim();
         validate_env_key(key).map_err(|e| anyhow::anyhow!("line {}: {}", line_num + 1, e))?;
 
-        let value = strip_quotes(value.trim());
+        let value = value.trim();
+        let value = strip_inline_comment(value);
+        let value = strip_quotes(&value);
         env.insert(key.to_string(), value);
     }
 
     Ok(env)
+}
+
+/// Strip trailing inline comments from unquoted values.
+///
+/// Per POSIX shell convention, an unquoted ` #` (space then hash) starts a
+/// comment. Quoted values (starting with `"` or `'`) are returned as-is so
+/// that literal `#` characters inside quotes are preserved.
+fn strip_inline_comment(s: &str) -> String {
+    // Quoted values: don't strip anything
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        return s.to_string();
+    }
+    // Find first ` #` — everything after is a comment
+    if let Some(pos) = s.find(" #") {
+        s[..pos].trim_end().to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Strip matching outer quotes (single or double) from a value.
@@ -179,6 +199,28 @@ mod tests {
         let env = parse_env_contents(input).unwrap();
         assert_eq!(env.get("FOO").unwrap(), "bar");
         assert_eq!(env.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_inline_comments_stripped() {
+        let input = "FOO=bar # this is a comment\nBAZ=qux";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_inline_comment_preserved_in_quotes() {
+        let input = "FOO=\"value # not a comment\"";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "value # not a comment");
+    }
+
+    #[test]
+    fn test_hash_without_space_not_stripped() {
+        let input = "FOO=bar#baz";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "bar#baz");
     }
 
     #[test]

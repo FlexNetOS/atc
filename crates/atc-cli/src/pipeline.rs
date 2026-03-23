@@ -139,7 +139,45 @@ impl<'a> DispatchPipeline<'a> {
         let project_env = if dispatch_cfg.project_env {
             let env_path = worktree_path.join(".dispatch").join("env");
             if env_path.is_file() {
-                match atc_core::project_env::parse_env_file(&env_path) {
+                // Canonicalize both paths and verify env_path is within the worktree
+                // to prevent symlink-based path traversal attacks.
+                let wt_canon = match std::fs::canonicalize(&worktree_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        if wt_created {
+                            rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                        }
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(anyhow::anyhow!(
+                            "failed to canonicalize worktree path: {}",
+                            e
+                        ));
+                    }
+                };
+                let env_canon = match std::fs::canonicalize(&env_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        if wt_created {
+                            rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                        }
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(anyhow::anyhow!("failed to canonicalize env path: {}", e));
+                    }
+                };
+                if !env_canon.starts_with(&wt_canon) {
+                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                    if wt_created {
+                        rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                    }
+                    resolver.on_cleanup(&tmp_record, self.config, None).await;
+                    return Err(anyhow::anyhow!(
+                        ".dispatch/env path escapes worktree: {}",
+                        env_canon.display()
+                    ));
+                }
+                match atc_core::project_env::parse_env_file(&env_canon) {
                     Ok(penv) => {
                         tracing::debug!(
                             path = %env_path.display(),
@@ -195,9 +233,9 @@ impl<'a> DispatchPipeline<'a> {
             env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
         }
 
-        // Unset CLAUDECODE (default only if not already set)
-        env.entry("CLAUDECODE".to_string())
-            .or_insert_with(String::new);
+        // Always clear CLAUDECODE to prevent recursive agent-spawning
+        // (this must override resolver/project env, not just serve as a default)
+        env.insert("CLAUDECODE".to_string(), String::new());
 
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
