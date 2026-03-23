@@ -211,9 +211,15 @@ pub async fn run_health(
     // --- 7A: Cost threshold warnings ---
     // Emitted after 7B so that records refreshed by stale-record extraction
     // have their cost_usd populated before the warning pass.
+    // We warn for records that just transitioned (r.changed) OR that 7B just
+    // ran post-completion for (refreshed_ids) — the latter are stale records
+    // whose watcher died before post-completion, making them the most likely
+    // to have unusual cost values.
     let cost_threshold = config.health.cost_warning_threshold;
+    let refreshed_id_set: std::collections::HashSet<&str> =
+        refreshed_ids.iter().map(|s| s.as_str()).collect();
     for r in &results {
-        if !r.changed {
+        if !r.changed && !refreshed_id_set.contains(r.record.id.as_str()) {
             continue;
         }
         if let Some(msg) = cost_warning(&r.record, cost_threshold) {
