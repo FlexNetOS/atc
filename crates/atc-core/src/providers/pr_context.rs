@@ -1,9 +1,13 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::{info, warn};
 
 use super::{ContextOutput, ContextProvider, DispatchContext};
+
+/// Timeout for gh subprocess calls (REST API, GraphQL, pr view).
+const GH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Provider that prefetches PR data and generates triage/summary files.
 #[derive(Default)]
@@ -148,16 +152,20 @@ pub fn parse_pr_url(url: &str) -> anyhow::Result<(String, String, u64)> {
 
 /// Fetch PR metadata via `gh pr view`.
 async fn fetch_pr_metadata(pr_url: &str) -> anyhow::Result<Value> {
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            pr_url,
-            "--json",
-            "title,state,reviewDecision,additions,deletions,commits,headRefName",
-        ])
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        GH_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "title,state,reviewDecision,additions,deletions,commits,headRefName",
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gh pr view timed out"))??;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -171,11 +179,18 @@ async fn fetch_pr_metadata(pr_url: &str) -> anyhow::Result<Value> {
 
 /// Fetch review comments via REST API.
 async fn fetch_review_comments(owner: &str, repo: &str, pr_number: u64) -> anyhow::Result<Value> {
-    let endpoint = format!("repos/{}/{}/pulls/{}/comments", owner, repo, pr_number);
-    let output = tokio::process::Command::new("gh")
-        .args(["api", &endpoint, "--paginate"])
-        .output()
-        .await?;
+    let endpoint = format!(
+        "repos/{}/{}/pulls/{}/comments?per_page=100",
+        owner, repo, pr_number
+    );
+    let output = tokio::time::timeout(
+        GH_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args(["api", &endpoint])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gh api comments timed out"))??;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -189,11 +204,18 @@ async fn fetch_review_comments(owner: &str, repo: &str, pr_number: u64) -> anyho
 
 /// Fetch reviews via REST API.
 async fn fetch_reviews(owner: &str, repo: &str, pr_number: u64) -> anyhow::Result<Value> {
-    let endpoint = format!("repos/{}/{}/pulls/{}/reviews", owner, repo, pr_number);
-    let output = tokio::process::Command::new("gh")
-        .args(["api", &endpoint, "--paginate"])
-        .output()
-        .await?;
+    let endpoint = format!(
+        "repos/{}/{}/pulls/{}/reviews?per_page=100",
+        owner, repo, pr_number
+    );
+    let output = tokio::time::timeout(
+        GH_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args(["api", &endpoint])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gh api reviews timed out"))??;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -232,21 +254,25 @@ async fn fetch_review_threads(owner: &str, repo: &str, pr_number: u64) -> anyhow
   }
 }"#;
 
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={}", query),
-            "-F",
-            &format!("owner={}", owner),
-            "-F",
-            &format!("repo={}", repo),
-            "-F",
-            &format!("pr={}", pr_number),
-        ])
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        GH_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={}", query),
+                "-F",
+                &format!("owner={}", owner),
+                "-F",
+                &format!("repo={}", repo),
+                "-F",
+                &format!("pr={}", pr_number),
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gh api graphql timed out"))??;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -567,11 +593,15 @@ async fn fetch_single_comment(comment_url: &str) -> Option<String> {
 
 /// Fetch a single comment from a gh api endpoint and format it.
 async fn fetch_comment_by_endpoint(endpoint: &str) -> Option<String> {
-    let output = tokio::process::Command::new("gh")
-        .args(["api", endpoint])
-        .output()
-        .await
-        .ok()?;
+    let output = tokio::time::timeout(
+        GH_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args(["api", endpoint])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
 
     if !output.status.success() {
         return None;
