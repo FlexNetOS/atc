@@ -3,8 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  repository_dispatch:
-    types: [release-tagged]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -80,6 +78,13 @@ jobs:
 
       - name: Ensure target is installed
         run: rustup target add ${{ matrix.target }}
+
+      - name: Verify cross-compiler
+        run: |
+          if ! command -v ${{ matrix.linker }} &>/dev/null; then
+            echo "::error::Cross-compiler '${{ matrix.linker }}' not found. Install via: brew install messense/macos-cross-toolchains/${{ matrix.target }}"
+            exit 1
+          fi
 
       - name: Build
         env:
@@ -230,13 +235,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "atc ${VERSION}"
-          git push -f -u origin "$BRANCH"
+          git push -u origin "$BRANCH"
 
-          gh pr create \
+          # Create PR (may already exist from a previous run)
+          if ! gh pr create \
             --title "atc ${VERSION}" \
             --body "Automated formula update for atc v${VERSION}" \
             --base main \
-            --head "$BRANCH" || true
+            --head "$BRANCH" 2>&1; then
+            echo "::warning::PR creation failed or PR already exists — continuing"
+          fi
 
           # Auto-merge if we have permission
-          gh pr merge "$BRANCH" --auto --squash || true
+          if ! gh pr merge "$BRANCH" --auto --squash 2>&1; then
+            echo "::warning::Auto-merge request failed — manual merge may be required"
+          fi
