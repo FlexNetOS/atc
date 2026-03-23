@@ -3,9 +3,11 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
 use atc_core::stream_json;
-use atc_core::types::{DispatchOpts, Status};
+use atc_core::types::{RunOpts, Status};
+use std::collections::HashMap;
 use tracing::{info, warn};
 
+use crate::pipeline::{resolver_by_name, DispatchPipeline};
 use crate::resolve::resolve_record;
 use crate::subprocess::run_cmd_with_timeout;
 
@@ -110,9 +112,14 @@ pub async fn run_retry(
     if record.retries >= max_retries {
         registry.update_status(id, Status::NeedsHuman).await?;
 
-        // Unassign in git-kb (non-fatal)
-        if let Some(ref slug) = record.task_slug {
-            kb_unassign(slug, config).await;
+        // Resolver cleanup (non-fatal)
+        match resolver_by_name(&record.resolver) {
+            Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+            None => warn!(
+                id,
+                resolver = %record.resolver,
+                "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+            ),
         }
 
         anyhow::bail!(
@@ -120,16 +127,31 @@ pub async fn run_retry(
         );
     }
 
-    // 4. Require a task slug before doing any I/O
-    let slug = record.task_slug.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("cannot retry dispatch {id}: this dispatch has no task slug")
+    // 4. Require either original_input or task_slug so we know what to re-dispatch
+    let slug = record
+        .original_input
+        .as_deref()
+        .or(record.task_slug.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot retry dispatch {id}: no original_input or task slug recorded")
+        })?;
+
+    // 5. Validate resolver is known before mutating any external state.
+    // This prevents setting status=draft or running cleanup for a resolver
+    // we can't actually re-dispatch through.
+    let recorded_resolver = resolver_by_name(&record.resolver).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot retry dispatch {}: unknown resolver '{}'",
+            id,
+            record.resolver
+        )
     })?;
 
-    // 5. Classify failure and compute budget/turns adjustments
+    // 6. Classify failure and compute budget/turns adjustments
     let (max_budget_override, max_turns_override) =
         classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
 
-    // 6. Kill old tmux session (non-fatal, with timeout)
+    // 6b. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
@@ -150,31 +172,78 @@ pub async fn run_retry(
         _ => {}
     }
 
-    // 7. Clear git-kb claim (non-fatal)
+    // 7. Set task status to draft BEFORE cleanup/re-dispatch to avoid racing
+    // Guard: only reset to draft if no other live dispatch exists for this slug
     if let Some(ref task_slug) = record.task_slug {
-        kb_unassign(task_slug, config).await;
-        kb_set_status_draft(task_slug, config).await;
+        let has_other_live = match registry.find_by_task_slug(task_slug).await {
+            Ok(records) => records
+                .iter()
+                .any(|r| r.id != *id && !r.status.is_terminal()),
+            Err(e) => {
+                warn!(id, error = %e, "failed to check sibling dispatches; skipping status=draft for safety");
+                true // conservative: skip draft reset
+            }
+        };
+        if !has_other_live {
+            kb_set_status_draft(task_slug, config).await;
+        } else {
+            info!(
+                id,
+                task_slug, "skipping status=draft: another live dispatch exists for this slug"
+            );
+        }
     }
 
-    // 8. Re-dispatch
-    let retry_num = record.retries + 1;
-    println!("Re-dispatching {slug} (retry {retry_num}/{max_retries})...");
+    // 7b. Resolver cleanup (non-fatal) — replaces hardcoded git-kb unassign
+    // Use a fresh instance since recorded_resolver is consumed below for re-dispatch.
+    if let Some(cleanup_resolver) = resolver_by_name(&record.resolver) {
+        cleanup_resolver
+            .on_cleanup(&record, config, Some(registry))
+            .await;
+    }
 
-    let opts = DispatchOpts {
-        slug: slug.to_string(),
-        cli_mode: Some(record.mode.clone()),
-        directive: None,
+    // 8. Re-dispatch via pipeline
+    let retry_num = record.retries + 1;
+    // Print the dispatch ID (not original_input which may contain raw prompt text)
+    println!("Re-dispatching {} (retry {retry_num}/{max_retries})...", id);
+
+    // Recover the original input for faithful retry. Falls back to task slug
+    // for records created before original_input was persisted.
+    let input = record
+        .original_input
+        .clone()
+        .unwrap_or_else(|| slug.to_string());
+    let opts = RunOpts {
+        input: input.clone(),
+        mode: Some(record.mode.clone()),
+        // TODO: Template params (--param key=val) are not yet persisted in
+        // DispatchRecord, so retries re-render with empty bindings. Track in
+        // a future schema migration (add `params_json TEXT` column).
+        params: HashMap::new(),
         pr_url: record.pr_url.clone(),
         inline: false,
         force: false,
         dry_run: false,
-        max_budget_override,
-        max_turns_override,
+        directives: None,
+        no_worktree: record.no_worktree,
+        max_budget_usd: max_budget_override,
+        max_turns: max_turns_override,
         retries: record.retries + 1,
+        list: false,
+    };
+
+    // Use the recorded resolver directly instead of rebuilding the full chain.
+    // This prevents resolver-order issues where e.g. a task slug might match
+    // the prompt resolver if task resolver is ordered after it.
+    let pipeline = DispatchPipeline {
+        resolvers: vec![recorded_resolver],
+        config,
+        registry,
+        executor,
     };
 
     let original_status = record.status;
-    let outcome = match crate::dispatch::dispatch(config, registry, executor, &opts).await {
+    let outcome = match pipeline.execute(&input, &opts).await {
         Ok(o) => o,
         Err(e) => {
             warn!(id, error = %e, "dispatch failed during retry; rolling back to {original_status}");
@@ -205,38 +274,6 @@ pub async fn run_retry(
     }
 
     Ok(())
-}
-
-/// Non-fatal: unassign task in git-kb.
-async fn kb_unassign(slug: &str, config: &AtcConfig) {
-    let kb_root = match config
-        .dispatch
-        .resolved_meta_workspace_root(config.config_dir.as_deref())
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let status = run_cmd_with_timeout(
-        tokio::process::Command::new("git-kb")
-            .args(["unassign", slug])
-            .env("GITKB_ROOT", &kb_root),
-        CMD_TIMEOUT,
-    )
-    .await;
-
-    match status {
-        Ok(Some(s)) if !s.success() => {
-            warn!(slug, "git-kb unassign failed (non-fatal)");
-        }
-        Ok(None) => {
-            warn!(slug, "git-kb unassign timed out (non-fatal)");
-        }
-        Err(e) => {
-            warn!(slug, error = %e, "git-kb unassign failed (non-fatal)");
-        }
-        _ => {}
-    }
 }
 
 /// Non-fatal: set task status to draft in git-kb.
@@ -409,6 +446,8 @@ mod tests {
             retries,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
+            original_input: None,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,
@@ -525,9 +564,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_rejects_no_task_slug() {
+    async fn test_retry_rejects_no_input_or_slug() {
         let mut record = sample_record("test-id-1", 0);
         record.task_slug = None;
+        record.original_input = None;
         let registry = MockRegistry::new(vec![record]);
         let executor = MockExecutor;
         let config = AtcConfig::default();
@@ -536,8 +576,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("no task slug"),
-            "expected no-task-slug error, got: {err}"
+            err.contains("no original_input or task slug"),
+            "expected no-input error, got: {err}"
         );
     }
 

@@ -4,7 +4,8 @@ use atc_core::registry::Registry;
 use atc_core::types::Status;
 use tracing::warn;
 
-use crate::kb::{kb_unassign_if_sole, kill_tmux_session};
+use crate::kb::kill_tmux_session;
+use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
 
 /// Execute the `atc stop` command.
@@ -36,9 +37,14 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
         registry.update_status(id, Status::Stopped).await?;
     }
 
-    // 5. Unassign task in git-kb (best-effort, only if no other live dispatch for same slug)
-    if let Some(ref slug) = record.task_slug {
-        kb_unassign_if_sole(registry, id, slug, config).await;
+    // 5. Resolver cleanup (replaces hardcoded git-kb unassign)
+    match resolver_by_name(&record.resolver) {
+        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+        None => warn!(
+            id,
+            resolver = %record.resolver,
+            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+        ),
     }
 
     // 6. Print result
@@ -181,6 +187,8 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
+            original_input: None,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

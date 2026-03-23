@@ -123,6 +123,8 @@ mod tests {
             retries: 1,
             resolver: "task".to_string(),
             pr_url: Some("https://github.com/harmony-labs/gitkb-core/pull/275".to_string()),
+            no_worktree: false,
+            original_input: None,
             checks: HealthChecks {
                 agent_exited_clean: true,
                 branch_pushed: true,

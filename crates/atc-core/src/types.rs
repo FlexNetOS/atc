@@ -19,6 +19,11 @@ pub struct DispatchRecord {
     /// Which InputResolver created this dispatch ("task", "template", "prompt").
     pub resolver: String,
     pub pr_url: Option<String>,
+    /// Whether the dispatch was created with `--no-worktree` (run in current directory).
+    pub no_worktree: bool,
+    /// The raw input string passed to the pipeline (slug, template name, or prompt).
+    /// Used by retry to faithfully reconstruct the original `RunOpts`.
+    pub original_input: Option<String>,
     pub checks: HealthChecks,
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
@@ -55,7 +60,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// Returns true for terminal states (Done, Failed, Stopped, NeedsHuman).
+    /// Returns true for terminal states (Done, Failed, Stopped, NeedsHuman, NeedsReview).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -155,20 +160,35 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// Options for a single dispatch invocation.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DispatchOpts {
-    pub slug: String,
-    pub cli_mode: Option<Mode>,
-    pub directive: Option<String>,
+/// Options for an `atc run` invocation.
+#[derive(Debug, Clone)]
+pub struct RunOpts {
+    /// Raw input string (joined from CLI positional args).
+    pub input: String,
+    /// Explicit mode override from `--mode`.
+    pub mode: Option<Mode>,
+    /// Key=value pairs for template rendering.
+    pub params: std::collections::HashMap<String, String>,
+    /// PR URL for review-fix / pr-comments modes.
     pub pr_url: Option<String>,
+    /// Run inline (synchronous, no tmux).
     pub inline: bool,
+    /// Force dispatch even if worktree is in use.
     pub force: bool,
+    /// Preview config without launching.
     pub dry_run: bool,
-    pub max_budget_override: Option<f64>,
-    pub max_turns_override: Option<u32>,
-    /// Retry count to propagate into the new dispatch record (default 0).
+    /// Comma-separated directive override.
+    pub directives: Option<String>,
+    /// Skip worktree creation (run in current directory).
+    pub no_worktree: bool,
+    /// Override max budget (USD).
+    pub max_budget_usd: Option<f64>,
+    /// Override max turns.
+    pub max_turns: Option<u32>,
+    /// Retry count (propagated on retry).
     pub retries: u32,
+    /// List available templates instead of dispatching.
+    pub list: bool,
 }
 
 /// Outcome of a successful dispatch.

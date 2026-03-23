@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS dispatches (
   retries                   INTEGER NOT NULL DEFAULT 0,
   resolver                  TEXT NOT NULL,
   pr_url                    TEXT,
+  no_worktree               INTEGER NOT NULL DEFAULT 0,
+  original_input            TEXT,
   check_agent_exited_clean  INTEGER NOT NULL DEFAULT 0,
   check_branch_pushed       INTEGER NOT NULL DEFAULT 0,
   check_pr_created          INTEGER NOT NULL DEFAULT 0,
@@ -149,6 +151,32 @@ impl SqliteRegistry {
             .await?;
             if has_artifacts == 0 {
                 sqlx::query("ALTER TABLE dispatches ADD COLUMN artifacts TEXT")
+                    .execute(pool)
+                    .await?;
+            }
+
+            // Add no_worktree column if missing (Phase 4B migration)
+            let (has_no_worktree,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'no_worktree'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_no_worktree == 0 {
+                sqlx::query(
+                    "ALTER TABLE dispatches ADD COLUMN no_worktree INTEGER NOT NULL DEFAULT 0",
+                )
+                .execute(pool)
+                .await?;
+            }
+
+            // Add original_input column if missing (retry fidelity migration)
+            let (has_original_input,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'original_input'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_original_input == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN original_input TEXT")
                     .execute(pool)
                     .await?;
             }
@@ -225,6 +253,8 @@ impl SqliteRegistry {
                 .map_err(|_| anyhow::anyhow!("invalid retries value in database"))?,
             resolver: row.get("resolver"),
             pr_url: row.get("pr_url"),
+            no_worktree: row.get::<i32, _>("no_worktree") != 0,
+            original_input: row.get("original_input"),
             checks: HealthChecks {
                 agent_exited_clean: row.get::<i32, _>("check_agent_exited_clean") != 0,
                 branch_pushed: row.get::<i32, _>("check_branch_pushed") != 0,
@@ -256,12 +286,13 @@ impl Registry for SqliteRegistry {
         sqlx::query(
             r#"INSERT INTO dispatches (
                 id, task_slug, branch, worktree_path, session, log_file, status, mode, retries,
-                resolver, pr_url, check_agent_exited_clean, check_branch_pushed, check_pr_created,
-                check_ci_passed, check_reviews_approved, check_threads_resolved,
-                cost_usd, num_turns, duration_ms, dispatched_at, updated_at
+                resolver, pr_url, no_worktree, original_input, check_agent_exited_clean,
+                check_branch_pushed, check_pr_created, check_ci_passed, check_reviews_approved,
+                check_threads_resolved, cost_usd, num_turns, duration_ms, dispatched_at,
+                updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24
             )"#,
         )
         .bind(&record.id)
@@ -285,6 +316,8 @@ impl Registry for SqliteRegistry {
         .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
         .bind(&record.resolver)
         .bind(&record.pr_url)
+        .bind(record.no_worktree as i32)
+        .bind(&record.original_input)
         .bind(record.checks.agent_exited_clean as i32)
         .bind(record.checks.branch_pushed as i32)
         .bind(record.checks.pr_created as i32)
@@ -603,6 +636,8 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
+            original_input: None,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,
@@ -790,6 +825,8 @@ mod tests {
             reviews_approved: true,
             threads_resolved: true,
         };
+        record.no_worktree = true;
+        record.original_input = Some("review".to_string());
         registry.insert(&record).await.unwrap();
 
         let fetched = registry.get("full-test").await.unwrap().unwrap();
@@ -798,6 +835,8 @@ mod tests {
         assert_eq!(fetched.num_turns, record.num_turns);
         assert_eq!(fetched.duration_ms, record.duration_ms);
         assert_eq!(fetched.checks, record.checks);
+        assert_eq!(fetched.no_worktree, record.no_worktree);
+        assert_eq!(fetched.original_input, record.original_input);
     }
 
     // --- Error path tests ---
@@ -1213,5 +1252,87 @@ mod tests {
 
         let all = registry.list(StatusFilter::all()).await.unwrap();
         assert_eq!(all.len(), 10);
+    }
+
+    /// Regression test: open a legacy database that lacks `no_worktree` and
+    /// `original_input` columns and verify `migrate_if_needed()` adds them so
+    /// records round-trip with the correct defaults.
+    #[tokio::test]
+    async fn test_migration_adds_no_worktree_and_original_input_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+
+        // Create a legacy schema WITHOUT no_worktree and original_input columns.
+        {
+            let url = format!("sqlite:{}?mode=rwc", db_path.display());
+            let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+            sqlx::query(
+                r#"CREATE TABLE dispatches (
+                    id TEXT PRIMARY KEY,
+                    task_slug TEXT,
+                    branch TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    session TEXT NOT NULL,
+                    log_file TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    mode TEXT NOT NULL,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    resolver TEXT NOT NULL,
+                    pr_url TEXT,
+                    check_agent_exited_clean INTEGER NOT NULL DEFAULT 0,
+                    check_branch_pushed INTEGER NOT NULL DEFAULT 0,
+                    check_pr_created INTEGER NOT NULL DEFAULT 0,
+                    check_ci_passed INTEGER NOT NULL DEFAULT 0,
+                    check_reviews_approved INTEGER NOT NULL DEFAULT 0,
+                    check_threads_resolved INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL,
+                    num_turns INTEGER,
+                    duration_ms INTEGER,
+                    artifacts TEXT,
+                    dispatched_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Insert a record using the old schema
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                r#"INSERT INTO dispatches (
+                    id, task_slug, branch, worktree_path, session, log_file,
+                    status, mode, retries, resolver, dispatched_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+            )
+            .bind("legacy-id")
+            .bind("tasks/old-task")
+            .bind("tasks--old-task")
+            .bind("/tmp/old")
+            .bind("old-session")
+            .bind("/tmp/old.jsonl")
+            .bind("running")
+            .bind("implement")
+            .bind(0i32)
+            .bind("task")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            pool.close().await;
+        }
+
+        // Re-open through SqliteRegistry::open() which runs migrate_if_needed()
+        let registry = SqliteRegistry::open(&db_path).await.unwrap();
+        let fetched = registry.get("legacy-id").await.unwrap().unwrap();
+
+        // Migrated columns should have sensible defaults
+        assert!(!fetched.no_worktree, "no_worktree should default to false");
+        assert_eq!(
+            fetched.original_input, None,
+            "original_input should default to None"
+        );
     }
 }

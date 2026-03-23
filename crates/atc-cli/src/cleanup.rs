@@ -5,7 +5,8 @@ use atc_core::types::Status;
 use atc_core::worktree::cleanup_worktree;
 use tracing::warn;
 
-use crate::kb::{kb_unassign_if_sole, kill_tmux_session};
+use crate::kb::kill_tmux_session;
+use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
 
 /// Execute the `atc cleanup` command.
@@ -65,14 +66,19 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
         removed = cleanup_worktree(worktree_path, &worktree_base).await?;
     }
 
-    // 3. Unassign task in git-kb (best-effort, only if no other live dispatch for same slug)
-    if let Some(ref slug) = record.task_slug {
-        kb_unassign_if_sole(registry, id, slug, config).await;
-    }
-
-    // 4. Update status to Stopped if not already terminal
+    // 3. Update status to Stopped if not already terminal
     if !record.status.is_terminal() {
         registry.update_status(id, Status::Stopped).await?;
+    }
+
+    // 4. Resolver cleanup (replaces hardcoded git-kb unassign)
+    match resolver_by_name(&record.resolver) {
+        Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
+        None => warn!(
+            id = %record.id,
+            resolver = %record.resolver,
+            "unknown resolver name; skipping on_cleanup — task state may be orphaned"
+        ),
     }
 
     Ok(removed)
@@ -258,6 +264,8 @@ mod tests {
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
+            no_worktree: false,
+            original_input: None,
             checks: HealthChecks::default(),
             cost_usd: None,
             num_turns: None,

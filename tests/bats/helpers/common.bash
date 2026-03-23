@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   retries                   INTEGER NOT NULL DEFAULT 0,
   resolver                  TEXT NOT NULL,
   pr_url                    TEXT,
+  no_worktree               INTEGER NOT NULL DEFAULT 0,
   check_agent_exited_clean  INTEGER NOT NULL DEFAULT 0,
   check_branch_pushed       INTEGER NOT NULL DEFAULT 0,
   check_pr_created          INTEGER NOT NULL DEFAULT 0,

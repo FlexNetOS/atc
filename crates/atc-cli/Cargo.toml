@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 atc-core = { path = "../atc-core" }
+async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 anyhow.workspace = true
