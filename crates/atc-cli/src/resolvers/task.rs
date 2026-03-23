@@ -151,13 +151,21 @@ impl TaskResolver {
             "searching sub-projects for task slug"
         );
 
-        // Check all sub-projects concurrently to avoid sequential latency
-        let results: Vec<(&PathBuf, bool)> = futures::future::join_all(
-            sub_projects
-                .iter()
-                .map(|p| async move { (p, Self::kb_show_succeeds(slug, p).await) }),
-        )
-        .await;
+        // Check sub-projects concurrently with a bounded concurrency limit
+        // to avoid exhausting file descriptors in large monorepos.
+        use futures::stream::{self, StreamExt};
+        let slug_owned = slug.to_string();
+        let results: Vec<(PathBuf, bool)> = stream::iter(sub_projects.into_iter())
+            .map(|p| {
+                let s = slug_owned.clone();
+                async move {
+                    let hit = Self::kb_show_succeeds(&s, &p).await;
+                    (p, hit)
+                }
+            })
+            .buffer_unordered(16)
+            .collect()
+            .await;
 
         let mut found: Option<PathBuf> = None;
         for (path, hit) in results {
@@ -171,7 +179,7 @@ impl TaskResolver {
                     );
                 } else {
                     debug!(slug, kb_root = %path.display(), "found task in sub-project KB");
-                    found = Some(path.clone());
+                    found = Some(path);
                 }
             }
         }
@@ -336,13 +344,15 @@ impl InputResolver for TaskResolver {
 
         // Use cached KB root from can_resolve() if available for the same slug,
         // otherwise perform full discovery.
-        let cached = self
-            .last_discovered
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-            .filter(|(s, _)| s == slug)
-            .map(|(_, path)| path);
+        // Only consume the cache if the slug matches; otherwise leave it
+        // for a potential later call with the correct slug.
+        let cached = self.last_discovered.lock().ok().and_then(|mut guard| {
+            if guard.as_ref().is_some_and(|(s, _)| s == slug) {
+                guard.take().map(|(_, path)| path)
+            } else {
+                None
+            }
+        });
 
         let kb_root = if let Some(path) = cached {
             debug!(slug, kb_root = %path.display(), "using cached KB root from can_resolve");
