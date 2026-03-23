@@ -80,13 +80,11 @@ impl TaskResolver {
         if let Some(obj) = json.as_object() {
             for (_name, info) in obj {
                 // Each entry may be an object with "path" or just a string path
-                let rel_path = if let Some(s) = info.as_str() {
-                    Some(s.to_string())
-                } else if let Some(p) = info.get("path").and_then(|v| v.as_str()) {
-                    Some(p.to_string())
-                } else {
-                    None
-                };
+                let rel_path = info.as_str().map(|s| s.to_string()).or_else(|| {
+                    info.get("path")
+                        .and_then(|v| v.as_str())
+                        .map(|p| p.to_string())
+                });
                 if let Some(rel) = rel_path {
                     let abs = if Path::new(&rel).is_absolute() {
                         PathBuf::from(&rel)
