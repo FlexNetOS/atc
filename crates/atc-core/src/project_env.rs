@@ -22,6 +22,8 @@ pub fn parse_env_file(path: &Path) -> Result<HashMap<String, String>> {
 
 /// Parse env file contents (separated for testability).
 pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
+    // Strip optional UTF-8 BOM (U+FEFF) that some editors prepend
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     let mut env = HashMap::new();
 
     for (line_num, raw_line) in contents.lines().enumerate() {
@@ -55,6 +57,11 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
 }
 
 /// Strip matching outer quotes (single or double) from a value.
+///
+/// Note: escape sequences (e.g. `\"`, `\\`) inside quoted values are **not**
+/// interpreted — they are preserved literally. This is intentional: we avoid
+/// evaluating shell semantics for safety (see also the `$()` / backtick note
+/// in `parse_env_contents`).
 fn strip_quotes(s: &str) -> String {
     if s.len() >= 2
         && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
@@ -164,6 +171,14 @@ mod tests {
         let input = "FOO=\"bar'";
         let env = parse_env_contents(input).unwrap();
         assert_eq!(env.get("FOO").unwrap(), "\"bar'");
+    }
+
+    #[test]
+    fn test_utf8_bom_stripped() {
+        let input = "\u{feff}FOO=bar\nBAZ=qux";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "qux");
     }
 
     #[test]

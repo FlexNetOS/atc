@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use atc_core::config::AtcConfig;
@@ -16,9 +16,26 @@ use crate::subprocess::run_cmd_with_timeout;
 const KB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Resolver for GitKB task dispatches. Consolidates ALL `git kb` interactions.
-pub struct TaskResolver;
+pub struct TaskResolver {
+    /// Cache from the last successful `discover_kb_root` call, keyed by slug.
+    /// Avoids redundant subprocess spawns when `can_resolve` and `resolve` run
+    /// back-to-back for the same input.
+    last_discovered: std::sync::Mutex<Option<(String, PathBuf)>>,
+}
+
+impl Default for TaskResolver {
+    fn default() -> Self {
+        Self {
+            last_discovered: std::sync::Mutex::new(None),
+        }
+    }
+}
 
 impl TaskResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Try `git kb show --json <slug>` against a specific KB root.
     /// Returns true if the command succeeds.
     async fn kb_show_succeeds(slug: &str, kb_root: &Path) -> bool {
@@ -86,12 +103,14 @@ impl TaskResolver {
                         .map(|p| p.to_string())
                 });
                 if let Some(rel) = rel_path {
-                    let abs = if Path::new(&rel).is_absolute() {
-                        PathBuf::from(&rel)
-                    } else {
-                        workspace_root.join(&rel)
-                    };
-                    paths.push(abs);
+                    let rel = Path::new(&rel);
+                    if rel.is_absolute()
+                        || rel.components().any(|c| matches!(c, Component::ParentDir))
+                    {
+                        warn!(path = %rel.display(), "skipping unsafe meta project path");
+                        continue;
+                    }
+                    paths.push(workspace_root.join(rel));
                 }
             }
         }
@@ -196,6 +215,17 @@ impl TaskResolver {
         );
     }
 
+    /// Compute the primary KB root from config, falling back to cwd.
+    /// Shared by `resolve()` and `on_cleanup()` so both use the same fallback.
+    fn primary_kb_root(config: &AtcConfig) -> PathBuf {
+        config
+            .dispatch
+            .resolved_meta_workspace_root(config.config_dir.as_deref())
+            .ok()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+    }
+
     /// CAS-claim a task via `git kb assign`.
     async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()> {
         let child = tokio::process::Command::new("git-kb")
@@ -263,14 +293,16 @@ impl InputResolver for TaskResolver {
     }
 
     async fn can_resolve(&self, input: &str, config: &AtcConfig) -> bool {
-        let kb_root = config
-            .dispatch
-            .resolved_meta_workspace_root(config.config_dir.as_deref())
-            .ok()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_default();
-
-        Self::discover_kb_root(input, &kb_root).await.is_some()
+        let primary = Self::primary_kb_root(config);
+        if let Some(found) = Self::discover_kb_root(input, &primary).await {
+            // Cache the result so resolve() can skip the redundant discovery
+            if let Ok(mut cache) = self.last_discovered.lock() {
+                *cache = Some((input.to_string(), found));
+            }
+            true
+        } else {
+            false
+        }
     }
 
     async fn resolve(
@@ -281,21 +313,30 @@ impl InputResolver for TaskResolver {
     ) -> Result<ResolvedInput> {
         let slug = input;
 
-        // Resolve kb_root — try primary, then multi-KB discovery
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let primary_kb_root = config
-            .dispatch
-            .resolved_meta_workspace_root(config.config_dir.as_deref())
-            .unwrap_or_else(|_| cwd.clone());
+        // Use cached KB root from can_resolve() if available for the same slug,
+        // otherwise perform full discovery.
+        let cached = self
+            .last_discovered
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+            .filter(|(s, _)| s == slug)
+            .map(|(_, path)| path);
 
-        let kb_root = Self::discover_kb_root(slug, &primary_kb_root)
-            .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "task slug '{}' not found in any KB (searched primary root and meta sub-projects)",
-                    slug
-                )
-            })?;
+        let kb_root = if let Some(path) = cached {
+            debug!(slug, kb_root = %path.display(), "using cached KB root from can_resolve");
+            path
+        } else {
+            let primary_kb_root = Self::primary_kb_root(config);
+            Self::discover_kb_root(slug, &primary_kb_root)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "task slug '{}' not found in any KB (searched primary root and meta sub-projects)",
+                        slug
+                    )
+                })?
+        };
 
         // 1. Resolve mode
         let mode = Self::resolve_mode(opts.mode.clone(), slug, &kb_root).await?;
@@ -349,6 +390,7 @@ impl InputResolver for TaskResolver {
             branch,
             dispatch_id,
             env_overrides,
+            kb_root: Some(kb_root),
         })
     }
 
@@ -383,20 +425,8 @@ impl InputResolver for TaskResolver {
                 }
             }
 
-            // Use the same kb_root fallback as resolve() — config → cwd
-            let kb_root = config
-                .dispatch
-                .resolved_meta_workspace_root(config.config_dir.as_deref())
-                .ok()
-                .or_else(|| std::env::current_dir().ok());
-            if let Some(kb_root) = kb_root {
-                Self::unassign_task(slug, &kb_root).await;
-            } else {
-                warn!(
-                    slug,
-                    "could not resolve kb_root for unassign (no config, no cwd)"
-                );
-            }
+            let kb_root = Self::primary_kb_root(config);
+            Self::unassign_task(slug, &kb_root).await;
         }
     }
 }
@@ -407,18 +437,23 @@ mod tests {
 
     #[test]
     fn test_task_resolver_name() {
-        let resolver = TaskResolver;
+        let resolver = TaskResolver::new();
         assert_eq!(resolver.name(), "task");
     }
 
     #[tokio::test]
     async fn test_discover_meta_projects_meta_not_available() {
-        // When meta is not in PATH, discovery should return empty vec (graceful skip)
+        // Ensure `meta` is not found by the subprocess
         let tmp = tempfile::tempdir().unwrap();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: test runs single-threaded (tokio::test default)
+        unsafe { std::env::set_var("PATH", "") };
         let projects = TaskResolver::discover_meta_projects(tmp.path()).await;
-        // This may or may not be empty depending on whether `meta` is installed,
-        // but it should NOT panic or error.
-        let _ = projects;
+        unsafe { std::env::set_var("PATH", &original_path) };
+        assert!(
+            projects.is_empty(),
+            "expected empty vec when meta is not available"
+        );
     }
 
     #[tokio::test]

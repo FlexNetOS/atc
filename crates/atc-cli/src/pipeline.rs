@@ -92,7 +92,9 @@ impl<'a> DispatchPipeline<'a> {
             .ok()
             .or_else(|| meta.as_ref().map(|m| m.workspace_root.clone()))
             .unwrap_or_else(|| cwd.clone());
-        let kb_root = &workspace_root;
+        // Use resolver-discovered KB root when available (e.g. multi-KB discovery),
+        // falling back to workspace_root for resolvers that don't set it.
+        let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
 
         let (worktree_path, wt_created, wt_is_meta) = if opts.no_worktree {
             // Run in current directory, no worktree creation
@@ -168,26 +170,34 @@ impl<'a> DispatchPipeline<'a> {
         let mut env = project_env;
         env.extend(resolved.env_overrides.clone());
 
-        // GH_TOKEN resolution
-        match resolve_gh_token().await {
-            Ok(token) => {
-                env.insert("GH_TOKEN".to_string(), token);
-            }
-            Err(e) => {
-                warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+        // Pipeline defaults — use entry().or_insert() so resolver/project env
+        // can override these (priority: resolver > project > defaults).
+
+        // GH_TOKEN resolution (default only if not already set by resolver/project)
+        if !env.contains_key("GH_TOKEN") {
+            match resolve_gh_token().await {
+                Ok(token) => {
+                    env.insert("GH_TOKEN".to_string(), token);
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+                }
             }
         }
 
-        // AGENT_ALLOWED_PATHS
-        let extra_paths: Vec<String> = env
-            .get("GITKB_ROOT")
-            .map(|r| vec![r.clone()])
-            .unwrap_or_default();
-        let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
-        env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
+        // AGENT_ALLOWED_PATHS (default only if not already set)
+        if !env.contains_key("AGENT_ALLOWED_PATHS") {
+            let extra_paths: Vec<String> = env
+                .get("GITKB_ROOT")
+                .map(|r| vec![r.clone()])
+                .unwrap_or_default();
+            let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
+            env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
+        }
 
-        // Unset CLAUDECODE
-        env.insert("CLAUDECODE".to_string(), String::new());
+        // Unset CLAUDECODE (default only if not already set)
+        env.entry("CLAUDECODE".to_string())
+            .or_insert_with(String::new);
 
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
