@@ -166,6 +166,7 @@ impl InputResolver for TemplateResolver {
             branch,
             dispatch_id,
             env_overrides: std::collections::HashMap::new(),
+            kb_root: None,
         })
     }
 

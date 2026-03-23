@@ -267,6 +267,7 @@ mod tests {
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),
+            kb_root: None,
             cost_usd: None,
             num_turns: None,
             duration_ms: None,

@@ -11,7 +11,7 @@ use atc_core::resolver::InputResolver;
 /// (stop/cleanup/close/retry lookups). Add new resolvers here only.
 pub fn make_resolver(name: &str) -> Option<Box<dyn InputResolver>> {
     match name {
-        "task" => Some(Box::new(task::TaskResolver)),
+        "task" => Some(Box::new(task::TaskResolver::new())),
         "template" => Some(Box::new(template::TemplateResolver)),
         "prompt" => Some(Box::new(prompt::PromptResolver)),
         _ => None,

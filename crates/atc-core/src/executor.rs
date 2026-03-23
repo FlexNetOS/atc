@@ -379,7 +379,7 @@ fn spawn_stream_to_log<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 /// Validate that an environment variable key is safe for shell `export`.
 /// Accepts only `[A-Za-z_][A-Za-z0-9_]*` — the POSIX portable name set.
 /// Rejects keys that could enable shell injection (e.g., `x; rm -rf /`).
-fn validate_env_key(key: &str) -> anyhow::Result<()> {
+pub fn validate_env_key(key: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !key.is_empty(),
         "environment variable key must not be empty"

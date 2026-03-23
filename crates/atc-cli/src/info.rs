@@ -133,6 +133,7 @@ mod tests {
                 reviews_approved: true,
                 threads_resolved: true,
             },
+            kb_root: None,
             cost_usd: Some(8.59),
             num_turns: Some(47),
             duration_ms: Some(592_000),

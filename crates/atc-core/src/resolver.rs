@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::config::AtcConfig;
 use crate::registry::Registry;
@@ -20,6 +21,9 @@ pub struct ResolvedInput {
     pub dispatch_id: String,
     /// Environment variable overrides from the resolver (e.g. GITKB_ROOT).
     pub env_overrides: HashMap<String, String>,
+    /// Discovered KB root path (for task-based dispatches where the KB root
+    /// may differ from the workspace root, e.g. multi-KB discovery).
+    pub kb_root: Option<PathBuf>,
 }
 
 /// Trait defining how an input string is resolved into dispatch parameters.

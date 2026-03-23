@@ -25,6 +25,10 @@ pub struct DispatchRecord {
     /// Used by retry to faithfully reconstruct the original `RunOpts`.
     pub original_input: Option<String>,
     pub checks: HealthChecks,
+    /// The KB root used by this dispatch (for task-based dispatches where the
+    /// KB root may differ from the workspace root via multi-KB discovery).
+    /// Persisted so `on_cleanup` can unassign without re-discovering.
+    pub kb_root: Option<PathBuf>,
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
     pub duration_ms: Option<u64>,

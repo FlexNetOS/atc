@@ -19,6 +19,7 @@ atc-core = { path = "../atc-core" }
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
+futures.workspace = true
 anyhow.workspace = true
 comfy-table = "7"
 notify = "7"

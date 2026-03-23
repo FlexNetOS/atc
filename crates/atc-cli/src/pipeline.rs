@@ -92,7 +92,9 @@ impl<'a> DispatchPipeline<'a> {
             .ok()
             .or_else(|| meta.as_ref().map(|m| m.workspace_root.clone()))
             .unwrap_or_else(|| cwd.clone());
-        let kb_root = &workspace_root;
+        // Use resolver-discovered KB root when available (e.g. multi-KB discovery),
+        // falling back to workspace_root for resolvers that don't set it.
+        let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
 
         let (worktree_path, wt_created, wt_is_meta) = if opts.no_worktree {
             // Run in current directory, no worktree creation
@@ -133,29 +135,91 @@ impl<'a> DispatchPipeline<'a> {
             (wt_result.path, wt_result.created, wt_result.is_meta)
         };
 
-        // 6. Set up environment
-        let mut env = resolved.env_overrides.clone();
-
-        // GH_TOKEN resolution
-        match resolve_gh_token().await {
-            Ok(token) => {
-                env.insert("GH_TOKEN".to_string(), token);
+        // 5b. Load per-project .dispatch/env (after worktree exists, before env setup)
+        let project_env = if dispatch_cfg.project_env {
+            let env_path = worktree_path.join(".dispatch").join("env");
+            if env_path.is_file() {
+                // Canonicalize both paths and verify env_path is within the worktree
+                // to prevent symlink-based path traversal attacks.
+                let wt_canon = match std::fs::canonicalize(&worktree_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        if wt_created {
+                            rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                        }
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(anyhow::anyhow!(
+                            "failed to canonicalize worktree path: {}",
+                            e
+                        ));
+                    }
+                };
+                let env_canon = match std::fs::canonicalize(&env_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        if wt_created {
+                            rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                        }
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(anyhow::anyhow!("failed to canonicalize env path: {}", e));
+                    }
+                };
+                if !env_canon.starts_with(&wt_canon) {
+                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                    if wt_created {
+                        rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                    }
+                    resolver.on_cleanup(&tmp_record, self.config, None).await;
+                    return Err(anyhow::anyhow!(
+                        ".dispatch/env path escapes worktree: {}",
+                        env_canon.display()
+                    ));
+                }
+                match atc_core::project_env::parse_env_file(&env_canon) {
+                    Ok(penv) => {
+                        tracing::debug!(
+                            path = %env_path.display(),
+                            count = penv.len(),
+                            "loaded project env"
+                        );
+                        penv
+                    }
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        if wt_created {
+                            rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                        }
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(e);
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
             }
-            Err(e) => {
-                warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // 6. Set up environment
+        // Merge order: project env → resolver env → GH_TOKEN default → provider env.
+        // Security invariants (AGENT_ALLOWED_PATHS, CLAUDECODE) are asserted
+        // unconditionally *after* all merging in step 8, so no source can override them.
+        let mut env = project_env;
+        env.extend(resolved.env_overrides.clone());
+
+        // GH_TOKEN resolution (default only if not already set by resolver/project)
+        if !env.contains_key("GH_TOKEN") {
+            match resolve_gh_token().await {
+                Ok(token) => {
+                    env.insert("GH_TOKEN".to_string(), token);
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+                }
             }
         }
-
-        // AGENT_ALLOWED_PATHS
-        let extra_paths: Vec<String> = env
-            .get("GITKB_ROOT")
-            .map(|r| vec![r.clone()])
-            .unwrap_or_default();
-        let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
-        env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
-
-        // Unset CLAUDECODE
-        env.insert("CLAUDECODE".to_string(), String::new());
 
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
@@ -201,6 +265,18 @@ impl<'a> DispatchPipeline<'a> {
 
             // Write provider output files to worktree
             for (rel_path, content) in &provider_output.files {
+                // Reject absolute or parent-traversal paths to prevent writes outside worktree
+                if rel_path.is_absolute()
+                    || rel_path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    warn!(
+                        path = %rel_path.display(),
+                        "skipping provider output file with unsafe path"
+                    );
+                    continue;
+                }
                 let abs_path = worktree_path.join(rel_path);
                 if let Some(parent) = abs_path.parent() {
                     let _ = tokio::fs::create_dir_all(parent).await;
@@ -224,7 +300,39 @@ impl<'a> DispatchPipeline<'a> {
             }
         }
 
-        // 8. Build agent opts and spawn
+        // 8. Assert security invariants — these MUST come after all env merging
+        // (resolver, project, provider) so no source can override them.
+
+        // Strip security-invariant keys that may have been injected by
+        // project env, resolver env, or provider env before we compute them.
+        env.remove("AGENT_ALLOWED_PATHS");
+        env.remove("CLAUDECODE");
+        env.remove("GITKB_ROOT");
+
+        // AGENT_ALLOWED_PATHS: always compute the worktree-anchored base paths.
+        // Use the resolver-validated `kb_root` (never env["GITKB_ROOT"]) so that
+        // a malicious `.dispatch/env` cannot expand the sandbox by setting
+        // GITKB_ROOT to an arbitrary path outside the worktree.
+        {
+            let extra_paths: Vec<String> = (kb_root != worktree_path.as_path())
+                .then(|| kb_root.to_string_lossy().into_owned())
+                .into_iter()
+                .collect();
+            let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
+            env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
+        }
+
+        // GITKB_ROOT: re-assert from the resolver-validated kb_root so that
+        // project env or provider env cannot redirect git-kb to an arbitrary path.
+        env.insert(
+            "GITKB_ROOT".to_string(),
+            kb_root.to_string_lossy().into_owned(),
+        );
+
+        // CLAUDECODE: always clear to prevent recursive agent-spawning.
+        env.insert("CLAUDECODE".to_string(), String::new());
+
+        // 9. Build agent opts and spawn
         let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
@@ -253,7 +361,7 @@ impl<'a> DispatchPipeline<'a> {
             }
         };
 
-        // 9. Insert registry record
+        // 10. Insert registry record
         let status = match handle.inline_exit_code {
             Some(0) => Status::Done,
             Some(_) => Status::Failed,
@@ -275,6 +383,7 @@ impl<'a> DispatchPipeline<'a> {
             no_worktree: opts.no_worktree,
             original_input: Some(input.to_string()),
             checks: HealthChecks::default(),
+            kb_root: resolved.kb_root.clone(),
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
@@ -383,6 +492,7 @@ impl<'a> DispatchPipeline<'a> {
             no_worktree: opts.no_worktree,
             original_input: None,
             checks: HealthChecks::default(),
+            kb_root: resolved.kb_root.clone(),
             cost_usd: None,
             num_turns: None,
             duration_ms: None,

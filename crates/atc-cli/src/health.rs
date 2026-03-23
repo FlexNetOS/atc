@@ -387,6 +387,7 @@ mod tests {
             no_worktree: false,
             original_input: None,
             checks,
+            kb_root: None,
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
