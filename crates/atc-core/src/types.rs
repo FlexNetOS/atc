@@ -60,7 +60,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// Returns true for terminal states (Done, Failed, Stopped, NeedsHuman).
+    /// Returns true for terminal states (Done, Failed, Stopped, NeedsHuman, NeedsReview).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,

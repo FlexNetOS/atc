@@ -151,7 +151,7 @@ pub async fn run_retry(
     let (max_budget_override, max_turns_override) =
         classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
 
-    // 6. Kill old tmux session (non-fatal, with timeout)
+    // 6b. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
         tokio::process::Command::new("tmux")
             .args(["kill-session", "-t", &record.session])
