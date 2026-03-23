@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  repository_dispatch:
+    types: [release-tagged]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: atc
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: [self-hosted, macOS, ARM64]
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            asset: atc-darwin-arm64.tar.gz
+          - arch: x64
+            target: x86_64-apple-darwin
+            asset: atc-darwin-x64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Ensure target is installed
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p atc-cli
+
+      - name: Package
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} staging/
+          cd staging
+          tar czf ../${{ matrix.asset }} ${{ env.BINARY_NAME }}
+          cd ..
+          shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    runs-on: [self-hosted, macOS, ARM64]
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            asset: atc-linux-arm64.tar.gz
+            linker: aarch64-linux-gnu-gcc
+          - arch: x64
+            target: x86_64-unknown-linux-gnu
+            asset: atc-linux-x64.tar.gz
+            linker: x86_64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Ensure target is installed
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: x86_64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }} -p atc-cli
+
+      - name: Package
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} staging/
+          cd staging
+          tar czf ../${{ matrix.asset }} ${{ env.BINARY_NAME }}
+          cd ..
+          shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+
+  release:
+    name: Create Release
+    needs: [build-macos, build-linux]
+    runs-on: [self-hosted, macOS, ARM64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/atc-darwin-arm64.tar.gz
+            artifacts/atc-darwin-arm64.tar.gz.sha256
+            artifacts/atc-darwin-x64.tar.gz
+            artifacts/atc-darwin-x64.tar.gz.sha256
+            artifacts/atc-linux-arm64.tar.gz
+            artifacts/atc-linux-arm64.tar.gz.sha256
+            artifacts/atc-linux-x64.tar.gz
+            artifacts/atc-linux-x64.tar.gz.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: [release]
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Read checksums
+        id: checksums
+        run: |
+          echo "darwin_arm64=$(awk '{print $1}' artifacts/atc-darwin-arm64.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "darwin_x64=$(awk '{print $1}' artifacts/atc-darwin-x64.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(awk '{print $1}' artifacts/atc-linux-arm64.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "linux_x64=$(awk '{print $1}' artifacts/atc-linux-x64.tar.gz.sha256)" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh auth setup-git
+
+          gh repo clone harmony-labs/homebrew-tap tap
+          cd tap
+
+          VERSION="${{ steps.version.outputs.version }}"
+          DARWIN_ARM64="${{ steps.checksums.outputs.darwin_arm64 }}"
+          DARWIN_X64="${{ steps.checksums.outputs.darwin_x64 }}"
+          LINUX_ARM64="${{ steps.checksums.outputs.linux_arm64 }}"
+          LINUX_X64="${{ steps.checksums.outputs.linux_x64 }}"
+
+          cat > Formula/atc.rb <<'FORMULA'
+          class Atc < Formula
+            desc "Air Traffic Control — agent orchestrator for AI coding agents"
+            homepage "https://github.com/harmony-labs/atc"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-darwin-arm64.tar.gz"
+                sha256 "DARWIN_ARM64_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-darwin-x64.tar.gz"
+                sha256 "DARWIN_X64_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-linux-arm64.tar.gz"
+                sha256 "LINUX_ARM64_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-linux-x64.tar.gz"
+                sha256 "LINUX_X64_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "atc"
+            end
+
+            test do
+              system bin/"atc", "--help"
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc and substitute placeholders
+          sed -i '' 's/^          //' Formula/atc.rb
+          sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/atc.rb
+          sed -i '' "s/DARWIN_ARM64_PLACEHOLDER/${DARWIN_ARM64}/" Formula/atc.rb
+          sed -i '' "s/DARWIN_X64_PLACEHOLDER/${DARWIN_X64}/" Formula/atc.rb
+          sed -i '' "s/LINUX_ARM64_PLACEHOLDER/${LINUX_ARM64}/" Formula/atc.rb
+          sed -i '' "s/LINUX_X64_PLACEHOLDER/${LINUX_X64}/" Formula/atc.rb
+
+          BRANCH="atc-v${VERSION}"
+          git checkout -b "$BRANCH"
+          git add Formula/atc.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "atc ${VERSION}"
+          git push -f -u origin "$BRANCH"
+
+          gh pr create \
+            --title "atc ${VERSION}" \
+            --body "Automated formula update for atc v${VERSION}" \
+            --base main \
+            --head "$BRANCH" || true
+
+          # Auto-merge if we have permission
+          gh pr merge "$BRANCH" --auto --squash || true
