@@ -354,8 +354,9 @@ impl InputResolver for TaskResolver {
         let primary = Self::primary_kb_root(config);
         if let Some(found) = Self::discover_kb_root(input, &primary).await {
             // Cache the result so resolve() can skip the redundant discovery
-            if let Ok(mut cache) = self.last_discovered.lock() {
-                *cache = Some((input.to_string(), found));
+            match self.last_discovered.lock() {
+                Ok(mut cache) => *cache = Some((input.to_string(), found)),
+                Err(_) => warn!("KB discovery cache lock poisoned, skipping cache write"),
             }
             true
         } else {
@@ -375,13 +376,19 @@ impl InputResolver for TaskResolver {
         // otherwise perform full discovery.
         // Only consume the cache if the slug matches; otherwise leave it
         // for a potential later call with the correct slug.
-        let cached = self.last_discovered.lock().ok().and_then(|mut guard| {
-            if guard.as_ref().is_some_and(|(s, _)| s == slug) {
-                guard.take().map(|(_, path)| path)
-            } else {
+        let cached = match self.last_discovered.lock() {
+            Ok(mut guard) => {
+                if guard.as_ref().is_some_and(|(s, _)| s == slug) {
+                    guard.take().map(|(_, path)| path)
+                } else {
+                    None
+                }
+            }
+            Err(_) => {
+                warn!("KB discovery cache lock poisoned, skipping cache read");
                 None
             }
-        });
+        };
 
         let kb_root = if let Some(path) = cached {
             debug!(slug, kb_root = %path.display(), "using cached KB root from can_resolve");

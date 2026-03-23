@@ -58,7 +58,9 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
         let has_close_double = value.ends_with('"');
         let has_open_single = value.starts_with('\'');
         let has_close_single = value.ends_with('\'');
-        if (has_open_double && !has_close_double) || (has_open_single && !has_close_single) {
+        if (has_open_double && (!has_close_double || value.len() < 2))
+            || (has_open_single && (!has_close_single || value.len() < 2))
+        {
             anyhow::bail!(
                 "line {}: unclosed quote in value: {:?}",
                 line_num + 1,
@@ -251,6 +253,22 @@ mod tests {
     #[test]
     fn test_unclosed_single_quote() {
         let input = "FOO='hello # world";
+        let err = parse_env_contents(input).unwrap_err();
+        assert!(err.to_string().contains("unclosed quote"));
+    }
+
+    #[test]
+    fn test_quoted_value_with_trailing_comment() {
+        // Quoted value followed by an inline comment outside the quotes
+        let input = r#"FOO="value" # trailing comment"#;
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_single_quote_char_not_treated_as_quoted() {
+        // A lone quote character should not be treated as a quoted value
+        let input = "FOO=\"";
         let err = parse_env_contents(input).unwrap_err();
         assert!(err.to_string().contains("unclosed quote"));
     }
