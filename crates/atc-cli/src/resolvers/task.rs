@@ -142,6 +142,12 @@ impl TaskResolver {
                             continue;
                         }
                     }
+                    // Skip paths that don't exist on disk — stale meta entries
+                    // would otherwise spawn doomed git-kb subprocesses.
+                    if !joined.is_dir() {
+                        debug!(path = %joined.display(), "skipping non-existent meta project path");
+                        continue;
+                    }
                     paths.push(joined);
                 }
             }
