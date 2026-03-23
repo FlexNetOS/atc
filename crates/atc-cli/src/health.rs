@@ -200,6 +200,9 @@ pub async fn run_health(
     // have their cost_usd populated before the warning pass.
     let cost_threshold = config.health.cost_warning_threshold;
     for r in &results {
+        if !r.changed {
+            continue;
+        }
         if let Some(msg) = cost_warning(&r.record, cost_threshold) {
             if json {
                 eprintln!("{msg}");
