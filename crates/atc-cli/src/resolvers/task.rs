@@ -126,7 +126,9 @@ impl TaskResolver {
                 if let Some(rel) = rel_path {
                     let rel = Path::new(&rel);
                     if rel.is_absolute()
-                        || rel.components().any(|c| matches!(c, Component::ParentDir))
+                        || rel
+                            .components()
+                            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
                     {
                         warn!(path = %rel.display(), "skipping unsafe meta project path");
                         continue;

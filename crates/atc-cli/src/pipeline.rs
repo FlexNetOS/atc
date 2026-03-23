@@ -347,7 +347,7 @@ impl<'a> DispatchPipeline<'a> {
             }
         };
 
-        // 9. Insert registry record
+        // 10. Insert registry record
         let status = match handle.inline_exit_code {
             Some(0) => Status::Done,
             Some(_) => Status::Failed,

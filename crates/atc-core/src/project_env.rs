@@ -80,7 +80,9 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
 /// that literal `#` characters inside quotes are preserved.
 fn strip_inline_comment(s: &str) -> String {
     // Quoted values: don't strip anything
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
         return s.to_string();
     }
     // Find first ` #` — everything after is a comment
