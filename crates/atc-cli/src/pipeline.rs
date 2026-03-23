@@ -295,6 +295,7 @@ impl<'a> DispatchPipeline<'a> {
         // project env, resolver env, or provider env before we compute them.
         env.remove("AGENT_ALLOWED_PATHS");
         env.remove("CLAUDECODE");
+        env.remove("GITKB_ROOT");
 
         // AGENT_ALLOWED_PATHS: always compute the worktree-anchored base paths.
         // Use the resolver-validated `kb_root` (never env["GITKB_ROOT"]) so that
@@ -308,6 +309,13 @@ impl<'a> DispatchPipeline<'a> {
             let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
             env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
         }
+
+        // GITKB_ROOT: re-assert from the resolver-validated kb_root so that
+        // project env or provider env cannot redirect git-kb to an arbitrary path.
+        env.insert(
+            "GITKB_ROOT".to_string(),
+            kb_root.to_string_lossy().into_owned(),
+        );
 
         // CLAUDECODE: always clear to prevent recursive agent-spawning.
         env.insert("CLAUDECODE".to_string(), String::new());

@@ -37,6 +37,7 @@ pub fn parse_env_file(path: &Path) -> Result<HashMap<String, String>> {
 pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
     // Strip optional UTF-8 BOM (U+FEFF) that some editors prepend
     let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+    const MAX_ENV_ENTRIES: usize = 256;
     let mut env = HashMap::new();
 
     for (line_num, raw_line) in contents.lines().enumerate() {
@@ -83,6 +84,10 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
 
         let value = strip_quotes(value);
         env.insert(key.to_string(), value);
+
+        if env.len() > MAX_ENV_ENTRIES {
+            anyhow::bail!("env file exceeds maximum of {} entries", MAX_ENV_ENTRIES);
+        }
     }
 
     Ok(env)
@@ -308,6 +313,22 @@ mod tests {
         let env = parse_env_contents(input).unwrap();
         assert_eq!(env.get("FOO").unwrap(), "bar");
         assert_eq!(env.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_max_entries_exceeded() {
+        let lines: Vec<String> = (0..257).map(|i| format!("K{}=v{}", i, i)).collect();
+        let input = lines.join("\n");
+        let err = parse_env_contents(&input).unwrap_err();
+        assert!(err.to_string().contains("maximum of 256 entries"));
+    }
+
+    #[test]
+    fn test_max_entries_at_limit_succeeds() {
+        let lines: Vec<String> = (0..256).map(|i| format!("K{}=v{}", i, i)).collect();
+        let input = lines.join("\n");
+        let env = parse_env_contents(&input).unwrap();
+        assert_eq!(env.len(), 256);
     }
 
     #[test]
