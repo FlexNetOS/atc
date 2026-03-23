@@ -56,10 +56,10 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
 
 /// Strip matching outer quotes (single or double) from a value.
 fn strip_quotes(s: &str) -> String {
-    if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            return s[1..s.len() - 1].to_string();
-        }
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        return s[1..s.len() - 1].to_string();
     }
     s.to_string()
 }
