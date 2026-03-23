@@ -8,6 +8,7 @@ use super::{ContextOutput, ContextProvider, DispatchContext};
 ///
 /// This provider is part of the GitKB integration layer. It only activates
 /// when the dispatch has a `task_slug` (i.e., came through `TaskResolver`).
+#[derive(Default)]
 pub struct KbContextProvider;
 
 impl KbContextProvider {

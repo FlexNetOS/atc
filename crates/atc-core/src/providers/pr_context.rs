@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use super::{ContextOutput, ContextProvider, DispatchContext};
 
 /// Provider that prefetches PR data and generates triage/summary files.
+#[derive(Default)]
 pub struct PrContextProvider;
 
 impl PrContextProvider {

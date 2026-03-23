@@ -5,6 +5,7 @@ use tracing::{info, warn};
 use super::{ContextOutput, ContextProvider, DispatchContext};
 
 /// Provider that detects stale branches and injects rebase instructions.
+#[derive(Default)]
 pub struct RebaseProvider;
 
 impl RebaseProvider {
