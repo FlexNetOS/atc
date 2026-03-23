@@ -59,13 +59,26 @@ impl TaskResolver {
     /// Discover sub-project paths via `meta project list --recursive --json`.
     /// Returns empty vec if `meta` is not available or fails.
     async fn discover_meta_projects(workspace_root: &Path) -> Vec<PathBuf> {
-        let child = tokio::process::Command::new("meta")
-            .args(["project", "list", "--recursive", "--json"])
+        Self::discover_meta_projects_with_env(workspace_root, None).await
+    }
+
+    /// Inner implementation that accepts an optional PATH override for testing.
+    /// When `path_env` is `Some`, only the subprocess sees the override —
+    /// the process-wide environment is never mutated.
+    async fn discover_meta_projects_with_env(
+        workspace_root: &Path,
+        path_env: Option<&str>,
+    ) -> Vec<PathBuf> {
+        let mut cmd = tokio::process::Command::new("meta");
+        cmd.args(["project", "list", "--recursive", "--json"])
             .current_dir(workspace_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn();
+            .kill_on_drop(true);
+        if let Some(path) = path_env {
+            cmd.env("PATH", path);
+        }
+        let child = cmd.spawn();
 
         let child = match child {
             Ok(c) => c,
@@ -138,19 +151,27 @@ impl TaskResolver {
             "searching sub-projects for task slug"
         );
 
+        // Check all sub-projects concurrently to avoid sequential latency
+        let results: Vec<(&PathBuf, bool)> = futures::future::join_all(
+            sub_projects
+                .iter()
+                .map(|p| async move { (p, Self::kb_show_succeeds(slug, p).await) }),
+        )
+        .await;
+
         let mut found: Option<PathBuf> = None;
-        for project_path in &sub_projects {
-            if Self::kb_show_succeeds(slug, project_path).await {
+        for (path, hit) in results {
+            if hit {
                 if let Some(ref first) = found {
                     warn!(
                         slug,
                         first = %first.display(),
-                        duplicate = %project_path.display(),
+                        duplicate = %path.display(),
                         "ambiguous slug: found in multiple KBs, using first match"
                     );
                 } else {
-                    debug!(slug, kb_root = %project_path.display(), "found task in sub-project KB");
-                    found = Some(project_path.clone());
+                    debug!(slug, kb_root = %path.display(), "found task in sub-project KB");
+                    found = Some(path.clone());
                 }
             }
         }
@@ -425,7 +446,20 @@ impl InputResolver for TaskResolver {
                 }
             }
 
-            let kb_root = Self::primary_kb_root(config);
+            // Re-discover the actual KB root for this slug rather than assuming
+            // primary_kb_root — with multi-KB discovery the task may live in a
+            // sub-project KB.
+            let primary = Self::primary_kb_root(config);
+            let kb_root = match Self::discover_kb_root(slug, &primary).await {
+                Some(found) => found,
+                None => {
+                    warn!(
+                        slug,
+                        "could not re-discover KB root for unassign; task may remain assigned"
+                    );
+                    return;
+                }
+            };
             Self::unassign_task(slug, &kb_root).await;
         }
     }
@@ -443,13 +477,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_discover_meta_projects_meta_not_available() {
-        // Ensure `meta` is not found by the subprocess
+        // Use subprocess-level PATH override instead of mutating the process
+        // environment, which would race with other test threads.
         let tmp = tempfile::tempdir().unwrap();
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        // SAFETY: test runs single-threaded (tokio::test default)
-        unsafe { std::env::set_var("PATH", "") };
-        let projects = TaskResolver::discover_meta_projects(tmp.path()).await;
-        unsafe { std::env::set_var("PATH", &original_path) };
+        let projects = TaskResolver::discover_meta_projects_with_env(tmp.path(), Some("")).await;
         assert!(
             projects.is_empty(),
             "expected empty vec when meta is not available"
