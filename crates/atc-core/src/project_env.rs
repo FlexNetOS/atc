@@ -62,8 +62,8 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
         let key = key.trim();
         validate_env_key(key).map_err(|e| anyhow::anyhow!("line {}: {}", line_num + 1, e))?;
 
-        let value = value.trim();
         let value = strip_inline_comment(value);
+        let value = value.trim();
 
         // Detect unclosed quotes before stripping — a common typo that would
         // silently corrupt values (e.g. FOO="hello # world → "hello).
@@ -284,6 +284,15 @@ mod tests {
         let input = "FOO=\"";
         let err = parse_env_contents(input).unwrap_err();
         assert!(err.to_string().contains("unclosed quote"));
+    }
+
+    #[test]
+    fn test_empty_value_with_trailing_comment() {
+        // FOO= # comment should yield empty string, not "# comment"
+        let input = "FOO= # comment\nBAR=val # note";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "");
+        assert_eq!(env.get("BAR").unwrap(), "val");
     }
 
     #[test]
