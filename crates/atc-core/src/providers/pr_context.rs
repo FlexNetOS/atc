@@ -137,7 +137,7 @@ pub fn parse_pr_url(url: &str) -> anyhow::Result<(String, String, u64)> {
         .ok_or_else(|| anyhow::anyhow!("PR URL must start with https://github.com/: {}", url))?;
 
     let parts: Vec<&str> = stripped.split('/').collect();
-    if parts.len() < 4 || parts[2] != "pull" {
+    if parts.len() < 4 || parts[0].is_empty() || parts[1].is_empty() || parts[2] != "pull" {
         anyhow::bail!("invalid PR URL format: {}", url);
     }
 
