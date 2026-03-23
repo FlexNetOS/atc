@@ -49,6 +49,9 @@ pub trait ContextProvider: Send + Sync {
     async fn prepare(&self, ctx: &DispatchContext) -> anyhow::Result<ContextOutput>;
 }
 
+/// Canonical list of known provider names — used for both config validation and instantiation.
+pub const KNOWN_PROVIDERS: &[&str] = &["pr-context", "kb-context", "rebase"];
+
 /// Instantiate a provider by name.
 pub fn make_provider(name: &str) -> Option<Box<dyn ContextProvider>> {
     match name {
@@ -97,8 +100,26 @@ pub async fn run_providers(
             Ok(output) => {
                 merged.preamble_sections.extend(output.preamble_sections);
                 merged.files.extend(output.files);
-                merged.env.extend(output.env);
-                merged.template_vars.extend(output.template_vars);
+                for (k, v) in output.env {
+                    if merged.env.contains_key(&k) {
+                        tracing::debug!(
+                            provider = %provider_name,
+                            key = %k,
+                            "env var overwritten by later provider"
+                        );
+                    }
+                    merged.env.insert(k, v);
+                }
+                for (k, v) in output.template_vars {
+                    if merged.template_vars.contains_key(&k) {
+                        tracing::debug!(
+                            provider = %provider_name,
+                            key = %k,
+                            "template var overwritten by later provider"
+                        );
+                    }
+                    merged.template_vars.insert(k, v);
+                }
             }
             Err(e) => {
                 tracing::warn!(

@@ -25,8 +25,8 @@ providers = ["pr-context", "rebase"]
 providers = ["rebase"]
 EOF
 
-    # Config is valid — help should work with this config
-    run atc --config "$config" --help
+    # Config is valid — status exercises AtcConfig::load() + parse_and_validate()
+    run atc --config "$config" status
     assert_success
 }
 
@@ -62,7 +62,7 @@ path = "/tmp/test.db"
 providers = []
 EOF
 
-    run atc --config "$config" --help
+    run atc --config "$config" status
     assert_success
 }
 
@@ -79,7 +79,7 @@ path = "/tmp/test.db"
 providers = ["pr-context", "kb-context", "rebase"]
 EOF
 
-    run atc --config "$config" --help
+    run atc --config "$config" status
     assert_success
 }
 

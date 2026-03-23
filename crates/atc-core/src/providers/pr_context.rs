@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::{ContextOutput, ContextProvider, DispatchContext};
@@ -80,8 +80,15 @@ impl ContextProvider for PrContextProvider {
             }
         }
 
-        // Previous review artifact
-        if let Some(prev_section) = check_previous_artifact(ctx, &pr_url) {
+        // Previous review artifact (run blocking I/O off the async runtime)
+        let log_dir = ctx.log_dir.clone();
+        let dispatch_id = ctx.dispatch_id.clone();
+        if let Some(prev_section) =
+            tokio::task::spawn_blocking(move || check_previous_artifact(&log_dir, &dispatch_id))
+                .await
+                .ok()
+                .flatten()
+        {
             summary.push_str("\n\n## Previous Run\n\n");
             summary.push_str(&prev_section);
         }
@@ -109,10 +116,9 @@ impl ContextProvider for PrContextProvider {
             prefetch_dir.join("threads.json"),
             serde_json::to_string_pretty(&threads).unwrap_or_default(),
         ));
-        output
-            .template_vars
-            .insert("prefetch".to_string(), summary.clone());
-        output.preamble_sections.push(summary);
+        // Use template_vars only — preamble_sections would duplicate content
+        // when a mode template contains {{prefetch}}.
+        output.template_vars.insert("prefetch".to_string(), summary);
 
         Ok(output)
     }
@@ -201,36 +207,44 @@ async fn fetch_reviews(owner: &str, repo: &str, pr_number: u64) -> anyhow::Resul
 
 /// Fetch review threads via GraphQL.
 async fn fetch_review_threads(owner: &str, repo: &str, pr_number: u64) -> anyhow::Result<Value> {
-    let query = format!(
-        r#"query {{
-  repository(owner: "{}", name: "{}") {{
-    pullRequest(number: {}) {{
-      reviewThreads(first: 100) {{
-        nodes {{
+    let query = r#"query($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100) {
+        nodes {
           id
           isResolved
           isOutdated
-          comments(first: 50) {{
-            nodes {{
+          comments(first: 50) {
+            nodes {
               id
               databaseId
-              author {{ login }}
+              author { login }
               body
               path
               line
               createdAt
-            }}
-          }}
-        }}
-      }}
-    }}
-  }}
-}}"#,
-        owner, repo, pr_number
-    );
+            }
+          }
+        }
+      }
+    }
+  }
+}"#;
 
     let output = tokio::process::Command::new("gh")
-        .args(["api", "graphql", "-f", &format!("query={}", query)])
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", query),
+            "-F",
+            &format!("owner={}", owner),
+            "-F",
+            &format!("repo={}", repo),
+            "-F",
+            &format!("pr={}", pr_number),
+        ])
         .output()
         .await?;
 
@@ -394,8 +408,9 @@ pub fn generate_triage(comments: &Value, threads: &Value) -> String {
 
         // Truncate body to first line for checklist
         let body_preview: &str = entry.body.lines().next().unwrap_or("");
-        let body_truncated = if body_preview.len() > 120 {
-            format!("{}...", &body_preview[..117])
+        let body_truncated = if body_preview.chars().count() > 120 {
+            let truncated: String = body_preview.chars().take(117).collect();
+            format!("{}...", truncated)
         } else {
             body_preview.to_string()
         };
@@ -584,17 +599,15 @@ async fn fetch_comment_by_endpoint(endpoint: &str) -> Option<String> {
 }
 
 /// Check for previous review artifact from a prior dispatch.
-fn check_previous_artifact(ctx: &DispatchContext, _pr_url: &str) -> Option<String> {
-    // Look for <log_dir>/<previous-dispatch-id>-review-artifact.json
-    // Walk log_dir looking for any *-review-artifact.json files
-    let log_dir = &ctx.log_dir;
+/// This performs synchronous I/O and should be called via `spawn_blocking`.
+fn check_previous_artifact(log_dir: &Path, dispatch_id: &str) -> Option<String> {
     let entries = std::fs::read_dir(log_dir).ok()?;
 
     let mut artifacts: Vec<(PathBuf, String)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.ends_with("-review-artifact.json")
-            && name != format!("{}-review-artifact.json", ctx.dispatch_id)
+            && name != format!("{}-review-artifact.json", dispatch_id)
         {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
                 artifacts.push((entry.path(), content));
@@ -602,8 +615,12 @@ fn check_previous_artifact(ctx: &DispatchContext, _pr_url: &str) -> Option<Strin
         }
     }
 
-    // Use the most recent artifact (by path name, which contains timestamps)
-    artifacts.sort_by(|a, b| b.0.cmp(&a.0));
+    // Sort by file modification time (most recent first), falling back to path name
+    artifacts.sort_by(|a, b| {
+        let time_a = std::fs::metadata(&a.0).and_then(|m| m.modified()).ok();
+        let time_b = std::fs::metadata(&b.0).and_then(|m| m.modified()).ok();
+        time_b.cmp(&time_a).then_with(|| b.0.cmp(&a.0))
+    });
     let (_, content) = artifacts.first()?;
 
     let artifact: Value = serde_json::from_str(content).ok()?;

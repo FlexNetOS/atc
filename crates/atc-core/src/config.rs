@@ -157,14 +157,13 @@ impl AtcConfig {
                 anyhow::ensure!(turns > 0, "modes.{}.max_turns must be >= 1", key);
             }
             if let Some(providers) = &mode_cfg.providers {
-                let known_providers = ["pr-context", "kb-context", "rebase"];
                 for name in providers {
                     anyhow::ensure!(
-                        known_providers.contains(&name.as_str()),
+                        crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
                         "unknown provider '{}' in modes.{}.providers; valid providers: {}",
                         name,
                         key,
-                        known_providers.join(", ")
+                        crate::providers::KNOWN_PROVIDERS.join(", ")
                     );
                 }
             }

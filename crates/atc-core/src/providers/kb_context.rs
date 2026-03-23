@@ -1,8 +1,12 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{info, warn};
 
 use super::{ContextOutput, ContextProvider, DispatchContext};
+
+/// Timeout for individual git-kb subprocess calls.
+const GIT_KB_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Provider that assembles supplementary KB context for task-based dispatches.
 ///
@@ -55,12 +59,21 @@ impl ContextProvider for KbContextProvider {
 
 /// Fetch related context docs for a task using `git kb graph`.
 async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf) -> Option<String> {
-    let output = tokio::process::Command::new("git-kb")
-        .args(["graph", task_slug])
-        .env("GITKB_ROOT", kb_root)
-        .output()
-        .await
-        .ok()?;
+    let output = match tokio::time::timeout(
+        GIT_KB_TIMEOUT,
+        tokio::process::Command::new("git-kb")
+            .args(["graph", task_slug])
+            .env("GITKB_ROOT", kb_root)
+            .output(),
+    )
+    .await
+    {
+        Ok(result) => result.ok()?,
+        Err(_) => {
+            warn!(task_slug = %task_slug, "git-kb graph timed out");
+            return None;
+        }
+    };
 
     if !output.status.success() {
         warn!(
@@ -99,12 +112,21 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf) -> Option<Str
     // Fetch each context doc
     let mut sections = Vec::new();
     for slug in &context_slugs {
-        let doc = tokio::process::Command::new("git-kb")
-            .args(["show", slug])
-            .env("GITKB_ROOT", kb_root)
-            .output()
-            .await
-            .ok();
+        let doc = match tokio::time::timeout(
+            GIT_KB_TIMEOUT,
+            tokio::process::Command::new("git-kb")
+                .args(["show", slug])
+                .env("GITKB_ROOT", kb_root)
+                .output(),
+        )
+        .await
+        {
+            Ok(result) => result.ok(),
+            Err(_) => {
+                warn!(slug = %slug, "git-kb show timed out");
+                None
+            }
+        };
 
         if let Some(doc_output) = doc {
             if doc_output.status.success() {
@@ -128,12 +150,21 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf) -> Option<Str
 
 /// Fetch active context summary from `context/overridable/active`.
 async fn fetch_active_context(kb_root: &PathBuf) -> Option<String> {
-    let output = tokio::process::Command::new("git-kb")
-        .args(["show", "context/overridable/active"])
-        .env("GITKB_ROOT", kb_root)
-        .output()
-        .await
-        .ok()?;
+    let output = match tokio::time::timeout(
+        GIT_KB_TIMEOUT,
+        tokio::process::Command::new("git-kb")
+            .args(["show", "context/overridable/active"])
+            .env("GITKB_ROOT", kb_root)
+            .output(),
+    )
+    .await
+    {
+        Ok(result) => result.ok()?,
+        Err(_) => {
+            warn!("git-kb show active context timed out");
+            return None;
+        }
+    };
 
     if !output.status.success() {
         // Active context is optional — not an error
