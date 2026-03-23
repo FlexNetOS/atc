@@ -65,6 +65,7 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf, branch: &str)
             .args(["graph", task_slug])
             .env("GITKB_ROOT", kb_root)
             .env("GITKB_WORKSPACE", branch)
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -119,6 +120,7 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf, branch: &str)
                 .args(["show", slug])
                 .env("GITKB_ROOT", kb_root)
                 .env("GITKB_WORKSPACE", branch)
+                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -158,6 +160,7 @@ async fn fetch_active_context(kb_root: &PathBuf, branch: &str) -> Option<String>
             .args(["show", "context/overridable/active"])
             .env("GITKB_ROOT", kb_root)
             .env("GITKB_WORKSPACE", branch)
+            .kill_on_drop(true)
             .output(),
     )
     .await
