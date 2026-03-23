@@ -96,18 +96,22 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
 /// Strip trailing inline comments from unquoted values.
 ///
 /// Per POSIX shell convention, an unquoted ` #` (space then hash) starts a
-/// comment. Quoted values (starting with `"` or `'`) are returned as-is so
-/// that literal `#` characters inside quotes are preserved.
+/// comment. If the value starts with a quote, we find the matching closing
+/// quote first and only search for ` #` after that boundary — this correctly
+/// handles values like `"val # ue" # comment` where `#` appears inside quotes.
 fn strip_inline_comment(s: &str) -> String {
-    // Quoted values: don't strip anything
-    if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-    {
-        return s.to_string();
-    }
-    // Find first ` #` — everything after is a comment
-    if let Some(pos) = s.find(" #") {
-        s[..pos].trim_end().to_string()
+    // If the value starts with a quote, find the matching closing quote and
+    // only search for ` #` after that boundary.
+    let quote_end = if let Some(rest) = s.strip_prefix('"') {
+        rest.find('"').map(|i| i + 2)
+    } else if let Some(rest) = s.strip_prefix('\'') {
+        rest.find('\'').map(|i| i + 2)
+    } else {
+        None
+    };
+    let search_from = quote_end.unwrap_or(0);
+    if let Some(pos) = s[search_from..].find(" #") {
+        s[..search_from + pos].trim_end().to_string()
     } else {
         s.to_string()
     }
@@ -298,6 +302,21 @@ mod tests {
         let env = parse_env_contents(input).unwrap();
         assert_eq!(env.get("FOO").unwrap(), "");
         assert_eq!(env.get("BAR").unwrap(), "val");
+    }
+
+    #[test]
+    fn test_quoted_value_with_hash_inside_and_trailing_comment() {
+        // FOO="val # ue" # comment → value should be `val # ue`
+        let input = r#"FOO="val # ue" # comment"#;
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "val # ue");
+    }
+
+    #[test]
+    fn test_single_quoted_value_with_hash_inside_and_trailing_comment() {
+        let input = "FOO='val # ue' # comment";
+        let env = parse_env_contents(input).unwrap();
+        assert_eq!(env.get("FOO").unwrap(), "val # ue");
     }
 
     #[test]
