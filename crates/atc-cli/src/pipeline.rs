@@ -297,17 +297,12 @@ impl<'a> DispatchPipeline<'a> {
         env.remove("CLAUDECODE");
 
         // AGENT_ALLOWED_PATHS: always compute the worktree-anchored base paths.
-        // Derive extra paths from canonical kb_root (not only env["GITKB_ROOT"])
-        // so the sandbox is correct even if a resolver sets kb_root without
-        // mirroring it into the env override.
+        // Use the resolver-validated `kb_root` (never env["GITKB_ROOT"]) so that
+        // a malicious `.dispatch/env` cannot expand the sandbox by setting
+        // GITKB_ROOT to an arbitrary path outside the worktree.
         {
-            let extra_paths: Vec<String> = env
-                .get("GITKB_ROOT")
-                .cloned()
-                .or_else(|| {
-                    (kb_root != worktree_path.as_path())
-                        .then(|| kb_root.to_string_lossy().into_owned())
-                })
+            let extra_paths: Vec<String> = (kb_root != worktree_path.as_path())
+                .then(|| kb_root.to_string_lossy().into_owned())
                 .into_iter()
                 .collect();
             let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
