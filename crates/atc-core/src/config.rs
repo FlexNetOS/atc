@@ -291,6 +291,9 @@ pub struct DispatchConfig {
     /// Maximum number of retries before marking a task as needs-human. Default: 3.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// Whether to load `.dispatch/env` from the worktree. Default: true.
+    #[serde(default = "default_true")]
+    pub project_env: bool,
 }
 
 fn default_max_turns() -> u32 {
@@ -315,6 +318,7 @@ impl Default for DispatchConfig {
             max_turns: default_max_turns(),
             max_budget_usd: default_max_budget_usd(),
             max_retries: default_max_retries(),
+            project_env: true,
         }
     }
 }

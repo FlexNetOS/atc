@@ -228,6 +228,7 @@ fn make_config(
             max_turns: 10_000,
             max_budget_usd: 25.0,
             max_retries: 3,
+            project_env: true,
         },
         modes: test_modes(),
         ..Default::default()

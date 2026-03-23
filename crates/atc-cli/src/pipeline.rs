@@ -133,8 +133,40 @@ impl<'a> DispatchPipeline<'a> {
             (wt_result.path, wt_result.created, wt_result.is_meta)
         };
 
+        // 5b. Load per-project .dispatch/env (after worktree exists, before env setup)
+        let project_env = if dispatch_cfg.project_env {
+            let env_path = worktree_path.join(".dispatch").join("env");
+            if env_path.is_file() {
+                match atc_core::project_env::parse_env_file(&env_path) {
+                    Ok(penv) => {
+                        tracing::debug!(
+                            path = %env_path.display(),
+                            count = penv.len(),
+                            "loaded project env"
+                        );
+                        penv
+                    }
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        if wt_created {
+                            rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                        }
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(e);
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
         // 6. Set up environment
-        let mut env = resolved.env_overrides.clone();
+        // Priority: resolver env > project env > pipeline defaults
+        // Start with project env as the base, then overlay resolver env on top.
+        let mut env = project_env;
+        env.extend(resolved.env_overrides.clone());
 
         // GH_TOKEN resolution
         match resolve_gh_token().await {

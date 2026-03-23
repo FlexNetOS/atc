@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use atc_core::config::AtcConfig;
@@ -19,6 +19,128 @@ const KB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct TaskResolver;
 
 impl TaskResolver {
+    /// Try `git kb show --json <slug>` against a specific KB root.
+    /// Returns true if the command succeeds.
+    async fn kb_show_succeeds(slug: &str, kb_root: &Path) -> bool {
+        let child = tokio::process::Command::new("git-kb")
+            .args(["show", "--json", slug])
+            .env("GITKB_ROOT", kb_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+
+        match child {
+            Ok(child) => match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
+                Ok(Ok(o)) => o.status.success(),
+                _ => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Discover sub-project paths via `meta project list --recursive --json`.
+    /// Returns empty vec if `meta` is not available or fails.
+    async fn discover_meta_projects(workspace_root: &Path) -> Vec<PathBuf> {
+        let child = tokio::process::Command::new("meta")
+            .args(["project", "list", "--recursive", "--json"])
+            .current_dir(workspace_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                debug!(error = %e, "meta not available, skipping multi-KB discovery");
+                return Vec::new();
+            }
+        };
+
+        let output = match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(o)) if o.status.success() => o,
+            _ => {
+                debug!("meta project list failed or timed out");
+                return Vec::new();
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // meta project list --json outputs a JSON object: { "project-name": { "path": "rel/path" }, ... }
+        let json: serde_json::Value = match serde_json::from_str(&stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(error = %e, "failed to parse meta project list JSON");
+                return Vec::new();
+            }
+        };
+
+        let mut paths = Vec::new();
+        if let Some(obj) = json.as_object() {
+            for (_name, info) in obj {
+                // Each entry may be an object with "path" or just a string path
+                let rel_path = if let Some(s) = info.as_str() {
+                    Some(s.to_string())
+                } else if let Some(p) = info.get("path").and_then(|v| v.as_str()) {
+                    Some(p.to_string())
+                } else {
+                    None
+                };
+                if let Some(rel) = rel_path {
+                    let abs = if Path::new(&rel).is_absolute() {
+                        PathBuf::from(&rel)
+                    } else {
+                        workspace_root.join(&rel)
+                    };
+                    paths.push(abs);
+                }
+            }
+        }
+
+        paths
+    }
+
+    /// Find which KB root contains the given slug.
+    /// Tries the primary KB root first, then discovers sub-repos via `meta`.
+    /// Returns the KB root path if found.
+    async fn discover_kb_root(slug: &str, primary_kb_root: &Path) -> Option<PathBuf> {
+        // Try primary KB root first
+        if Self::kb_show_succeeds(slug, primary_kb_root).await {
+            return Some(primary_kb_root.to_path_buf());
+        }
+
+        // Try multi-KB discovery via meta
+        let sub_projects = Self::discover_meta_projects(primary_kb_root).await;
+        if sub_projects.is_empty() {
+            return None;
+        }
+
+        debug!(
+            count = sub_projects.len(),
+            "searching sub-projects for task slug"
+        );
+
+        let mut found: Option<PathBuf> = None;
+        for project_path in &sub_projects {
+            if Self::kb_show_succeeds(slug, project_path).await {
+                if let Some(ref first) = found {
+                    warn!(
+                        slug,
+                        first = %first.display(),
+                        duplicate = %project_path.display(),
+                        "ambiguous slug: found in multiple KBs, using first match"
+                    );
+                } else {
+                    debug!(slug, kb_root = %project_path.display(), "found task in sub-project KB");
+                    found = Some(project_path.clone());
+                }
+            }
+        }
+
+        found
+    }
+
     /// Resolve mode from CLI arg or from task frontmatter `directives:` field.
     async fn resolve_mode(cli_mode: Option<Mode>, slug: &str, kb_root: &Path) -> Result<Mode> {
         if let Some(m) = cli_mode {
@@ -143,34 +265,14 @@ impl InputResolver for TaskResolver {
     }
 
     async fn can_resolve(&self, input: &str, config: &AtcConfig) -> bool {
-        // Check if input looks like a task slug — try `git kb show --json`
         let kb_root = config
             .dispatch
             .resolved_meta_workspace_root(config.config_dir.as_deref())
-            .ok();
-        let kb_root = match kb_root {
-            Some(r) => r,
-            None => {
-                // Try CWD as fallback
-                std::env::current_dir().unwrap_or_default()
-            }
-        };
+            .ok()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
 
-        let child = tokio::process::Command::new("git-kb")
-            .args(["show", "--json", input])
-            .env("GITKB_ROOT", &kb_root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn();
-
-        match child {
-            Ok(child) => match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
-                Ok(Ok(o)) => o.status.success(),
-                _ => false,
-            },
-            Err(_) => false,
-        }
+        Self::discover_kb_root(input, &kb_root).await.is_some()
     }
 
     async fn resolve(
@@ -181,12 +283,21 @@ impl InputResolver for TaskResolver {
     ) -> Result<ResolvedInput> {
         let slug = input;
 
-        // Resolve kb_root
+        // Resolve kb_root — try primary, then multi-KB discovery
         let cwd = std::env::current_dir().unwrap_or_default();
-        let kb_root = config
+        let primary_kb_root = config
             .dispatch
             .resolved_meta_workspace_root(config.config_dir.as_deref())
             .unwrap_or_else(|_| cwd.clone());
+
+        let kb_root = Self::discover_kb_root(slug, &primary_kb_root)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "task slug '{}' not found in any KB (searched primary root and meta sub-projects)",
+                    slug
+                )
+            })?;
 
         // 1. Resolve mode
         let mode = Self::resolve_mode(opts.mode.clone(), slug, &kb_root).await?;
@@ -300,5 +411,30 @@ mod tests {
     fn test_task_resolver_name() {
         let resolver = TaskResolver;
         assert_eq!(resolver.name(), "task");
+    }
+
+    #[tokio::test]
+    async fn test_discover_meta_projects_meta_not_available() {
+        // When meta is not in PATH, discovery should return empty vec (graceful skip)
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = TaskResolver::discover_meta_projects(tmp.path()).await;
+        // This may or may not be empty depending on whether `meta` is installed,
+        // but it should NOT panic or error.
+        let _ = projects;
+    }
+
+    #[tokio::test]
+    async fn test_kb_show_succeeds_nonexistent_slug() {
+        // git-kb is unlikely to be in PATH in CI; should return false gracefully
+        let tmp = tempfile::tempdir().unwrap();
+        let result = TaskResolver::kb_show_succeeds("nonexistent/slug", tmp.path()).await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_discover_kb_root_returns_none_for_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = TaskResolver::discover_kb_root("nonexistent/slug", tmp.path()).await;
+        assert!(result.is_none());
     }
 }

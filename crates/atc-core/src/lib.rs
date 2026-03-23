@@ -2,6 +2,7 @@ pub mod config;
 pub mod executor;
 pub mod health;
 pub mod post_completion;
+pub mod project_env;
 pub mod prompt_engine;
 pub mod providers;
 pub mod registry;
