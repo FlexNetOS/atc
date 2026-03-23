@@ -216,6 +216,9 @@ pub async fn run_retry(
     let opts = RunOpts {
         input: input.clone(),
         mode: Some(record.mode.clone()),
+        // TODO: Template params (--param key=val) are not yet persisted in
+        // DispatchRecord, so retries re-render with empty bindings. Track in
+        // a future schema migration (add `params_json TEXT` column).
         params: HashMap::new(),
         pr_url: record.pr_url.clone(),
         inline: false,

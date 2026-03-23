@@ -239,7 +239,7 @@ pub async fn run(
                 return Ok(());
             }
 
-            if input.is_empty() {
+            if input.is_empty() || input.iter().all(|s| s.trim().is_empty()) {
                 anyhow::bail!(
                     "input is required: provide a task slug, template name, or prompt string"
                 );
