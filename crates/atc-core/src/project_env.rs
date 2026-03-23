@@ -83,11 +83,11 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
         }
 
         let value = strip_quotes(value);
-        env.insert(key.to_string(), value);
 
-        if env.len() > MAX_ENV_ENTRIES {
+        if !env.contains_key(key) && env.len() >= MAX_ENV_ENTRIES {
             anyhow::bail!("env file exceeds maximum of {} entries", MAX_ENV_ENTRIES);
         }
+        env.insert(key.to_string(), value);
     }
 
     Ok(env)
@@ -329,6 +329,26 @@ mod tests {
         let input = lines.join("\n");
         let env = parse_env_contents(&input).unwrap();
         assert_eq!(env.len(), 256);
+    }
+
+    #[test]
+    fn test_max_entries_duplicate_keys_do_not_bypass_limit() {
+        // 256 unique keys fill the limit, then a 257th *new* key should fail
+        // even if interspersed with duplicate-key reassignments.
+        let mut lines: Vec<String> = (0..256).map(|i| format!("K{}=v{}", i, i)).collect();
+        // Reassign existing keys (should be allowed — map stays at 256)
+        lines.push("K0=override".to_string());
+        lines.push("K1=override".to_string());
+        let input = lines.join("\n");
+        let env = parse_env_contents(&input).unwrap();
+        assert_eq!(env.len(), 256);
+        assert_eq!(env.get("K0").unwrap(), "override");
+
+        // Now add a truly new key — should fail
+        lines.push("KNEW=boom".to_string());
+        let input = lines.join("\n");
+        let err = parse_env_contents(&input).unwrap_err();
+        assert!(err.to_string().contains("maximum of 256 entries"));
     }
 
     #[test]
