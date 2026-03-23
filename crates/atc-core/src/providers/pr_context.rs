@@ -162,6 +162,7 @@ async fn fetch_pr_metadata(pr_url: &str) -> anyhow::Result<Value> {
                 "--json",
                 "title,state,reviewDecision,additions,deletions,commits,headRefName",
             ])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -187,6 +188,7 @@ async fn fetch_review_comments(owner: &str, repo: &str, pr_number: u64) -> anyho
         GH_TIMEOUT,
         tokio::process::Command::new("gh")
             .args(["api", &endpoint])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -212,6 +214,7 @@ async fn fetch_reviews(owner: &str, repo: &str, pr_number: u64) -> anyhow::Resul
         GH_TIMEOUT,
         tokio::process::Command::new("gh")
             .args(["api", &endpoint])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -227,17 +230,21 @@ async fn fetch_reviews(owner: &str, repo: &str, pr_number: u64) -> anyhow::Resul
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-/// Fetch review threads via GraphQL.
+/// Fetch review threads via GraphQL with cursor-based pagination.
 async fn fetch_review_threads(owner: &str, repo: &str, pr_number: u64) -> anyhow::Result<Value> {
-    let query = r#"query($owner: String!, $repo: String!, $pr: Int!) {
+    let query = r#"query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           isResolved
           isOutdated
-          comments(first: 50) {
+          comments(first: 100) {
             nodes {
               id
               databaseId
@@ -254,34 +261,91 @@ async fn fetch_review_threads(owner: &str, repo: &str, pr_number: u64) -> anyhow
   }
 }"#;
 
-    let output = tokio::time::timeout(
-        GH_TIMEOUT,
-        tokio::process::Command::new("gh")
-            .args([
-                "api",
-                "graphql",
-                "-f",
-                &format!("query={}", query),
-                "-F",
-                &format!("owner={}", owner),
-                "-F",
-                &format!("repo={}", repo),
-                "-F",
-                &format!("pr={}", pr_number),
-            ])
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("gh api graphql timed out"))??;
+    let mut all_nodes: Vec<Value> = Vec::new();
+    let mut cursor: Option<String> = None;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "gh api graphql failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    loop {
+        let mut args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={}", query),
+            "-F".to_string(),
+            format!("owner={}", owner),
+            "-F".to_string(),
+            format!("repo={}", repo),
+            "-F".to_string(),
+            format!("pr={}", pr_number),
+        ];
+
+        if let Some(ref c) = cursor {
+            args.push("-f".to_string());
+            args.push(format!("cursor={}", c));
+        } else {
+            // Pass null cursor for first request
+            args.push("-F".to_string());
+            args.push("cursor=null".to_string());
+        }
+
+        let output = tokio::time::timeout(
+            GH_TIMEOUT,
+            tokio::process::Command::new("gh")
+                .args(&args)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("gh api graphql timed out"))??;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "gh api graphql failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let page: Value = serde_json::from_slice(&output.stdout)?;
+
+        // Extract nodes from this page
+        if let Some(nodes) = page
+            .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+            .and_then(|v| v.as_array())
+        {
+            all_nodes.extend(nodes.iter().cloned());
+        }
+
+        // Check for next page
+        let has_next = page
+            .pointer("/data/repository/pullRequest/reviewThreads/pageInfo/hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !has_next {
+            break;
+        }
+
+        cursor = page
+            .pointer("/data/repository/pullRequest/reviewThreads/pageInfo/endCursor")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if cursor.is_none() {
+            break;
+        }
     }
 
-    Ok(serde_json::from_slice(&output.stdout)?)
+    // Reconstruct the expected response shape
+    Ok(serde_json::json!({
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": all_nodes
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// A flattened comment entry for triage generation.
@@ -597,6 +661,7 @@ async fn fetch_comment_by_endpoint(endpoint: &str) -> Option<String> {
         GH_TIMEOUT,
         tokio::process::Command::new("gh")
             .args(["api", endpoint])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -766,8 +831,10 @@ mod tests {
         assert!(triage.contains("- [ ] **src/auth.rs:42** (unresolved)"));
         assert!(triage.contains("- [x] **src/main.rs:10** (resolved)"));
         // Unresolved first in output
-        let unresolved_pos = triage.find("unresolved").unwrap();
-        let resolved_pos = triage.find("resolved)").unwrap();
+        let unresolved_pos = triage
+            .find("- [ ] **src/auth.rs:42** (unresolved)")
+            .unwrap();
+        let resolved_pos = triage.find("- [x] **src/main.rs:10** (resolved)").unwrap();
         assert!(unresolved_pos < resolved_pos);
     }
 

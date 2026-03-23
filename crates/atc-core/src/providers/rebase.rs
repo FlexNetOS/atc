@@ -40,6 +40,7 @@ impl ContextProvider for RebaseProvider {
                     &default_branch,
                     "--quiet",
                 ])
+                .kill_on_drop(true)
                 .output(),
         )
         .await;
@@ -74,6 +75,7 @@ impl ContextProvider for RebaseProvider {
                     &format!("HEAD..origin/{}", default_branch),
                     "--count",
                 ])
+                .kill_on_drop(true)
                 .output(),
         )
         .await;
@@ -153,6 +155,7 @@ async fn resolve_default_branch(worktree: &Path) -> String {
                 "symbolic-ref",
                 "refs/remotes/origin/HEAD",
             ])
+            .kill_on_drop(true)
             .output(),
     )
     .await

@@ -42,13 +42,13 @@ impl ContextProvider for KbContextProvider {
         let kb_root = &ctx.kb_root;
 
         // 1. Fetch related docs via `git kb graph`
-        let related_context = fetch_related_context(&task_slug, kb_root).await;
+        let related_context = fetch_related_context(&task_slug, kb_root, &ctx.branch).await;
         if let Some(context_section) = related_context {
             output.preamble_sections.push(context_section);
         }
 
         // 2. Fetch active context summary
-        let active_context = fetch_active_context(kb_root).await;
+        let active_context = fetch_active_context(kb_root, &ctx.branch).await;
         if let Some(active_section) = active_context {
             output.preamble_sections.push(active_section);
         }
@@ -58,12 +58,13 @@ impl ContextProvider for KbContextProvider {
 }
 
 /// Fetch related context docs for a task using `git kb graph`.
-async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf) -> Option<String> {
+async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf, branch: &str) -> Option<String> {
     let output = match tokio::time::timeout(
         GIT_KB_TIMEOUT,
         tokio::process::Command::new("git-kb")
             .args(["graph", task_slug])
             .env("GITKB_ROOT", kb_root)
+            .env("GITKB_WORKSPACE", branch)
             .output(),
     )
     .await
@@ -117,6 +118,7 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf) -> Option<Str
             tokio::process::Command::new("git-kb")
                 .args(["show", slug])
                 .env("GITKB_ROOT", kb_root)
+                .env("GITKB_WORKSPACE", branch)
                 .output(),
         )
         .await
@@ -149,12 +151,13 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf) -> Option<Str
 }
 
 /// Fetch active context summary from `context/overridable/active`.
-async fn fetch_active_context(kb_root: &PathBuf) -> Option<String> {
+async fn fetch_active_context(kb_root: &PathBuf, branch: &str) -> Option<String> {
     let output = match tokio::time::timeout(
         GIT_KB_TIMEOUT,
         tokio::process::Command::new("git-kb")
             .args(["show", "context/overridable/active"])
             .env("GITKB_ROOT", kb_root)
+            .env("GITKB_WORKSPACE", branch)
             .output(),
     )
     .await

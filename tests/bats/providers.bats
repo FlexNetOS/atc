@@ -11,12 +11,12 @@ load helpers/common
 
 @test "config with valid providers parses successfully" {
     local config="$TEST_TMPDIR/atc.toml"
-    cat > "$config" <<'EOF'
+    cat > "$config" <<EOF
 [dispatch]
 repo = "core"
 
 [registry]
-path = "/tmp/test.db"
+path = "$TEST_TMPDIR/test.db"
 
 [modes.review-fix]
 providers = ["pr-context", "rebase"]
@@ -32,12 +32,12 @@ EOF
 
 @test "config with unknown provider name fails validation" {
     local config="$TEST_TMPDIR/atc.toml"
-    cat > "$config" <<'EOF'
+    cat > "$config" <<EOF
 [dispatch]
 repo = "core"
 
 [registry]
-path = "/tmp/test.db"
+path = "$TEST_TMPDIR/test.db"
 
 [modes.implement]
 providers = ["nonexistent-provider"]
@@ -51,12 +51,12 @@ EOF
 
 @test "config with empty providers list parses successfully" {
     local config="$TEST_TMPDIR/atc.toml"
-    cat > "$config" <<'EOF'
+    cat > "$config" <<EOF
 [dispatch]
 repo = "core"
 
 [registry]
-path = "/tmp/test.db"
+path = "$TEST_TMPDIR/test.db"
 
 [modes.implement]
 providers = []
@@ -68,12 +68,12 @@ EOF
 
 @test "config with all three providers parses successfully" {
     local config="$TEST_TMPDIR/atc.toml"
-    cat > "$config" <<'EOF'
+    cat > "$config" <<EOF
 [dispatch]
 repo = "core"
 
 [registry]
-path = "/tmp/test.db"
+path = "$TEST_TMPDIR/test.db"
 
 [modes.review-fix]
 providers = ["pr-context", "kb-context", "rebase"]
