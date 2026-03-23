@@ -203,13 +203,11 @@ impl<'a> DispatchPipeline<'a> {
         };
 
         // 6. Set up environment
-        // Priority: resolver env > project env > pipeline defaults
-        // Start with project env as the base, then overlay resolver env on top.
+        // Merge order: project env → resolver env → GH_TOKEN default → provider env.
+        // Security invariants (AGENT_ALLOWED_PATHS, CLAUDECODE) are asserted
+        // unconditionally *after* all merging in step 8, so no source can override them.
         let mut env = project_env;
         env.extend(resolved.env_overrides.clone());
-
-        // Pipeline defaults — use entry().or_insert() so resolver/project env
-        // can override these (priority: resolver > project > defaults).
 
         // GH_TOKEN resolution (default only if not already set by resolver/project)
         if !env.contains_key("GH_TOKEN") {

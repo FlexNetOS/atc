@@ -15,6 +15,10 @@ use crate::subprocess::run_cmd_with_timeout;
 /// Timeout for git-kb subprocess calls.
 const KB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Max concurrent `git-kb show` calls during multi-KB discovery.
+/// Keeps file descriptor usage bounded in large monorepos.
+const KB_DISCOVERY_CONCURRENCY: usize = 16;
+
 /// Resolver for GitKB task dispatches. Consolidates ALL `git kb` interactions.
 pub struct TaskResolver {
     /// Cache from the last successful `discover_kb_root` call, keyed by slug.
@@ -172,7 +176,7 @@ impl TaskResolver {
                     (p, hit)
                 }
             })
-            .buffered(16)
+            .buffered(KB_DISCOVERY_CONCURRENCY)
             .collect()
             .await;
 
