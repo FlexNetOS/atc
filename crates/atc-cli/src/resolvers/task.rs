@@ -126,14 +126,23 @@ impl TaskResolver {
                 if let Some(rel) = rel_path {
                     let rel = Path::new(&rel);
                     if rel.is_absolute()
-                        || rel
-                            .components()
-                            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+                        || rel.components().any(|c| matches!(c, Component::ParentDir))
                     {
                         warn!(path = %rel.display(), "skipping unsafe meta project path");
                         continue;
                     }
-                    paths.push(workspace_root.join(rel));
+                    let joined = workspace_root.join(rel);
+                    // Skip paths that resolve to the workspace root itself
+                    // (avoids false-positive ambiguity when "." appears in meta).
+                    if let (Ok(canon), Ok(root)) =
+                        (joined.canonicalize(), workspace_root.canonicalize())
+                    {
+                        if canon == root {
+                            debug!(path = %rel.display(), "skipping workspace root self-reference");
+                            continue;
+                        }
+                    }
+                    paths.push(joined);
                 }
             }
         }

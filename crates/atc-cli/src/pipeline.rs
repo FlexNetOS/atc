@@ -291,11 +291,15 @@ impl<'a> DispatchPipeline<'a> {
         // 8. Assert security invariants — these MUST come after all env merging
         // (resolver, project, provider) so no source can override them.
 
+        // Strip security-invariant keys that may have been injected by
+        // project env, resolver env, or provider env before we compute them.
+        env.remove("AGENT_ALLOWED_PATHS");
+        env.remove("CLAUDECODE");
+
         // AGENT_ALLOWED_PATHS: always compute the worktree-anchored base paths.
         // Derive extra paths from canonical kb_root (not only env["GITKB_ROOT"])
         // so the sandbox is correct even if a resolver sets kb_root without
-        // mirroring it into the env override. Project/resolver/provider env can
-        // *extend* allowed paths but never replace the worktree anchor.
+        // mirroring it into the env override.
         {
             let extra_paths: Vec<String> = env
                 .get("GITKB_ROOT")
@@ -306,12 +310,7 @@ impl<'a> DispatchPipeline<'a> {
                 })
                 .into_iter()
                 .collect();
-            let base_allowed = compute_allowed_paths(&worktree_path, &extra_paths);
-            let allowed_paths = if let Some(extra) = env.get("AGENT_ALLOWED_PATHS") {
-                format!("{}:{}", base_allowed, extra)
-            } else {
-                base_allowed
-            };
+            let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
             env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
         }
 
