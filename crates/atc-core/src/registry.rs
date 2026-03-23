@@ -333,7 +333,16 @@ impl Registry for SqliteRegistry {
         .bind(&record.pr_url)
         .bind(record.no_worktree as i32)
         .bind(&record.original_input)
-        .bind(record.kb_root.as_ref().and_then(|p| p.to_str()))
+        .bind(
+            record
+                .kb_root
+                .as_ref()
+                .map(|p| {
+                    p.to_str()
+                        .ok_or_else(|| anyhow::anyhow!("kb_root must be valid UTF-8"))
+                })
+                .transpose()?,
+        )
         .bind(record.checks.agent_exited_clean as i32)
         .bind(record.checks.branch_pushed as i32)
         .bind(record.checks.pr_created as i32)
