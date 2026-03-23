@@ -112,6 +112,11 @@ impl AtcConfig {
             cfg.watch.cost_threshold.is_finite() && cfg.watch.cost_threshold >= 0.0,
             "watch.cost_threshold must be a finite non-negative number"
         );
+        anyhow::ensure!(
+            cfg.health.cost_warning_threshold.is_finite()
+                && cfg.health.cost_warning_threshold >= 0.0,
+            "health.cost_warning_threshold must be a finite non-negative number"
+        );
         // Validate mode keys against known Mode variants + per-mode overrides
         for key in cfg.modes.keys() {
             key.parse::<crate::types::Mode>().map_err(|_| {
@@ -381,16 +386,30 @@ pub struct HealthConfig {
     /// Default: 30.
     #[serde(default = "default_signal_timeout_secs")]
     pub signal_timeout_secs: u64,
+    /// When true, auto-dispatch review-fix for NeedsReview records even
+    /// without the `--auto` CLI flag. Default: false.
+    #[serde(default)]
+    pub auto_review: bool,
+    /// Print a warning when a dispatch's cost exceeds this threshold (USD).
+    /// Default: 10.0.
+    #[serde(default = "default_cost_warning_threshold")]
+    pub cost_warning_threshold: f64,
 }
 
 fn default_signal_timeout_secs() -> u64 {
     30
 }
 
+fn default_cost_warning_threshold() -> f64 {
+    10.0
+}
+
 impl Default for HealthConfig {
     fn default() -> Self {
         Self {
             signal_timeout_secs: default_signal_timeout_secs(),
+            auto_review: false,
+            cost_warning_threshold: default_cost_warning_threshold(),
         }
     }
 }

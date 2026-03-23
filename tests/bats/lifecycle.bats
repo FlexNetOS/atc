@@ -330,3 +330,109 @@ load helpers/common
     assert_output --partial "done"
     assert_output --partial '$4.20'
 }
+
+# ===========================================================================
+# Health --auto: auto-remediation and cost warnings
+# ===========================================================================
+
+@test "health --auto: accepted as valid flag with no active records" {
+    setup_lifecycle
+
+    run atc --config "$TEST_TMPDIR/atc.toml" health --auto
+    assert_success
+    assert_output --partial "No dispatch records found."
+}
+
+@test "health --auto: prints cost warning for expensive dispatch" {
+    setup_lifecycle
+    setup_test_git_worktree
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-cost" "tasks/cost-test" "needs-review"
+
+    # Set a high cost on the record
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET cost_usd = 15.0 WHERE id = 'disp-cost';"
+
+    # health will evaluate signals — tmux check will return "exited" since no
+    # session exists, but that's fine for verifying cost warning output.
+    run atc --config "$TEST_TMPDIR/atc.toml" health --auto
+    assert_success
+    assert_output --partial "15.00"
+    assert_output --partial "10.00"
+}
+
+@test "health --auto: auto-review prints trigger message for NeedsReview with PR" {
+    setup_lifecycle
+    setup_test_git_worktree
+
+    # Insert as "running" so the Running→NeedsReview transition produces changed=true.
+    # Health checker re-evaluates signals from scratch; the DB check values just
+    # serve as the baseline for detecting change.
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-review" "tasks/review-test" "running"
+
+    # Set pr_url and checks matching what health evaluation will produce
+    # (agent exited=true via tmux, branch pushed=true via git ls-remote,
+    # pr created=true via pr_url shortcut, ci=false since gh fails in test env).
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/99', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-review';"
+
+    # The dispatch will fail (no meta workspace, no tmux, etc.) but the auto-review
+    # trigger message should be printed before that.
+    run atc --config "$TEST_TMPDIR/atc.toml" health --auto
+    # The command may fail due to dispatch failure — check output regardless
+    assert_output --partial "Auto-triggering review-fix for tasks/review-test"
+}
+
+@test "health: config auto_review enables auto without --auto flag" {
+    setup_lifecycle
+    setup_test_git_worktree
+
+    # Insert as "running" so the Running→NeedsReview transition produces changed=true.
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-auto" "tasks/auto-test" "running"
+
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/100', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-auto';"
+
+    # Write config with auto_review = true
+    cat > "$TEST_TMPDIR/atc.toml" <<EOF
+[dispatch]
+repo = "core"
+meta_workspace_root = "$TEST_TMPDIR/workspace"
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
+
+[health]
+auto_review = true
+EOF
+
+    run atc --config "$TEST_TMPDIR/atc.toml" health
+    assert_output --partial "Auto-triggering review-fix for tasks/auto-test"
+}
+
+@test "health: custom cost_warning_threshold from config" {
+    setup_lifecycle
+    setup_test_git_worktree
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-thresh" "tasks/thresh-test" "needs-review"
+
+    # Set cost just above 5.0
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET cost_usd = 6.0 WHERE id = 'disp-thresh';"
+
+    # Config with low threshold
+    cat > "$TEST_TMPDIR/atc.toml" <<EOF
+[dispatch]
+repo = "core"
+meta_workspace_root = "$TEST_TMPDIR/workspace"
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
+
+[health]
+cost_warning_threshold = 5.0
+EOF
+
+    run atc --config "$TEST_TMPDIR/atc.toml" health
+    assert_success
+    assert_output --partial "6.00"
+    assert_output --partial "5.00"
+}

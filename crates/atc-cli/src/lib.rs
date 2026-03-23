@@ -89,6 +89,9 @@ mod args {
             /// Include done and failed records
             #[arg(long)]
             all: bool,
+            /// Auto-dispatch review-fix for NeedsReview records with PR URLs
+            #[arg(long)]
+            auto: bool,
         },
         /// Render and print the system prompt for a mode (useful for debugging)
         Prompt {
@@ -308,7 +311,9 @@ pub async fn run(
             }
             Ok(())
         }
-        Commands::Health { json, all } => health::run_health(config, registry, *json, *all).await,
+        Commands::Health { json, all, auto } => {
+            health::run_health(config, registry, executor, *json, *all, *auto).await
+        }
         Commands::Prompt {
             mode,
             slug,

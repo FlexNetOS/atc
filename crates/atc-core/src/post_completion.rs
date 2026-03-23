@@ -17,6 +17,10 @@ pub struct PostCompleteInput {
     pub dispatch_id: String,
     pub exit_code: Option<i32>,
     pub log_file: Option<PathBuf>,
+    /// When true, skip worktree cleanup (step 13). Used by the health-check
+    /// fallback path (7B) so that cleanup is only performed in the dedicated
+    /// 7C section, gated behind `auto_enabled`.
+    pub skip_cleanup: bool,
 }
 
 /// Result of the post-completion pipeline.
@@ -165,9 +169,11 @@ pub async fn run_post_completion(
     }
 
     // 13. Worktree cleanup if PR merged/closed
-    if let Some(ref url) = pr_url {
-        let worktree_base = config.dispatch.resolved_worktree_base();
-        cleanup_if_pr_done(url, &record.worktree_path, &worktree_base).await;
+    if !input.skip_cleanup {
+        if let Some(ref url) = pr_url {
+            let worktree_base = config.dispatch.resolved_worktree_base();
+            cleanup_if_pr_done(url, &record.worktree_path, &worktree_base).await;
+        }
     }
 
     info!(

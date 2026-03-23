@@ -28,6 +28,9 @@ pub struct DispatchRecord {
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
     pub duration_ms: Option<u64>,
+    /// JSON blob stored by post-completion (always written, even when no result event
+    /// is found). `Some` means post-completion already ran for this record.
+    pub artifacts: Option<String>,
     pub dispatched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

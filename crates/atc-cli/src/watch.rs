@@ -351,6 +351,7 @@ pub async fn run_watch(
                         dispatch_id: id.clone(),
                         exit_code: None,
                         log_file: Some(watcher.log_file.clone()),
+                        skip_cleanup: false,
                     };
                     if let Err(e) =
                         post_completion::run_post_completion(&input, registry.as_ref(), config)
