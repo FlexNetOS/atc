@@ -81,7 +81,7 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
             );
         }
 
-        let value = strip_quotes(&value);
+        let value = strip_quotes(value);
         env.insert(key.to_string(), value);
     }
 
