@@ -1,0 +1,228 @@
+pub mod kb_context;
+pub mod pr_context;
+pub mod rebase;
+
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::config::AtcConfig;
+use crate::types::Mode;
+
+/// Input context available to providers during dispatch preparation.
+pub struct DispatchContext {
+    pub dispatch_id: String,
+    pub task_slug: Option<String>,
+    pub branch: String,
+    pub worktree_path: PathBuf,
+    pub mode: Mode,
+    pub pr_url: Option<String>,
+    /// Key=value pairs from `--param` flags.
+    pub params: HashMap<String, String>,
+    pub kb_root: PathBuf,
+    pub log_dir: PathBuf,
+    pub config: Arc<AtcConfig>,
+}
+
+/// Output from a provider — merged into dispatch.
+#[derive(Debug, Clone, Default)]
+pub struct ContextOutput {
+    /// Markdown sections prepended to stdin (before task doc).
+    pub preamble_sections: Vec<String>,
+    /// Files written to worktree (relative path, content).
+    pub files: Vec<(PathBuf, String)>,
+    /// Additional env vars for agent process.
+    pub env: HashMap<String, String>,
+    /// Template variable replacements (e.g., `{{prefetch}}` → content).
+    pub template_vars: HashMap<String, String>,
+}
+
+/// Pluggable unit that fetches data and assembles prompt context before agent dispatch.
+#[async_trait]
+pub trait ContextProvider: Send + Sync {
+    /// Provider name for logging and config reference.
+    fn name(&self) -> &str;
+
+    /// Prepare context before agent dispatch.
+    /// Called after prompt assembly, before agent spawn.
+    async fn prepare(&self, ctx: &DispatchContext) -> anyhow::Result<ContextOutput>;
+}
+
+/// Instantiate a provider by name.
+pub fn make_provider(name: &str) -> Option<Box<dyn ContextProvider>> {
+    match name {
+        "pr-context" => Some(Box::new(pr_context::PrContextProvider::new())),
+        "kb-context" => Some(Box::new(kb_context::KbContextProvider::new())),
+        "rebase" => Some(Box::new(rebase::RebaseProvider::new())),
+        _ => None,
+    }
+}
+
+/// Instantiate all providers for a given mode from config.
+pub fn providers_for_mode(config: &AtcConfig, mode: &Mode) -> Vec<Box<dyn ContextProvider>> {
+    let mode_key = mode.as_str();
+    let provider_names = match config.modes.get(mode_key) {
+        Some(mode_cfg) => mode_cfg.providers.clone().unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    provider_names
+        .iter()
+        .filter_map(|name| {
+            let provider = make_provider(name);
+            if provider.is_none() {
+                tracing::warn!(provider = %name, "unknown provider in mode config, skipping");
+            }
+            provider
+        })
+        .collect()
+}
+
+/// Run all providers concurrently and merge their outputs.
+/// Provider errors are non-fatal: logged as warnings, dispatch continues.
+pub async fn run_providers(
+    providers: &[Box<dyn ContextProvider>],
+    ctx: &DispatchContext,
+) -> ContextOutput {
+    use futures::future::join_all;
+
+    let futures: Vec<_> = providers.iter().map(|p| p.prepare(ctx)).collect();
+    let results = join_all(futures).await;
+
+    let mut merged = ContextOutput::default();
+    for (i, result) in results.into_iter().enumerate() {
+        let provider_name = providers[i].name();
+        match result {
+            Ok(output) => {
+                merged.preamble_sections.extend(output.preamble_sections);
+                merged.files.extend(output.files);
+                merged.env.extend(output.env);
+                merged.template_vars.extend(output.template_vars);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    provider = %provider_name,
+                    error = %e,
+                    "provider failed (non-fatal), continuing dispatch"
+                );
+            }
+        }
+    }
+
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeProvider {
+        name: &'static str,
+        output: Result<ContextOutput, String>,
+    }
+
+    #[async_trait]
+    impl ContextProvider for FakeProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn prepare(&self, _ctx: &DispatchContext) -> anyhow::Result<ContextOutput> {
+            match &self.output {
+                Ok(o) => Ok(o.clone()),
+                Err(msg) => Err(anyhow::anyhow!("{}", msg)),
+            }
+        }
+    }
+
+    fn test_ctx() -> DispatchContext {
+        DispatchContext {
+            dispatch_id: "test-dispatch".to_string(),
+            task_slug: None,
+            branch: "main".to_string(),
+            worktree_path: PathBuf::from("/tmp/test"),
+            mode: Mode::Implement,
+            pr_url: None,
+            params: HashMap::new(),
+            kb_root: PathBuf::from("/tmp/kb"),
+            log_dir: PathBuf::from("/tmp/logs"),
+            config: Arc::new(AtcConfig::default()),
+        }
+    }
+
+    #[test]
+    fn test_make_provider_known() {
+        assert!(make_provider("pr-context").is_some());
+        assert!(make_provider("kb-context").is_some());
+        assert!(make_provider("rebase").is_some());
+    }
+
+    #[test]
+    fn test_make_provider_unknown() {
+        assert!(make_provider("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_providers_merges_outputs() {
+        let providers: Vec<Box<dyn ContextProvider>> = vec![
+            Box::new(FakeProvider {
+                name: "a",
+                output: Ok(ContextOutput {
+                    preamble_sections: vec!["section-a".to_string()],
+                    files: vec![(PathBuf::from("a.md"), "content-a".to_string())],
+                    env: HashMap::from([("KEY_A".to_string(), "val_a".to_string())]),
+                    template_vars: HashMap::from([("var_a".to_string(), "val_a".to_string())]),
+                }),
+            }),
+            Box::new(FakeProvider {
+                name: "b",
+                output: Ok(ContextOutput {
+                    preamble_sections: vec!["section-b".to_string()],
+                    files: vec![(PathBuf::from("b.md"), "content-b".to_string())],
+                    env: HashMap::from([("KEY_B".to_string(), "val_b".to_string())]),
+                    template_vars: HashMap::from([("var_b".to_string(), "val_b".to_string())]),
+                }),
+            }),
+        ];
+
+        let ctx = test_ctx();
+        let merged = run_providers(&providers, &ctx).await;
+
+        assert_eq!(merged.preamble_sections.len(), 2);
+        assert_eq!(merged.files.len(), 2);
+        assert_eq!(merged.env.len(), 2);
+        assert_eq!(merged.template_vars.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_run_providers_error_is_nonfatal() {
+        let providers: Vec<Box<dyn ContextProvider>> = vec![
+            Box::new(FakeProvider {
+                name: "failing",
+                output: Err("boom".to_string()),
+            }),
+            Box::new(FakeProvider {
+                name: "ok",
+                output: Ok(ContextOutput {
+                    preamble_sections: vec!["ok-section".to_string()],
+                    ..Default::default()
+                }),
+            }),
+        ];
+
+        let ctx = test_ctx();
+        let merged = run_providers(&providers, &ctx).await;
+
+        // The successful provider's output is still present
+        assert_eq!(merged.preamble_sections.len(), 1);
+        assert_eq!(merged.preamble_sections[0], "ok-section");
+    }
+
+    #[test]
+    fn test_providers_for_mode_empty_when_no_config() {
+        let config = AtcConfig::default();
+        let providers = providers_for_mode(&config, &Mode::Implement);
+        assert!(providers.is_empty());
+    }
+}

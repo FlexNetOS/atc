@@ -3,6 +3,7 @@ pub mod executor;
 pub mod health;
 pub mod post_completion;
 pub mod prompt_engine;
+pub mod providers;
 pub mod registry;
 pub mod resolver;
 pub mod stream_json;

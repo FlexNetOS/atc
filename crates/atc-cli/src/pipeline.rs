@@ -173,12 +173,63 @@ impl<'a> DispatchPipeline<'a> {
         let gh_token_present = env.contains_key("GH_TOKEN") && !env["GH_TOKEN"].is_empty();
         write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
 
+        // 7b. Run context providers (non-fatal errors logged, dispatch continues)
+        let providers = atc_core::providers::providers_for_mode(self.config, &resolved.mode);
+        let mut rendered_prompt = resolved.system_prompt.clone();
+        if !providers.is_empty() {
+            let dispatch_ctx = atc_core::providers::DispatchContext {
+                dispatch_id: resolved.dispatch_id.clone(),
+                task_slug: resolved.task_slug.clone(),
+                branch: resolved.branch.clone(),
+                worktree_path: worktree_path.clone(),
+                mode: resolved.mode.clone(),
+                pr_url: opts.pr_url.clone(),
+                params: opts.params.clone(),
+                kb_root: kb_root.to_path_buf(),
+                log_dir: log_dir.clone(),
+                config: std::sync::Arc::new(self.config.clone()),
+            };
+
+            let provider_output =
+                atc_core::providers::run_providers(&providers, &dispatch_ctx).await;
+
+            // Apply template_vars to rendered prompt (e.g., {{prefetch}})
+            for (key, value) in &provider_output.template_vars {
+                let placeholder = format!("{{{{{}}}}}", key);
+                rendered_prompt = rendered_prompt.replace(&placeholder, value);
+            }
+
+            // Write provider output files to worktree
+            for (rel_path, content) in &provider_output.files {
+                let abs_path = worktree_path.join(rel_path);
+                if let Some(parent) = abs_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                if let Err(e) = tokio::fs::write(&abs_path, content).await {
+                    warn!(
+                        path = %abs_path.display(),
+                        error = %e,
+                        "failed to write provider output file (non-fatal)"
+                    );
+                }
+            }
+
+            // Merge provider env vars
+            env.extend(provider_output.env);
+
+            // Prepend preamble sections to the rendered prompt
+            if !provider_output.preamble_sections.is_empty() {
+                let preamble = provider_output.preamble_sections.join("\n\n---\n\n");
+                rendered_prompt = format!("{}\n\n---\n\n{}", preamble, rendered_prompt);
+            }
+        }
+
         // 8. Build agent opts and spawn
         let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
-            prompt: resolved.system_prompt.clone(),
+            prompt: rendered_prompt,
             mode: resolved.mode.clone(),
             log_file: log_file.clone(),
             env,
