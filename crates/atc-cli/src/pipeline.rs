@@ -265,6 +265,18 @@ impl<'a> DispatchPipeline<'a> {
 
             // Write provider output files to worktree
             for (rel_path, content) in &provider_output.files {
+                // Reject absolute or parent-traversal paths to prevent writes outside worktree
+                if rel_path.is_absolute()
+                    || rel_path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    warn!(
+                        path = %rel_path.display(),
+                        "skipping provider output file with unsafe path"
+                    );
+                    continue;
+                }
                 let abs_path = worktree_path.join(rel_path);
                 if let Some(parent) = abs_path.parent() {
                     let _ = tokio::fs::create_dir_all(parent).await;
