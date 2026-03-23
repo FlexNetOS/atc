@@ -227,6 +227,7 @@ impl<'a> DispatchPipeline<'a> {
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
+            artifacts: None,
             dispatched_at: now,
             updated_at: now,
         };
@@ -334,6 +335,7 @@ impl<'a> DispatchPipeline<'a> {
             cost_usd: None,
             num_turns: None,
             duration_ms: None,
+            artifacts: None,
             dispatched_at: now,
             updated_at: now,
         }

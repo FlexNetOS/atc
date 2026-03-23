@@ -1,0 +1,33 @@
+{
+  "run_id": "run-pr-review-1774216182",
+  "pr_url": "https://github.com/harmony-labs/atc/pull/14",
+  "head_commit": null,
+  "ended_at": "2026-03-22T21:58:46Z",
+  "comments_resolved": [
+    "2972113977",
+    "2972113979",
+    "2972113980",
+    "2972113982",
+    "2972123412",
+    "2972124437",
+    "2972124470"
+  ],
+  "files_reviewed": [
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/cleanup.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/close.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/dispatch.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/health.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/info.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/post_complete.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/redirect.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/retry.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/status.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/stop.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-cli/src/watch.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-core/src/post_completion.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-core/src/registry.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/crates/atc-core/src/types.rs",
+    "/private/tmp/worktrees/harmony/tasks-harmony-329/open-source/atc/tests/bats/helpers/common.bash"
+  ],
+  "summary": "- **T14**: `artifacts` field added to `DispatchRecord` as reliable once-only sentinel"
+}

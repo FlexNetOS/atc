@@ -4,12 +4,10 @@ use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{DispatchOpts, DispatchRecord, Mode, Status};
+use atc_core::types::{DispatchRecord, Mode, RunOpts, Status};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
-
-use crate::dispatch;
 
 /// Format a three-state signal value for display.
 /// `Some(true)` = "✓", `Some(false)` = "✗", `None` = "-" (not evaluated / skipped).
@@ -280,19 +278,29 @@ pub async fn run_health(
                 json,
                 &format!("Auto-triggering review-fix for {task_slug}..."),
             );
-            let opts = DispatchOpts {
-                slug: task_slug.clone(),
-                cli_mode: Some(Mode::ReviewFix),
-                directive: Some("review-fix".to_string()),
+            let opts = RunOpts {
+                input: format!("task {task_slug}"),
+                mode: Some(Mode::ReviewFix),
                 pr_url,
+                params: std::collections::HashMap::new(),
                 inline: false,
                 force: false,
                 dry_run: false,
-                max_budget_override: None,
-                max_turns_override: None,
+                directives: None,
+                no_worktree: false,
+                max_budget_usd: None,
+                max_turns: None,
                 retries: 0,
+                list: false,
             };
-            match dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await {
+            let resolvers = crate::resolvers::build_resolvers(config);
+            let pipeline = crate::pipeline::DispatchPipeline {
+                resolvers,
+                config,
+                registry: registry.as_ref(),
+                executor: executor.as_ref(),
+            };
+            match pipeline.execute(&format!("task {task_slug}"), &opts).await {
                 Ok(outcome) => {
                     emit(
                         json,

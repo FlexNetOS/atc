@@ -345,6 +345,7 @@ load helpers/common
 
 @test "health --auto: prints cost warning for expensive dispatch" {
     setup_lifecycle
+    setup_test_git_worktree
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-cost" "tasks/cost-test" "needs-review"
 
     # Set a high cost on the record
@@ -410,6 +411,7 @@ EOF
 
 @test "health: custom cost_warning_threshold from config" {
     setup_lifecycle
+    setup_test_git_worktree
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-thresh" "tasks/thresh-test" "needs-review"
 
     # Set cost just above 5.0
