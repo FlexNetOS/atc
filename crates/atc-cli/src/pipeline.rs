@@ -223,20 +223,6 @@ impl<'a> DispatchPipeline<'a> {
             }
         }
 
-        // AGENT_ALLOWED_PATHS (default only if not already set)
-        if !env.contains_key("AGENT_ALLOWED_PATHS") {
-            let extra_paths: Vec<String> = env
-                .get("GITKB_ROOT")
-                .map(|r| vec![r.clone()])
-                .unwrap_or_default();
-            let allowed_paths = compute_allowed_paths(&worktree_path, &extra_paths);
-            env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
-        }
-
-        // Always clear CLAUDECODE to prevent recursive agent-spawning
-        // (this must override resolver/project env, not just serve as a default)
-        env.insert("CLAUDECODE".to_string(), String::new());
-
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
         if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
@@ -304,7 +290,37 @@ impl<'a> DispatchPipeline<'a> {
             }
         }
 
-        // 8. Build agent opts and spawn
+        // 8. Assert security invariants — these MUST come after all env merging
+        // (resolver, project, provider) so no source can override them.
+
+        // AGENT_ALLOWED_PATHS: always compute the worktree-anchored base paths.
+        // Derive extra paths from canonical kb_root (not only env["GITKB_ROOT"])
+        // so the sandbox is correct even if a resolver sets kb_root without
+        // mirroring it into the env override. Project/resolver/provider env can
+        // *extend* allowed paths but never replace the worktree anchor.
+        {
+            let extra_paths: Vec<String> = env
+                .get("GITKB_ROOT")
+                .cloned()
+                .or_else(|| {
+                    (kb_root != worktree_path.as_path())
+                        .then(|| kb_root.to_string_lossy().into_owned())
+                })
+                .into_iter()
+                .collect();
+            let base_allowed = compute_allowed_paths(&worktree_path, &extra_paths);
+            let allowed_paths = if let Some(extra) = env.get("AGENT_ALLOWED_PATHS") {
+                format!("{}:{}", base_allowed, extra)
+            } else {
+                base_allowed
+            };
+            env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
+        }
+
+        // CLAUDECODE: always clear to prevent recursive agent-spawning.
+        env.insert("CLAUDECODE".to_string(), String::new());
+
+        // 9. Build agent opts and spawn
         let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),

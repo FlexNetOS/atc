@@ -51,6 +51,21 @@ pub fn parse_env_contents(contents: &str) -> Result<HashMap<String, String>> {
 
         let value = value.trim();
         let value = strip_inline_comment(value);
+
+        // Detect unclosed quotes before stripping — a common typo that would
+        // silently corrupt values (e.g. FOO="hello # world → "hello).
+        let has_open_double = value.starts_with('"');
+        let has_close_double = value.ends_with('"');
+        let has_open_single = value.starts_with('\'');
+        let has_close_single = value.ends_with('\'');
+        if (has_open_double && !has_close_double) || (has_open_single && !has_close_single) {
+            anyhow::bail!(
+                "line {}: unclosed quote in value: {:?}",
+                line_num + 1,
+                raw_line,
+            );
+        }
+
         let value = strip_quotes(&value);
         env.insert(key.to_string(), value);
     }
@@ -187,10 +202,10 @@ mod tests {
 
     #[test]
     fn test_strip_quotes_mismatched() {
-        // Mismatched quotes are kept as-is
+        // Mismatched quotes (opening without closing) are now detected as errors
         let input = "FOO=\"bar'";
-        let env = parse_env_contents(input).unwrap();
-        assert_eq!(env.get("FOO").unwrap(), "\"bar'");
+        let err = parse_env_contents(input).unwrap_err();
+        assert!(err.to_string().contains("unclosed quote"));
     }
 
     #[test]
@@ -221,6 +236,21 @@ mod tests {
         let input = "FOO=bar#baz";
         let env = parse_env_contents(input).unwrap();
         assert_eq!(env.get("FOO").unwrap(), "bar#baz");
+    }
+
+    #[test]
+    fn test_unclosed_double_quote() {
+        // FOO="hello # world — missing closing quote should error, not silently truncate
+        let input = r#"FOO="hello # world"#;
+        let err = parse_env_contents(input).unwrap_err();
+        assert!(err.to_string().contains("unclosed quote"));
+    }
+
+    #[test]
+    fn test_unclosed_single_quote() {
+        let input = "FOO='hello # world";
+        let err = parse_env_contents(input).unwrap_err();
+        assert!(err.to_string().contains("unclosed quote"));
     }
 
     #[test]

@@ -38,14 +38,18 @@ impl TaskResolver {
 
     /// Try `git kb show --json <slug>` against a specific KB root.
     /// Returns true if the command succeeds.
-    async fn kb_show_succeeds(slug: &str, kb_root: &Path) -> bool {
-        let child = tokio::process::Command::new("git-kb")
-            .args(["show", "--json", slug])
+    /// When `branch` is provided, `GITKB_WORKSPACE` is set for per-worktree isolation.
+    async fn kb_show_succeeds(slug: &str, kb_root: &Path, branch: Option<&str>) -> bool {
+        let mut cmd = tokio::process::Command::new("git-kb");
+        cmd.args(["show", "--json", slug])
             .env("GITKB_ROOT", kb_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn();
+            .kill_on_drop(true);
+        if let Some(b) = branch {
+            cmd.env("GITKB_WORKSPACE", b);
+        }
+        let child = cmd.spawn();
 
         match child {
             Ok(child) => match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
@@ -137,7 +141,7 @@ impl TaskResolver {
     async fn discover_kb_root(slug: &str, primary_kb_root: &Path) -> Option<PathBuf> {
         // Prefer the primary KB root, but keep scanning so we can still warn
         // if the same slug exists in multiple KBs.
-        let mut found = if Self::kb_show_succeeds(slug, primary_kb_root).await {
+        let mut found = if Self::kb_show_succeeds(slug, primary_kb_root, None).await {
             Some(primary_kb_root.to_path_buf())
         } else {
             None
@@ -164,7 +168,7 @@ impl TaskResolver {
             .map(|p| {
                 let s = slug_owned.clone();
                 async move {
-                    let hit = Self::kb_show_succeeds(&s, &p).await;
+                    let hit = Self::kb_show_succeeds(&s, &p, None).await;
                     (p, hit)
                 }
             })
@@ -192,20 +196,28 @@ impl TaskResolver {
     }
 
     /// Resolve mode from CLI arg or from task frontmatter `directives:` field.
-    async fn resolve_mode(cli_mode: Option<Mode>, slug: &str, kb_root: &Path) -> Result<Mode> {
+    async fn resolve_mode(
+        cli_mode: Option<Mode>,
+        slug: &str,
+        kb_root: &Path,
+        branch: Option<&str>,
+    ) -> Result<Mode> {
         if let Some(m) = cli_mode {
             debug!(mode = %m.as_str(), "mode provided via CLI arg");
             return Ok(m);
         }
 
         debug!("no CLI mode; reading directives from task frontmatter");
-        let child = tokio::process::Command::new("git-kb")
-            .args(["show", "--json", slug])
+        let mut cmd = tokio::process::Command::new("git-kb");
+        cmd.args(["show", "--json", slug])
             .env("GITKB_ROOT", kb_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        if let Some(b) = branch {
+            cmd.env("GITKB_WORKSPACE", b);
+        }
+        let child = cmd.spawn()?;
 
         // kill_on_drop(true) ensures the child is killed if the timeout fires
         let output = tokio::time::timeout(KB_TIMEOUT, child.wait_with_output())
@@ -260,14 +272,22 @@ impl TaskResolver {
     }
 
     /// CAS-claim a task via `git kb assign`.
-    async fn cas_claim(slug: &str, session_name: &str, kb_root: &Path) -> Result<()> {
-        let child = tokio::process::Command::new("git-kb")
-            .args(["assign", slug, session_name])
+    async fn cas_claim(
+        slug: &str,
+        session_name: &str,
+        kb_root: &Path,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        let mut cmd = tokio::process::Command::new("git-kb");
+        cmd.args(["assign", slug, session_name])
             .env("GITKB_ROOT", kb_root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        if let Some(b) = branch {
+            cmd.env("GITKB_WORKSPACE", b);
+        }
+        let child = cmd.spawn()?;
 
         // kill_on_drop(true) ensures the child is killed if the timeout fires
         let output = tokio::time::timeout(KB_TIMEOUT, child.wait_with_output())
@@ -293,14 +313,13 @@ impl TaskResolver {
     }
 
     /// Release a CAS claim. Errors are logged but not propagated (best-effort with timeout).
-    async fn unassign_task(slug: &str, kb_root: &Path) {
-        let status = run_cmd_with_timeout(
-            tokio::process::Command::new("git-kb")
-                .args(["unassign", slug])
-                .env("GITKB_ROOT", kb_root),
-            KB_TIMEOUT,
-        )
-        .await;
+    async fn unassign_task(slug: &str, kb_root: &Path, branch: Option<&str>) {
+        let mut cmd = tokio::process::Command::new("git-kb");
+        cmd.args(["unassign", slug]).env("GITKB_ROOT", kb_root);
+        if let Some(b) = branch {
+            cmd.env("GITKB_WORKSPACE", b);
+        }
+        let status = run_cmd_with_timeout(&mut cmd, KB_TIMEOUT).await;
 
         match status {
             Ok(Some(s)) if !s.success() => {
@@ -374,7 +393,7 @@ impl InputResolver for TaskResolver {
         };
 
         // 1. Resolve mode
-        let mode = Self::resolve_mode(opts.mode.clone(), slug, &kb_root).await?;
+        let mode = Self::resolve_mode(opts.mode.clone(), slug, &kb_root, None).await?;
         info!(%slug, mode = %mode.as_str(), "mode resolved");
 
         // 2. Derive branch and dispatch ID
@@ -384,7 +403,7 @@ impl InputResolver for TaskResolver {
 
         // 3. CAS-claim the task (skip for dry-run to avoid transient state mutation)
         if !opts.dry_run {
-            Self::cas_claim(slug, &session_name, &kb_root).await?;
+            Self::cas_claim(slug, &session_name, &kb_root, Some(&branch)).await?;
         }
 
         // 4. Render system prompt
@@ -404,7 +423,7 @@ impl InputResolver for TaskResolver {
             Err(e) => {
                 // Rollback CAS claim on prompt failure (only if we claimed)
                 if !opts.dry_run {
-                    Self::unassign_task(slug, &kb_root).await;
+                    Self::unassign_task(slug, &kb_root, Some(&branch)).await;
                 }
                 return Err(e);
             }
@@ -474,7 +493,7 @@ impl InputResolver for TaskResolver {
                     return;
                 }
             };
-            Self::unassign_task(slug, &kb_root).await;
+            Self::unassign_task(slug, &kb_root, Some(record.branch.as_str())).await;
         }
     }
 }
@@ -505,7 +524,7 @@ mod tests {
     async fn test_kb_show_succeeds_nonexistent_slug() {
         // git-kb is unlikely to be in PATH in CI; should return false gracefully
         let tmp = tempfile::tempdir().unwrap();
-        let result = TaskResolver::kb_show_succeeds("nonexistent/slug", tmp.path()).await;
+        let result = TaskResolver::kb_show_succeeds("nonexistent/slug", tmp.path(), None).await;
         assert!(!result);
     }
 
