@@ -100,6 +100,10 @@ pub fn collect_auto_review_candidates(results: &[HealthResult]) -> Vec<&Dispatch
                 && r.record.status == Status::NeedsReview
                 && r.record.pr_url.is_some()
                 && r.record.task_slug.is_some()
+                // Don't dispatch a review-fix for a record that is itself a
+                // review-fix — that would loop.  Failed review-fixes should go
+                // through the retry path instead.
+                && r.record.mode != Mode::ReviewFix
         })
         .map(|r| &r.record)
         .collect()
@@ -116,6 +120,15 @@ pub fn cost_warning(record: &DispatchRecord, threshold: f64) -> Option<String> {
         }
     }
     None
+}
+
+/// Print a message to stdout, or stderr when in JSON mode (to keep stdout parsable).
+fn emit(json: bool, msg: &str) {
+    if json {
+        eprintln!("{msg}");
+    } else {
+        println!("{msg}");
+    }
 }
 
 /// Run the health command: evaluate signals, apply transitions, display results,
@@ -140,13 +153,13 @@ pub async fn run_health(
     let mut results: Vec<HealthResult> = checker.run().await?;
 
     // --- 7B: Stale record cleanup ---
-    // For records that just transitioned out of Running (agent exited and checker
-    // updated status) but whose post-completion was never triggered by the watcher,
-    // run artifact extraction now as a fallback.
+    // For records in a terminal state whose post-completion was never triggered by
+    // the watcher, run artifact extraction now as a fallback.  We use
+    // `artifacts.is_none()` as the idempotency guard (not `r.changed`) so that
+    // records missed on a previous health run are still picked up.
     let mut refreshed_ids: Vec<String> = Vec::new();
     for r in &results {
-        if r.changed
-            && r.record.checks.agent_exited_clean
+        if r.record.checks.agent_exited_clean
             && matches!(
                 r.record.status,
                 Status::Done | Status::Failed | Status::NeedsReview
@@ -204,11 +217,7 @@ pub async fn run_health(
             continue;
         }
         if let Some(msg) = cost_warning(&r.record, cost_threshold) {
-            if json {
-                eprintln!("{msg}");
-            } else {
-                println!("{msg}");
-            }
+            emit(json, &msg);
         }
     }
 
@@ -261,11 +270,10 @@ pub async fn run_health(
                 continue;
             };
             let pr_url = record.pr_url.clone();
-            if json {
-                eprintln!("Auto-triggering review-fix for {}...", task_slug);
-            } else {
-                println!("Auto-triggering review-fix for {}...", task_slug);
-            }
+            emit(
+                json,
+                &format!("Auto-triggering review-fix for {task_slug}..."),
+            );
             let opts = DispatchOpts {
                 slug: task_slug.clone(),
                 cli_mode: Some(Mode::ReviewFix),
@@ -280,26 +288,20 @@ pub async fn run_health(
             };
             match dispatch::dispatch(config, registry.as_ref(), executor.as_ref(), &opts).await {
                 Ok(outcome) => {
-                    if json {
-                        eprintln!(
+                    emit(
+                        json,
+                        &format!(
                             "  Dispatched review-fix for {}: session={}",
                             task_slug, outcome.session
-                        );
-                    } else {
-                        println!(
-                            "  Dispatched review-fix for {}: session={}",
-                            task_slug, outcome.session
-                        );
-                    }
+                        ),
+                    );
                 }
                 Err(e) => {
                     warn!(task = %task_slug, error = %e, "auto review-fix dispatch failed");
-                    let msg = format!("  Warning: review-fix dispatch failed for {task_slug}: {e}");
-                    if json {
-                        eprintln!("{msg}");
-                    } else {
-                        println!("{msg}");
-                    }
+                    emit(
+                        json,
+                        &format!("  Warning: review-fix dispatch failed for {task_slug}: {e}"),
+                    );
                 }
             }
         }
@@ -606,7 +608,31 @@ mod tests {
         assert!(candidates.is_empty());
     }
 
-    // --- 7C: Cost warning tests ---
+    #[test]
+    fn test_auto_review_skips_review_fix_mode() {
+        let checks = HealthChecks {
+            agent_exited_clean: true,
+            branch_pushed: true,
+            pr_created: true,
+            ci_passed: false,
+            ..Default::default()
+        };
+        let mut record = make_record_with_pr(
+            Status::NeedsReview,
+            checks,
+            Some("https://github.com/org/repo/pull/1".to_string()),
+            None,
+        );
+        record.mode = Mode::ReviewFix;
+        let results = vec![HealthResult {
+            record,
+            changed: true,
+        }];
+        let candidates = collect_auto_review_candidates(&results);
+        assert!(candidates.is_empty());
+    }
+
+    // --- 7A: Cost warning tests ---
 
     #[test]
     fn test_cost_warning_over_threshold() {
