@@ -14,12 +14,10 @@ use crate::executor::validate_env_key;
 /// - Handles double-quoted and single-quoted values.
 /// - Does NOT evaluate shell expressions (`$()`, backticks).
 /// - Validates all keys via `validate_env_key()`.
-/// Maximum size (in bytes) for a `.dispatch/env` file.
-/// Files larger than this are rejected to prevent OOM from malicious or
-/// accidental multi-GB env files.
-const MAX_ENV_FILE_SIZE: u64 = 1024 * 1024; // 1 MiB
-
+///
+/// Rejects files larger than 1 MiB to prevent OOM.
 pub fn parse_env_file(path: &Path) -> Result<HashMap<String, String>> {
+    const MAX_ENV_FILE_SIZE: u64 = 1024 * 1024;
     let meta = std::fs::metadata(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
     if meta.len() > MAX_ENV_FILE_SIZE {
