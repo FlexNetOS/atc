@@ -147,6 +147,9 @@ jobs:
     needs: [release]
     runs-on: [self-hosted, macOS, ARM64]
     steps:
+      - name: Reset job workspace
+        run: rm -rf "$PWD/artifacts" "$PWD/tap"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -230,21 +233,41 @@ jobs:
           sed -i '' "s/LINUX_X64_PLACEHOLDER/${LINUX_X64}/" Formula/atc.rb
 
           BRANCH="atc-v${VERSION}"
-          git checkout -b "$BRANCH"
+          branch_exists=false
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            branch_exists=true
+            git fetch origin "$BRANCH:$BRANCH"
+            git checkout "$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
           git add Formula/atc.rb
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "atc ${VERSION}"
-          git push -u origin "$BRANCH"
+          if git diff --cached --quiet; then
+            if [ "$branch_exists" = false ]; then
+              echo "Formula already up to date on main; nothing to do."
+              exit 0
+            fi
+            echo "No new tap changes; reusing existing branch."
+          else
+            git commit -m "atc ${VERSION}"
+            git push -u origin "$BRANCH"
+          fi
 
           # Create PR (may already exist from a previous run)
-          if ! gh pr create \
+          pr_output=$(gh pr create \
             --title "atc ${VERSION}" \
             --body "Automated formula update for atc v${VERSION}" \
             --base main \
-            --head "$BRANCH" 2>&1; then
-            echo "::warning::PR creation failed or PR already exists — continuing"
-          fi
+            --head "$BRANCH" 2>&1) || {
+            if echo "$pr_output" | grep -qi "already exists"; then
+              echo "::notice::PR already exists for $BRANCH — continuing"
+            else
+              echo "::error::PR creation failed: $pr_output"
+              exit 1
+            fi
+          }
 
           # Auto-merge if we have permission
           if ! gh pr merge "$BRANCH" --auto --squash 2>&1; then
