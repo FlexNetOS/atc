@@ -342,7 +342,7 @@ impl<'a> DispatchPipeline<'a> {
         let stdin_content = if resolved.task_slug.is_some() {
             None // task dispatches: executor fetches from git-kb
         } else {
-            Some(resolved.system_prompt.clone())
+            Some(rendered_prompt.clone())
         };
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),

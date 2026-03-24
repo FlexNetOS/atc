@@ -87,6 +87,14 @@ impl ClaudeExecutor {
             let task_doc = Command::new("git-kb")
                 .args(["show", &opts.slug])
                 .env("GITKB_ROOT", kb_root)
+                .env(
+                    "GITKB_WORKSPACE",
+                    opts.env
+                        .get("GITKB_WORKSPACE")
+                        .map(|s| s.as_str())
+                        .unwrap_or("main"),
+                )
+                .kill_on_drop(true)
                 .output()
                 .await?;
 
@@ -545,23 +553,18 @@ mod tests {
         let executor = ClaudeExecutor {
             claude_bin: PathBuf::from("echo"), // use echo as a harmless command
         };
-        let opts = make_test_opts(
-            Some("Hello from stdin content".to_string()),
-            HashMap::new(), // No GITKB_ROOT
-        );
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = AgentOpts {
+            log_file: tmp.path().join("test.jsonl"),
+            worktree_path: tmp.path().to_path_buf(),
+            ..make_test_opts(
+                Some("Hello from stdin content".to_string()),
+                HashMap::new(), // No GITKB_ROOT
+            )
+        };
 
-        // This should not fail with "GITKB_ROOT not set" error
         let result = executor.spawn_inline(&opts).await;
-        // It may fail because 'echo' doesn't behave exactly like claude,
-        // but it should NOT fail with a GITKB_ROOT error
-        if let Err(e) = &result {
-            let msg = e.to_string();
-            assert!(
-                !msg.contains("GITKB_ROOT"),
-                "should not require GITKB_ROOT when stdin_content is set, got: {}",
-                msg
-            );
-        }
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
     }
 
     #[tokio::test]
