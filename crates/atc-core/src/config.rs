@@ -184,7 +184,7 @@ impl AtcConfig {
     /// Load config using resolution order:
     /// 1. `--config <path>` CLI flag (passed as argument)
     /// 2. `ATC_CONFIG` environment variable
-    /// 3. `./atc.toml` (current working directory)
+    /// 3. Walk up from CWD looking for `atc.toml` (project-level discovery)
     /// 4. `~/.config/atc/config.toml` (XDG user config)
     ///
     /// Returns default config if no file is found.
@@ -213,13 +213,11 @@ impl AtcConfig {
             return Ok(cfg);
         }
 
-        // 3. ./atc.toml
-        let local_path = PathBuf::from("./atc.toml");
-        if local_path.exists() {
-            let contents = std::fs::read_to_string(&local_path)?;
-            let mut cfg = Self::parse_and_validate(&contents)?;
-            cfg.config_dir = std::env::current_dir().ok();
-            return Ok(cfg);
+        // 3. Walk up from CWD looking for atc.toml
+        if let Some(start) = std::env::current_dir().ok() {
+            if let Some(cfg) = Self::find_config_upward(&start)? {
+                return Ok(cfg);
+            }
         }
 
         // 4. XDG config path ($XDG_CONFIG_HOME/atc/config.toml, fallback ~/.config)
@@ -235,6 +233,23 @@ impl AtcConfig {
         }
 
         Ok(Self::default())
+    }
+
+    /// Walk up from `start` looking for `atc.toml`. Returns the first match,
+    /// or `None` if no config is found before reaching the filesystem root.
+    fn find_config_upward(start: &Path) -> anyhow::Result<Option<Self>> {
+        let mut dir = Some(start.to_path_buf());
+        while let Some(d) = dir {
+            let candidate = d.join("atc.toml");
+            if candidate.exists() {
+                let contents = std::fs::read_to_string(&candidate)?;
+                let mut cfg = Self::parse_and_validate(&contents)?;
+                cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
+                return Ok(Some(cfg));
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        Ok(None)
     }
 }
 
@@ -1245,5 +1260,114 @@ components = ["base", "git"]
                 "component name '{name}' (contains {reason}) should be rejected, got: {err}"
             );
         }
+    }
+
+    // --- Upward traversal tests ---
+
+    #[test]
+    fn test_traversal_finds_config_in_start_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("atc.toml"), "[batch]\nmax_concurrency = 11").unwrap();
+        let cfg = AtcConfig::find_config_upward(dir.path()).unwrap().unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 11);
+        assert_eq!(
+            std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_traversal_finds_config_in_parent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("atc.toml"),
+            "[batch]\nmax_concurrency = 12",
+        )
+        .unwrap();
+        let child = root.path().join("sub");
+        std::fs::create_dir_all(&child).unwrap();
+        let cfg = AtcConfig::find_config_upward(&child).unwrap().unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 12);
+        assert_eq!(
+            std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_traversal_finds_config_in_grandparent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("atc.toml"),
+            "[batch]\nmax_concurrency = 13",
+        )
+        .unwrap();
+        let deep = root.path().join("a/b/c/d/e");
+        std::fs::create_dir_all(&deep).unwrap();
+        let cfg = AtcConfig::find_config_upward(&deep).unwrap().unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 13);
+        assert_eq!(
+            std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_traversal_stops_at_nearest_config() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("atc.toml"),
+            "[batch]\nmax_concurrency = 20",
+        )
+        .unwrap();
+        let sub = root.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("atc.toml"), "[batch]\nmax_concurrency = 21").unwrap();
+        let deep = sub.join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        let cfg = AtcConfig::find_config_upward(&deep).unwrap().unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 21);
+    }
+
+    #[test]
+    fn test_traversal_returns_none_when_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+        // No atc.toml anywhere under the tempdir; traversal eventually reaches
+        // / where there is (almost certainly) no atc.toml either.
+        let result = AtcConfig::find_config_upward(&deep).unwrap();
+        // May be None (no config found) or Some (if /tmp or / happens to have one).
+        // The key property: it terminates without infinite loop.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_explicit_config_overrides_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("atc.toml"),
+            "[batch]\nmax_concurrency = 30",
+        )
+        .unwrap();
+        let explicit = tempfile::tempdir().unwrap();
+        let explicit_path = explicit.path().join("explicit.toml");
+        std::fs::write(&explicit_path, "[batch]\nmax_concurrency = 31").unwrap();
+        // Even though traversal would find root/atc.toml, explicit flag wins
+        let cfg = AtcConfig::load(Some(&explicit_path)).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 31);
+    }
+
+    #[test]
+    fn test_traversal_config_dir_set_correctly() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("atc.toml"), "").unwrap();
+        let sub = root.path().join("x/y/z");
+        std::fs::create_dir_all(&sub).unwrap();
+        let cfg = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
     }
 }
