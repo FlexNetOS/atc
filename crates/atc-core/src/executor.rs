@@ -227,36 +227,23 @@ impl ClaudeExecutor {
         })
     }
 
-    /// Local mode: create a named tmux session, return immediately.
-    #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
-    async fn spawn_tmux(&self, opts: &AgentOpts) -> Result<AgentHandle> {
-        use tokio::process::Command;
-
-        // 1. Write system prompt to a stable path (must outlive this process)
-        let log_dir = opts
-            .log_file
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("/tmp"));
-        tokio::fs::create_dir_all(log_dir).await?;
-
-        let prompt_path = log_dir.join(format!("{}.prompt.md", opts.session_name));
-        tokio::fs::write(&prompt_path, &opts.prompt).await?;
-
-        // 2. Optionally write sandbox settings
-        let sandbox_path = if !opts.sandbox {
-            let p = log_dir.join(format!("{}.sandbox.json", opts.session_name));
-            Self::write_sandbox_settings(&p).await?;
-            Some(p)
-        } else {
-            None
-        };
-
-        // 3. Build the bash -c command string
+    /// Build the bash -c body that will run inside the tmux session.
+    ///
+    /// This is extracted from `spawn_tmux` so the generated script can be
+    /// unit-tested without actually launching tmux.
+    fn build_tmux_bash_body(
+        &self,
+        opts: &AgentOpts,
+        prompt_path: &std::path::Path,
+        task_doc_path: &std::path::Path,
+        sandbox_path: Option<&std::path::Path>,
+    ) -> Result<String> {
         let user_prompt = Self::build_user_prompt(opts);
         let prompt_path_str = prompt_path.to_string_lossy();
         let log_file_str = opts.log_file.to_string_lossy();
         let worktree_str = opts.worktree_path.to_string_lossy();
         let claude_bin_str = self.claude_bin.to_string_lossy();
+        let task_doc_path_str = task_doc_path.to_string_lossy();
 
         let mut bash_parts = Vec::new();
 
@@ -277,16 +264,7 @@ impl ClaudeExecutor {
         // cd to worktree
         bash_parts.push(format!("cd '{}'", shell_escape(&worktree_str)?));
 
-        // Write stdin content to a temp file to avoid shell expansion.
-        // Writing to a file (rather than a shell variable + echo) prevents
-        // command injection via $(), backticks, or other expansion in the content.
-        let task_doc_path = log_dir.join(format!("{}.taskdoc", opts.session_name));
-        let task_doc_path_str = task_doc_path.to_string_lossy();
-
-        if let Some(ref content) = opts.stdin_content {
-            // Pre-built stdin content: write directly to the temp file
-            tokio::fs::write(&task_doc_path, content).await?;
-        } else {
+        if opts.stdin_content.is_none() {
             // Legacy path: fetch task document from git-kb (task dispatches only)
             let kb_root = opts
                 .env
@@ -321,7 +299,7 @@ impl ClaudeExecutor {
             opts.max_budget_usd,
         );
 
-        if let Some(ref sp) = sandbox_path {
+        if let Some(sp) = sandbox_path {
             claude_cmd.push_str(&format!(
                 " --settings '{}'",
                 shell_escape(&sp.to_string_lossy())?
@@ -345,12 +323,51 @@ impl ClaudeExecutor {
         // Cleanup temp files
         bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)?));
         bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)?));
-        if let Some(ref sp) = sandbox_path {
+        if let Some(sp) = sandbox_path {
             bash_parts.push(format!("rm -f '{}'", shell_escape(&sp.to_string_lossy())?));
         }
         bash_parts.push("exit $EXIT_CODE".to_string());
 
-        let bash_body = bash_parts.join(" ; ");
+        Ok(bash_parts.join(" ; "))
+    }
+
+    /// Local mode: create a named tmux session, return immediately.
+    #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
+    async fn spawn_tmux(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        use tokio::process::Command;
+
+        // 1. Write system prompt to a stable path (must outlive this process)
+        let log_dir = opts
+            .log_file
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+        tokio::fs::create_dir_all(log_dir).await?;
+
+        let prompt_path = log_dir.join(format!("{}.prompt.md", opts.session_name));
+        tokio::fs::write(&prompt_path, &opts.prompt).await?;
+
+        // 2. Optionally write sandbox settings
+        let sandbox_path = if !opts.sandbox {
+            let p = log_dir.join(format!("{}.sandbox.json", opts.session_name));
+            Self::write_sandbox_settings(&p).await?;
+            Some(p)
+        } else {
+            None
+        };
+
+        // 3. Write stdin content to a temp file to avoid shell expansion.
+        // Writing to a file (rather than a shell variable + echo) prevents
+        // command injection via $(), backticks, or other expansion in the content.
+        let task_doc_path = log_dir.join(format!("{}.taskdoc", opts.session_name));
+
+        if let Some(ref content) = opts.stdin_content {
+            // Pre-built stdin content: write directly to the temp file
+            tokio::fs::write(&task_doc_path, content).await?;
+        }
+
+        // 4. Build the bash -c command string
+        let bash_body =
+            self.build_tmux_bash_body(opts, &prompt_path, &task_doc_path, sandbox_path.as_deref())?;
 
         // 4. Create tmux session
         info!(session = %opts.session_name, "creating tmux session");
@@ -368,6 +385,13 @@ impl ClaudeExecutor {
             .await?;
 
         if !output.status.success() {
+            // Clean up pre-written files that the tmux script would have cleaned up
+            let _ = tokio::fs::remove_file(&prompt_path).await;
+            let _ = tokio::fs::remove_file(&task_doc_path).await;
+            if let Some(ref sp) = sandbox_path {
+                let _ = tokio::fs::remove_file(sp).await;
+            }
+
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("duplicate session") || stderr.contains("already exists") {
                 anyhow::bail!(
@@ -600,49 +624,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_spawn_tmux_with_stdin_content_skips_gitkb() {
-        // When stdin_content is set, tmux spawn should NOT require GITKB_ROOT
-        // for the git-kb show step (it writes content directly to file)
+    #[test]
+    fn test_build_tmux_bash_body_with_stdin_content_skips_gitkb() {
+        // When stdin_content is set, the generated bash body should NOT contain
+        // a git-kb show command (content is pre-written to the taskdoc file).
         let executor = ClaudeExecutor::default();
-        let tmp = tempfile::tempdir().unwrap();
-        let log_file = tmp.path().join("test.jsonl");
         let opts = AgentOpts {
             stdin_content: Some("Hello from stdin content".to_string()),
             env: HashMap::new(), // No GITKB_ROOT
-            log_file,
-            worktree_path: tmp.path().to_path_buf(),
             ..make_test_opts(None, HashMap::new())
         };
 
-        // spawn_tmux will likely fail because tmux isn't available in test,
-        // but it should NOT fail with "GITKB_ROOT not set"
-        let result = executor.spawn_tmux(&opts).await;
-        if let Err(e) = &result {
-            let msg = e.to_string();
-            assert!(
-                !msg.contains("GITKB_ROOT"),
-                "should not require GITKB_ROOT when stdin_content is set, got: {}",
-                msg
-            );
-        }
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let result = executor.build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None);
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+
+        let body = result.unwrap();
+        assert!(
+            !body.contains("git-kb"),
+            "bash body should not contain git-kb when stdin_content is set, got: {}",
+            body
+        );
+        assert!(
+            body.contains("cat '/tmp/test.taskdoc'"),
+            "bash body should pipe the taskdoc file to claude"
+        );
     }
 
-    #[tokio::test]
-    async fn test_spawn_tmux_without_stdin_content_requires_gitkb_root() {
-        // When stdin_content is None, tmux spawn should require GITKB_ROOT
+    #[test]
+    fn test_build_tmux_bash_body_without_stdin_content_requires_gitkb_root() {
+        // When stdin_content is None, building the bash body should require GITKB_ROOT
         let executor = ClaudeExecutor::default();
-        let tmp = tempfile::tempdir().unwrap();
-        let log_file = tmp.path().join("test.jsonl");
         let opts = AgentOpts {
             stdin_content: None,
             env: HashMap::new(), // No GITKB_ROOT
-            log_file,
-            worktree_path: tmp.path().to_path_buf(),
             ..make_test_opts(None, HashMap::new())
         };
 
-        let result = executor.spawn_tmux(&opts).await;
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let result = executor.build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None);
         assert!(result.is_err());
         assert!(
             result
