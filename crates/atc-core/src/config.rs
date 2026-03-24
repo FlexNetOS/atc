@@ -241,17 +241,15 @@ impl AtcConfig {
         let mut dir = Some(start.to_path_buf());
         while let Some(d) = dir {
             let candidate = d.join("atc.toml");
-            match std::fs::metadata(&candidate) {
-                Ok(meta) if meta.is_file() => {
-                    let contents = std::fs::read_to_string(&candidate)?;
+            match std::fs::read_to_string(&candidate) {
+                Ok(contents) => {
                     let mut cfg = Self::parse_and_validate(&contents)?;
                     cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
                     return Ok(Some(cfg));
                 }
-                Ok(_) => {
-                    // Non-file entry named `atc.toml`; keep walking upward.
-                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+                Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => {}
                 Err(e) => return Err(e.into()),
             }
             dir = d.parent().map(|p| p.to_path_buf());
@@ -1369,15 +1367,20 @@ components = ["base", "git"]
     #[test]
     fn test_explicit_config_overrides_traversal() {
         let root = tempfile::tempdir().unwrap();
+        let sub = root.path().join("child");
+        std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(
             root.path().join("atc.toml"),
             "[batch]\nmax_concurrency = 30",
         )
         .unwrap();
+        // Verify traversal would actually find the config from `sub`
+        let traversed = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
+        assert_eq!(traversed.batch.max_concurrency, 30);
+        // Now verify explicit flag wins over that traversal result
         let explicit = tempfile::tempdir().unwrap();
         let explicit_path = explicit.path().join("explicit.toml");
         std::fs::write(&explicit_path, "[batch]\nmax_concurrency = 31").unwrap();
-        // Even though traversal would find root/atc.toml, explicit flag wins
         let cfg = AtcConfig::load(Some(&explicit_path)).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 31);
     }
