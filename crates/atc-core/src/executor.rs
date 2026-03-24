@@ -383,7 +383,7 @@ impl ClaudeExecutor {
         let sandbox_path = if !opts.sandbox {
             let p = log_dir.join(format!("{}.sandbox.json", opts.session_name));
             if let Err(e) = Self::write_sandbox_settings(&p).await {
-                Self::cleanup_tmux_files(&prompt_path, &p, None).await;
+                Self::cleanup_tmux_files(&prompt_path, std::path::Path::new(""), Some(&p)).await;
                 return Err(e);
             }
             Some(p)
