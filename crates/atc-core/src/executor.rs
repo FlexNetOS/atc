@@ -279,14 +279,31 @@ impl ClaudeExecutor {
 
         // Trap EXIT to clean up temp files on any exit path (including early
         // failures like git-kb show timeout or cd failure).
-        let mut trap_files = vec![
-            format!("'{}'", shell_escape(&prompt_path.to_string_lossy())?),
-            format!("'{}'", shell_escape(&task_doc_path.to_string_lossy())?),
-        ];
+        // Assign paths to variables, then reference them in a single-quoted
+        // trap body. The trap body contains only $VAR references (no single
+        // quotes), so the outer single quotes are safe. Variables are expanded
+        // at trap-fire time, and the inner double quotes protect against
+        // word-splitting on paths with spaces.
+        bash_parts.push(format!(
+            "ATC_PROMPT_FILE='{}'",
+            shell_escape(&prompt_path.to_string_lossy())?
+        ));
+        bash_parts.push(format!(
+            "ATC_TASKDOC_FILE='{}'",
+            shell_escape(&task_doc_path.to_string_lossy())?
+        ));
         if let Some(sp) = sandbox_path {
-            trap_files.push(format!("'{}'", shell_escape(&sp.to_string_lossy())?));
+            bash_parts.push(format!(
+                "ATC_SANDBOX_FILE='{}'",
+                shell_escape(&sp.to_string_lossy())?
+            ));
         }
-        bash_parts.push(format!("trap 'rm -f {}' EXIT", trap_files.join(" ")));
+        let trap_rm = if sandbox_path.is_some() {
+            r#"rm -f "$ATC_PROMPT_FILE" "$ATC_TASKDOC_FILE" "$ATC_SANDBOX_FILE""#
+        } else {
+            r#"rm -f "$ATC_PROMPT_FILE" "$ATC_TASKDOC_FILE""#
+        };
+        bash_parts.push(format!("trap '{}' EXIT", trap_rm));
 
         // Export env vars (keys are validated to prevent shell injection)
         // Empty value = unset the variable from the inherited environment.
