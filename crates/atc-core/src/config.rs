@@ -241,11 +241,18 @@ impl AtcConfig {
         let mut dir = Some(start.to_path_buf());
         while let Some(d) = dir {
             let candidate = d.join("atc.toml");
-            if candidate.exists() {
-                let contents = std::fs::read_to_string(&candidate)?;
-                let mut cfg = Self::parse_and_validate(&contents)?;
-                cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
-                return Ok(Some(cfg));
+            match std::fs::metadata(&candidate) {
+                Ok(meta) if meta.is_file() => {
+                    let contents = std::fs::read_to_string(&candidate)?;
+                    let mut cfg = Self::parse_and_validate(&contents)?;
+                    cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
+                    return Ok(Some(cfg));
+                }
+                Ok(_) => {
+                    // Non-file entry named `atc.toml`; keep walking upward.
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
@@ -1330,7 +1337,7 @@ components = ["base", "git"]
     }
 
     #[test]
-    fn test_traversal_returns_none_when_no_config() {
+    fn test_traversal_terminates_when_no_config() {
         let dir = tempfile::tempdir().unwrap();
         let deep = dir.path().join("a/b/c");
         std::fs::create_dir_all(&deep).unwrap();
@@ -1340,6 +1347,23 @@ components = ["base", "git"]
         // May be None (no config found) or Some (if /tmp or / happens to have one).
         // The key property: it terminates without infinite loop.
         let _ = result;
+    }
+
+    #[test]
+    fn test_traversal_skips_directory_named_atc_toml() {
+        let root = tempfile::tempdir().unwrap();
+        // Place a real config in the root
+        std::fs::write(
+            root.path().join("atc.toml"),
+            "[batch]\nmax_concurrency = 50",
+        )
+        .unwrap();
+        // Create a subdirectory with a *directory* named atc.toml
+        let sub = root.path().join("child");
+        std::fs::create_dir_all(sub.join("atc.toml")).unwrap();
+        // Traversal should skip the directory and find the file in the root
+        let cfg = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 50);
     }
 
     #[test]
