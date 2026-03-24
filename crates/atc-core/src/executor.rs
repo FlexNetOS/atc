@@ -227,6 +227,19 @@ impl ClaudeExecutor {
         })
     }
 
+    /// Clean up pre-written temp files when tmux session creation fails.
+    async fn cleanup_tmux_files(
+        prompt_path: &std::path::Path,
+        task_doc_path: &std::path::Path,
+        sandbox_path: Option<&std::path::Path>,
+    ) {
+        let _ = tokio::fs::remove_file(prompt_path).await;
+        let _ = tokio::fs::remove_file(task_doc_path).await;
+        if let Some(sp) = sandbox_path {
+            let _ = tokio::fs::remove_file(sp).await;
+        }
+    }
+
     /// Build the bash -c body that will run inside the tmux session.
     ///
     /// This is extracted from `spawn_tmux` so the generated script can be
@@ -380,18 +393,15 @@ impl ClaudeExecutor {
         ) {
             Ok(b) => b,
             Err(e) => {
-                let _ = tokio::fs::remove_file(&prompt_path).await;
-                let _ = tokio::fs::remove_file(&task_doc_path).await;
-                if let Some(ref sp) = sandbox_path {
-                    let _ = tokio::fs::remove_file(sp).await;
-                }
+                Self::cleanup_tmux_files(&prompt_path, &task_doc_path, sandbox_path.as_deref())
+                    .await;
                 return Err(e);
             }
         };
 
         // 5. Create tmux session
         info!(session = %opts.session_name, "creating tmux session");
-        let output = Command::new("tmux")
+        let output = match Command::new("tmux")
             .args([
                 "new-session",
                 "-d",
@@ -402,15 +412,18 @@ impl ClaudeExecutor {
                 &bash_body,
             ])
             .output()
-            .await?;
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                Self::cleanup_tmux_files(&prompt_path, &task_doc_path, sandbox_path.as_deref())
+                    .await;
+                return Err(e.into());
+            }
+        };
 
         if !output.status.success() {
-            // Clean up pre-written files that the tmux script would have cleaned up
-            let _ = tokio::fs::remove_file(&prompt_path).await;
-            let _ = tokio::fs::remove_file(&task_doc_path).await;
-            if let Some(ref sp) = sandbox_path {
-                let _ = tokio::fs::remove_file(sp).await;
-            }
+            Self::cleanup_tmux_files(&prompt_path, &task_doc_path, sandbox_path.as_deref()).await;
 
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("duplicate session") || stderr.contains("already exists") {
