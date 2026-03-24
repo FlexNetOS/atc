@@ -144,7 +144,12 @@ jobs:
       actions: read
     steps:
       - name: Reset job workspace
-        run: rm -rf "$PWD/artifacts" "$PWD/tap"
+        run: rm -rf "$PWD/artifacts" "$PWD/tap" "$PWD/src-repo"
+
+      - uses: actions/checkout@v4
+        with:
+          path: src-repo
+          sparse-checkout: homebrew
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -181,47 +186,13 @@ jobs:
           LINUX_ARM64="${{ steps.checksums.outputs.linux_arm64 }}"
           LINUX_X64="${{ steps.checksums.outputs.linux_x64 }}"
 
-          cat > Formula/atc.rb <<'FORMULA'
-          class Atc < Formula
-            desc "Air Traffic Control — agent orchestrator for AI coding agents"
-            homepage "https://github.com/harmony-labs/atc"
-            version "VERSION_PLACEHOLDER"
-            license "MIT"
+          # Copy template from source repo (single source of truth)
+          cp "$GITHUB_WORKSPACE/src-repo/homebrew/atc.rb" Formula/atc.rb
 
-            on_macos do
-              on_arm do
-                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-darwin-arm64.tar.gz"
-                sha256 "DARWIN_ARM64_PLACEHOLDER"
-              end
-              on_intel do
-                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-darwin-x64.tar.gz"
-                sha256 "DARWIN_X64_PLACEHOLDER"
-              end
-            end
+          # Strip the reference-template comment header (lines starting with #)
+          sed -i '' '/^# /d' Formula/atc.rb
 
-            on_linux do
-              on_arm do
-                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-linux-arm64.tar.gz"
-                sha256 "LINUX_ARM64_PLACEHOLDER"
-              end
-              on_intel do
-                url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-linux-x64.tar.gz"
-                sha256 "LINUX_X64_PLACEHOLDER"
-              end
-            end
-
-            def install
-              bin.install "atc"
-            end
-
-            test do
-              system bin/"atc", "--help"
-            end
-          end
-          FORMULA
-
-          # Remove leading whitespace from heredoc and substitute placeholders
-          sed -i '' 's/^          //' Formula/atc.rb
+          # Substitute placeholders with actual values
           sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/atc.rb
           sed -i '' "s/DARWIN_ARM64_PLACEHOLDER/${DARWIN_ARM64}/" Formula/atc.rb
           sed -i '' "s/DARWIN_X64_PLACEHOLDER/${DARWIN_X64}/" Formula/atc.rb

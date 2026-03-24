@@ -5,28 +5,28 @@
 class Atc < Formula
   desc "Air Traffic Control — agent orchestrator for AI coding agents"
   homepage "https://github.com/harmony-labs/atc"
-  version "0.1.0"
+  version "VERSION_PLACEHOLDER"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/harmony-labs/atc/releases/download/v#{version}/atc-darwin-arm64.tar.gz"
-      sha256 "PLACEHOLDER"
+      url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-darwin-arm64.tar.gz"
+      sha256 "DARWIN_ARM64_PLACEHOLDER"
     end
     on_intel do
-      url "https://github.com/harmony-labs/atc/releases/download/v#{version}/atc-darwin-x64.tar.gz"
-      sha256 "PLACEHOLDER"
+      url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-darwin-x64.tar.gz"
+      sha256 "DARWIN_X64_PLACEHOLDER"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/harmony-labs/atc/releases/download/v#{version}/atc-linux-arm64.tar.gz"
-      sha256 "PLACEHOLDER"
+      url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-linux-arm64.tar.gz"
+      sha256 "LINUX_ARM64_PLACEHOLDER"
     end
     on_intel do
-      url "https://github.com/harmony-labs/atc/releases/download/v#{version}/atc-linux-x64.tar.gz"
-      sha256 "PLACEHOLDER"
+      url "https://github.com/harmony-labs/atc/releases/download/vVERSION_PLACEHOLDER/atc-linux-x64.tar.gz"
+      sha256 "LINUX_X64_PLACEHOLDER"
     end
   end
 
