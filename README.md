@@ -279,7 +279,7 @@ atc retry <id>
 ```
 
 Classifies failures and adjusts config:
-- `error_max_turns` → halves `max_turns`
+- `error_max_turns` → doubles `max_turns`
 - `error_max_budget_usd` → doubles budget
 - Other → retries with same config
 - Max 3 retries, then escalates to `needs-human`
