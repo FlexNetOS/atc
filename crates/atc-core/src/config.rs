@@ -215,7 +215,7 @@ impl AtcConfig {
 
         // 3. Walk up from CWD looking for atc.toml
         if let Ok(start) = std::env::current_dir() {
-            if let Some(cfg) = Self::find_config_upward(&start)? {
+            if let Some(cfg) = Self::find_config_upward(&start) {
                 return Ok(cfg);
             }
         }
@@ -235,9 +235,11 @@ impl AtcConfig {
         Ok(Self::default())
     }
 
-    /// Walk up from `start` looking for `atc.toml`. Returns the first match,
-    /// or `None` if no config is found before reaching the filesystem root.
-    fn find_config_upward(start: &Path) -> anyhow::Result<Option<Self>> {
+    /// Walk up from `start` looking for `atc.toml`. Returns the first valid
+    /// config found, or `None` if no config is discovered before reaching the
+    /// filesystem root. This is a best-effort helper: malformed configs and I/O
+    /// errors are logged and skipped rather than propagated.
+    fn find_config_upward(start: &Path) -> Option<Self> {
         let mut dir = Some(start.to_path_buf());
         while let Some(d) = dir {
             let candidate = d.join("atc.toml");
@@ -245,7 +247,7 @@ impl AtcConfig {
                 Ok(contents) => match Self::parse_and_validate(&contents) {
                     Ok(mut cfg) => {
                         cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
-                        return Ok(Some(cfg));
+                        return Some(cfg);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -267,7 +269,7 @@ impl AtcConfig {
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
-        Ok(None)
+        None
     }
 }
 
@@ -1286,7 +1288,7 @@ components = ["base", "git"]
     fn test_traversal_finds_config_in_start_dir() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("atc.toml"), "[batch]\nmax_concurrency = 11").unwrap();
-        let cfg = AtcConfig::find_config_upward(dir.path()).unwrap().unwrap();
+        let cfg = AtcConfig::find_config_upward(dir.path()).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 11);
         assert_eq!(
             std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
@@ -1304,7 +1306,7 @@ components = ["base", "git"]
         .unwrap();
         let child = root.path().join("sub");
         std::fs::create_dir_all(&child).unwrap();
-        let cfg = AtcConfig::find_config_upward(&child).unwrap().unwrap();
+        let cfg = AtcConfig::find_config_upward(&child).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 12);
         assert_eq!(
             std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
@@ -1322,7 +1324,7 @@ components = ["base", "git"]
         .unwrap();
         let deep = root.path().join("a/b/c/d/e");
         std::fs::create_dir_all(&deep).unwrap();
-        let cfg = AtcConfig::find_config_upward(&deep).unwrap().unwrap();
+        let cfg = AtcConfig::find_config_upward(&deep).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 13);
         assert_eq!(
             std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
@@ -1343,7 +1345,7 @@ components = ["base", "git"]
         std::fs::write(sub.join("atc.toml"), "[batch]\nmax_concurrency = 21").unwrap();
         let deep = sub.join("deep");
         std::fs::create_dir_all(&deep).unwrap();
-        let cfg = AtcConfig::find_config_upward(&deep).unwrap().unwrap();
+        let cfg = AtcConfig::find_config_upward(&deep).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 21);
     }
 
@@ -1354,7 +1356,7 @@ components = ["base", "git"]
         std::fs::create_dir_all(&deep).unwrap();
         // No atc.toml anywhere under the tempdir; traversal eventually reaches
         // / where there is (almost certainly) no atc.toml either.
-        let result = AtcConfig::find_config_upward(&deep).unwrap();
+        let result = AtcConfig::find_config_upward(&deep);
         // May be None (no config found) or Some (if /tmp or / happens to have one).
         // The key property: it terminates without infinite loop.
         let _ = result;
@@ -1373,7 +1375,7 @@ components = ["base", "git"]
         let sub = root.path().join("child");
         std::fs::create_dir_all(sub.join("atc.toml")).unwrap();
         // Traversal should skip the directory and find the file in the root
-        let cfg = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
+        let cfg = AtcConfig::find_config_upward(&sub).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 50);
     }
 
@@ -1388,7 +1390,7 @@ components = ["base", "git"]
         )
         .unwrap();
         // Verify traversal would actually find the config from `sub`
-        let traversed = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
+        let traversed = AtcConfig::find_config_upward(&sub).unwrap();
         assert_eq!(traversed.batch.max_concurrency, 30);
         // Now verify explicit flag wins over that traversal result
         let explicit = tempfile::tempdir().unwrap();
@@ -1399,12 +1401,36 @@ components = ["base", "git"]
     }
 
     #[test]
+    fn test_atc_config_env_overrides_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let sub = root.path().join("child");
+        std::fs::create_dir_all(&sub).unwrap();
+        // Place a traversable config that would be found from `sub`
+        std::fs::write(
+            root.path().join("atc.toml"),
+            "[batch]\nmax_concurrency = 40",
+        )
+        .unwrap();
+        // Verify traversal would find it
+        let traversed = AtcConfig::find_config_upward(&sub).unwrap();
+        assert_eq!(traversed.batch.max_concurrency, 40);
+        // Create a different config and point ATC_CONFIG at it
+        let env_dir = tempfile::tempdir().unwrap();
+        let env_path = env_dir.path().join("env.toml");
+        std::fs::write(&env_path, "[batch]\nmax_concurrency = 41").unwrap();
+        std::env::set_var("ATC_CONFIG", env_path.to_str().unwrap());
+        let cfg = AtcConfig::load(None).unwrap();
+        std::env::remove_var("ATC_CONFIG");
+        assert_eq!(cfg.batch.max_concurrency, 41);
+    }
+
+    #[test]
     fn test_traversal_config_dir_set_correctly() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("atc.toml"), "").unwrap();
         let sub = root.path().join("x/y/z");
         std::fs::create_dir_all(&sub).unwrap();
-        let cfg = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
+        let cfg = AtcConfig::find_config_upward(&sub).unwrap();
         assert_eq!(
             std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
             std::fs::canonicalize(root.path()).unwrap(),
@@ -1424,7 +1450,7 @@ components = ["base", "git"]
         std::fs::create_dir_all(&sub).unwrap();
 
         // Should skip the malformed mid/atc.toml and find root/atc.toml
-        let result = AtcConfig::find_config_upward(&sub).unwrap();
+        let result = AtcConfig::find_config_upward(&sub);
         assert!(result.is_some());
         assert_eq!(
             std::fs::canonicalize(result.unwrap().config_dir.unwrap()).unwrap(),
