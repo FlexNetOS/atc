@@ -214,7 +214,7 @@ impl AtcConfig {
         }
 
         // 3. Walk up from CWD looking for atc.toml
-        if let Some(start) = std::env::current_dir().ok() {
+        if let Ok(start) = std::env::current_dir() {
             if let Some(cfg) = Self::find_config_upward(&start)? {
                 return Ok(cfg);
             }
