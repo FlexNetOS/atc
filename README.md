@@ -166,10 +166,10 @@ atc-core/                          atc-cli/
 ├── registry.rs      SQLite        ├── status.rs        Status table
 ├── resolver.rs      InputResolver ├── info.rs          Detail view
 ├── stream_json.rs   Log parser    ├── logs.rs          Log viewer
-├── project_env.rs   .dispatch/env ├── stop.rs          Stop command
-├── types.rs         Core types    ├── cleanup.rs       Cleanup command
-└── worktree.rs      Cleanup       ├── retry.rs         Adaptive retry
-                                   ├── health.rs        Health CLI
+├── templates.rs     Prompt render ├── stop.rs          Stop command
+├── project_env.rs   .dispatch/env ├── cleanup.rs       Cleanup command
+├── types.rs         Core types    ├── retry.rs         Adaptive retry
+└── worktree.rs      Cleanup       ├── health.rs        Health CLI
                                    ├── redirect.rs      Tmux injection
                                    ├── close.rs         Task closure
                                    └── post_complete.rs Post-completion
