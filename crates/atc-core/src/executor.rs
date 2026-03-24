@@ -804,4 +804,73 @@ mod tests {
             "should require GITKB_ROOT when stdin_content is None"
         );
     }
+
+    #[test]
+    fn test_build_tmux_bash_body_trap_with_sandbox() {
+        let executor = ClaudeExecutor::default();
+        let opts = AgentOpts {
+            stdin_content: Some("content".to_string()),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+        let sandbox_path = PathBuf::from("/tmp/test.sandbox.json");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, Some(&sandbox_path))
+            .unwrap();
+
+        // Verify variable assignments are present
+        assert!(
+            body.contains("ATC_PROMPT_FILE="),
+            "should assign ATC_PROMPT_FILE, got: {}",
+            body
+        );
+        assert!(
+            body.contains("ATC_TASKDOC_FILE="),
+            "should assign ATC_TASKDOC_FILE, got: {}",
+            body
+        );
+        assert!(
+            body.contains("ATC_SANDBOX_FILE="),
+            "should assign ATC_SANDBOX_FILE when sandbox path provided, got: {}",
+            body
+        );
+        // Verify trap references all three variables
+        assert!(
+            body.contains(
+                r#"trap 'rm -f "$ATC_PROMPT_FILE" "$ATC_TASKDOC_FILE" "$ATC_SANDBOX_FILE"' EXIT"#
+            ),
+            "trap should reference all three variables, got: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_build_tmux_bash_body_trap_without_sandbox() {
+        let executor = ClaudeExecutor::default();
+        let opts = AgentOpts {
+            stdin_content: Some("content".to_string()),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+
+        assert!(
+            !body.contains("ATC_SANDBOX_FILE"),
+            "should not reference ATC_SANDBOX_FILE when no sandbox path, got: {}",
+            body
+        );
+        assert!(
+            body.contains(r#"trap 'rm -f "$ATC_PROMPT_FILE" "$ATC_TASKDOC_FILE"' EXIT"#),
+            "trap should reference only two variables, got: {}",
+            body
+        );
+    }
 }
