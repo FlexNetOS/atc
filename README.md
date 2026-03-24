@@ -83,7 +83,7 @@ atc run → resolve input → create worktree → assemble prompt → run provid
 | `atc watch [--format ndjson]` | Stream live events from running agents |
 | `atc stop <id>` | Kill tmux session, mark stopped |
 | `atc cleanup <id>` | Remove worktree, unassign task |
-| `atc retry <id>` | Re-dispatch with adaptive config (halve turns / double budget) |
+| `atc retry <id>` | Re-dispatch with adaptive config (double turns / double budget) |
 | `atc redirect <id> '<msg>'` | Send message to running agent via tmux |
 | `atc close <slug>` | Verify task completion and close |
 | `atc post-complete [--id <id>]` | Run post-completion (auto or manual recovery) |
