@@ -258,7 +258,12 @@ impl AtcConfig {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
                 Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    tracing::warn!(
+                        "Unexpected I/O error reading {}: {e}; skipping",
+                        candidate.display()
+                    );
+                }
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
