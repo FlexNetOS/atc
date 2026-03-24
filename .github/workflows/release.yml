@@ -17,6 +17,7 @@ jobs:
     name: Build macOS (${{ matrix.arch }})
     runs-on: [self-hosted, macOS, ARM64]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: arm64
@@ -56,6 +57,7 @@ jobs:
     name: Build Linux (${{ matrix.arch }})
     runs-on: [self-hosted, macOS, ARM64]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: arm64
