@@ -31,7 +31,7 @@ atc run 'Fix the auth timeout bug in src/auth.rs'
 atc status
 
 # Tail agent logs
-atc logs -f
+atc logs -f <id>
 
 # Check health of all dispatches
 atc health
@@ -41,7 +41,7 @@ atc health
 
 ATC manages the full lifecycle of an AI agent dispatch:
 
-```
+```text
 atc run → resolve input → create worktree → assemble prompt → run providers → spawn agent → monitor → post-complete
 ```
 
@@ -152,23 +152,27 @@ enabled = true  # set false to disable GitKB integration
 
 ## Architecture
 
-```
+```text
 atc-core/                          atc-cli/
 ├── config.rs        Config        ├── pipeline.rs      DispatchPipeline
 ├── executor.rs      AgentExecutor ├── resolvers/
 ├── health.rs        HealthChecker │   ├── task.rs       TaskResolver (GitKB)
 ├── post_completion.rs             │   ├── template.rs   TemplateResolver
 ├── prompt_engine.rs  Handlebars   │   └── prompt.rs     PromptResolver
-├── providers/                     ├── watch.rs         Agent watcher
-│   ├── pr_context.rs              ├── status.rs        Status table
-│   ├── kb_context.rs              ├── info.rs          Detail view
-│   └── rebase.rs                  ├── logs.rs          Log viewer
-├── registry.rs      SQLite        ├── stop.rs          Stop command
-├── resolver.rs      InputResolver ├── cleanup.rs        Cleanup command
-├── stream_json.rs   Log parser    ├── retry.rs         Adaptive retry
-├── project_env.rs   .dispatch/env ├── health.rs        Health CLI
-├── types.rs         Core types    ├── redirect.rs      Tmux injection
-└── worktree.rs      Cleanup       └── close.rs         Task closure
+├── providers/                     ├── dispatch.rs      Shared dispatch utils
+│   ├── pr_context.rs              ├── resolve.rs       Resolver invocation
+│   ├── kb_context.rs              ├── subprocess.rs    Subprocess execution
+│   └── rebase.rs                  ├── watch.rs         Agent watcher
+├── registry.rs      SQLite        ├── status.rs        Status table
+├── resolver.rs      InputResolver ├── info.rs          Detail view
+├── stream_json.rs   Log parser    ├── logs.rs          Log viewer
+├── project_env.rs   .dispatch/env ├── stop.rs          Stop command
+├── types.rs         Core types    ├── cleanup.rs       Cleanup command
+└── worktree.rs      Cleanup       ├── retry.rs         Adaptive retry
+                                   ├── health.rs        Health CLI
+                                   ├── redirect.rs      Tmux injection
+                                   ├── close.rs         Task closure
+                                   └── post_complete.rs Post-completion
 ```
 
 ### InputResolver Trait
@@ -180,7 +184,7 @@ pub trait InputResolver: Send + Sync {
     fn name(&self) -> &str;
     async fn can_resolve(&self, input: &str, config: &AtcConfig) -> bool;
     async fn resolve(&self, input: &str, opts: &RunOpts, config: &AtcConfig) -> Result<ResolvedInput>;
-    async fn on_cleanup(&self, record: &DispatchRecord, registry: Option<&dyn Registry>);
+    async fn on_cleanup(&self, record: &DispatchRecord, config: &AtcConfig, registry: Option<&dyn Registry>);
 }
 ```
 
@@ -255,7 +259,7 @@ Loaded automatically on dispatch. Disable with `dispatch.project_env = false`.
 
 ## Health Check Signals
 
-```
+```text
 Signal 1: agent_exited_clean  → tmux session terminated
 Signal 2: branch_pushed       → git ls-remote finds branch on origin
 Signal 3: pr_created          → gh pr list finds PR for branch
@@ -291,7 +295,8 @@ Classifies failures and adjusts config:
 | `GITKB_ROOT` | Set by TaskResolver for agent's KB access |
 | `GITKB_WORKTREE` | Set by TaskResolver for per-branch indexing |
 | `GH_TOKEN` | GitHub auth (resolved from env or `gh auth token`) |
-| `AGENT_ALLOWED_PATHS` | File sandbox paths for agent |
+| `AGENT_ALLOWED_PATHS` | File sandbox paths for agent (computed by ATC; user values extend the worktree anchor) |
+| `CLAUDECODE` | Always set to empty string by ATC to prevent recursive agent-spawning |
 
 ## License
 
