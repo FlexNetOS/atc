@@ -276,7 +276,7 @@ impl ClaudeExecutor {
                 .map(|s| s.as_str())
                 .unwrap_or("main");
             bash_parts.push(format!(
-                "GITKB_ROOT='{}' GITKB_WORKSPACE='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
+                "timeout 30 bash -c \"GITKB_ROOT='{}' GITKB_WORKSPACE='{}' git-kb show '{}' > '{}'\" || {{ echo 'error: git-kb show failed or timed out' >&2 ; exit 1 ; }}",
                 shell_escape(kb_root)?,
                 shell_escape(gitkb_workspace)?,
                 shell_escape(&opts.slug)?,
@@ -366,8 +366,22 @@ impl ClaudeExecutor {
         }
 
         // 4. Build the bash -c command string
-        let bash_body =
-            self.build_tmux_bash_body(opts, &prompt_path, &task_doc_path, sandbox_path.as_deref())?;
+        let bash_body = match self.build_tmux_bash_body(
+            opts,
+            &prompt_path,
+            &task_doc_path,
+            sandbox_path.as_deref(),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&prompt_path).await;
+                let _ = tokio::fs::remove_file(&task_doc_path).await;
+                if let Some(ref sp) = sandbox_path {
+                    let _ = tokio::fs::remove_file(sp).await;
+                }
+                return Err(e);
+            }
+        };
 
         // 5. Create tmux session
         info!(session = %opts.session_name, "creating tmux session");
