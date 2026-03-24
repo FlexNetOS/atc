@@ -78,7 +78,7 @@ atc run → resolve input → create worktree → assemble prompt → run provid
 | `atc run <input>` | Dispatch an agent (task, template, or prompt) |
 | `atc status` | Table view of all dispatches |
 | `atc info <id>` | Detailed view of a single dispatch |
-| `atc logs [-f] [id]` | Tail stream-json logs (human-readable) |
+| `atc logs [-f] <id>` | Tail stream-json logs (human-readable) |
 | `atc health [--auto]` | Run 6-signal health checks; `--auto` dispatches review-fix |
 | `atc watch [--format ndjson]` | Stream live events from running agents |
 | `atc stop <id>` | Kill tmux session, mark stopped |
