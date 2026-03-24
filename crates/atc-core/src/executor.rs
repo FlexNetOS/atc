@@ -52,14 +52,28 @@ impl Default for ClaudeExecutor {
 impl ClaudeExecutor {
     /// Build the user prompt preamble (the `-p` argument to claude).
     fn build_user_prompt(opts: &AgentOpts) -> String {
-        format!(
-            "Directive: {}\nTask: {}\nWorking directory: {}\n\n\
-             The task document follows on stdin \u{2014} it IS your plan. \
-             Follow the system prompt instructions exactly.",
-            opts.mode.as_str(),
-            opts.slug,
-            opts.worktree_path.display(),
-        )
+        if opts.stdin_content.is_some() {
+            // Non-task dispatch (prompt/template): the system prompt already
+            // contains the full instructions. Stdin carries a context
+            // separator — not a duplicate of the system prompt.
+            format!(
+                "Directive: {}\nTask: {}\nWorking directory: {}\n\n\
+                 Follow the system prompt instructions exactly.",
+                opts.mode.as_str(),
+                opts.slug,
+                opts.worktree_path.display(),
+            )
+        } else {
+            // Task dispatch: stdin carries the task document from git-kb.
+            format!(
+                "Directive: {}\nTask: {}\nWorking directory: {}\n\n\
+                 The task document follows on stdin \u{2014} it IS your plan. \
+                 Follow the system prompt instructions exactly.",
+                opts.mode.as_str(),
+                opts.slug,
+                opts.worktree_path.display(),
+            )
+        }
     }
 
     /// Write sandbox-disable settings JSON to a file, returning the path.
@@ -368,7 +382,10 @@ impl ClaudeExecutor {
         // 2. Optionally write sandbox settings
         let sandbox_path = if !opts.sandbox {
             let p = log_dir.join(format!("{}.sandbox.json", opts.session_name));
-            Self::write_sandbox_settings(&p).await?;
+            if let Err(e) = Self::write_sandbox_settings(&p).await {
+                Self::cleanup_tmux_files(&prompt_path, &p, None).await;
+                return Err(e);
+            }
             Some(p)
         } else {
             None
@@ -381,7 +398,11 @@ impl ClaudeExecutor {
 
         if let Some(ref content) = opts.stdin_content {
             // Pre-built stdin content: write directly to the temp file
-            tokio::fs::write(&task_doc_path, content).await?;
+            if let Err(e) = tokio::fs::write(&task_doc_path, content).await {
+                Self::cleanup_tmux_files(&prompt_path, &task_doc_path, sandbox_path.as_deref())
+                    .await;
+                return Err(e.into());
+            }
         }
 
         // 4. Build the bash -c command string
@@ -543,6 +564,33 @@ mod tests {
         assert!(prompt.contains("Task: tasks/gitkb-42"));
         assert!(prompt.contains("Working directory: /tmp/worktrees/gitkb/core"));
         assert!(prompt.contains("The task document follows on stdin"));
+    }
+
+    #[test]
+    fn test_build_user_prompt_with_stdin_content() {
+        let opts = AgentOpts {
+            slug: "my-branch".to_string(),
+            worktree_path: PathBuf::from("/tmp/worktrees/test"),
+            prompt: String::new(),
+            mode: Mode::Implement,
+            log_file: PathBuf::from("/tmp/log.jsonl"),
+            env: HashMap::new(),
+            session_name: "test".to_string(),
+            dispatch_id: "test".to_string(),
+            sandbox: false,
+            inline: true,
+            max_turns: 10_000,
+            max_budget_usd: 25.0,
+            stdin_content: Some("some content".to_string()),
+        };
+        let prompt = ClaudeExecutor::build_user_prompt(&opts);
+        assert!(prompt.contains("Directive: implement"));
+        assert!(prompt.contains("Task: my-branch"));
+        assert!(
+            !prompt.contains("task document follows on stdin"),
+            "non-task dispatch should not reference task document on stdin"
+        );
+        assert!(prompt.contains("Follow the system prompt instructions exactly"));
     }
 
     #[test]

@@ -342,7 +342,13 @@ impl<'a> DispatchPipeline<'a> {
         let stdin_content = if resolved.task_slug.is_some() {
             None // task dispatches: executor fetches from git-kb
         } else {
-            Some(rendered_prompt.clone())
+            // Non-task dispatches: provide a short context marker as stdin
+            // instead of duplicating the rendered system prompt (which is
+            // already passed via --append-system-prompt-file).
+            Some(format!(
+                "Non-task dispatch ({}). All instructions are in the system prompt.",
+                resolved.branch
+            ))
         };
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
