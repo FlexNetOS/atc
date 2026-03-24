@@ -1,3 +1,7 @@
+# Reference template only — do NOT use this file directly.
+# The authoritative, checksum-filled formula is maintained at
+# https://github.com/harmony-labs/homebrew-tap/blob/main/Formula/atc.rb
+# and is updated automatically by .github/workflows/release.yml on each v* tag push.
 class Atc < Formula
   desc "Air Traffic Control — agent orchestrator for AI coding agents"
   homepage "https://github.com/harmony-labs/atc"

@@ -32,9 +32,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Ensure target is installed
-        run: rustup target add ${{ matrix.target }}
-
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p atc-cli
 
@@ -75,9 +72,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Ensure target is installed
-        run: rustup target add ${{ matrix.target }}
 
       - name: Verify cross-compiler
         run: |
@@ -146,6 +140,8 @@ jobs:
     name: Update Homebrew Formula
     needs: [release]
     runs-on: [self-hosted, macOS, ARM64]
+    permissions:
+      actions: read
     steps:
       - name: Reset job workspace
         run: rm -rf "$PWD/artifacts" "$PWD/tap"
@@ -256,13 +252,17 @@ jobs:
           fi
 
           # Create PR (may already exist from a previous run)
+          pr_url=""
           pr_output=$(gh pr create \
             --title "atc ${VERSION}" \
             --body "Automated formula update for atc v${VERSION}" \
             --base main \
-            --head "$BRANCH" 2>&1) || {
+            --head "$BRANCH" 2>&1) && {
+            pr_url=$(echo "$pr_output" | grep -o 'https://github.com/[^ ]*')
+          } || {
             if echo "$pr_output" | grep -qi "already exists"; then
               echo "::notice::PR already exists for $BRANCH — continuing"
+              pr_url=$(gh pr view "$BRANCH" --json url --jq '.url')
             else
               echo "::error::PR creation failed: $pr_output"
               exit 1
@@ -270,6 +270,10 @@ jobs:
           }
 
           # Auto-merge if we have permission
-          if ! gh pr merge "$BRANCH" --auto --squash 2>&1; then
-            echo "::warning::Auto-merge request failed — manual merge may be required"
+          if [ -n "$pr_url" ]; then
+            if ! gh pr merge "$pr_url" --auto --squash 2>&1; then
+              echo "::warning::Auto-merge request failed — manual merge may be required"
+            fi
+          else
+            echo "::warning::Could not determine PR URL — skipping auto-merge"
           fi
