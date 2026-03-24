@@ -242,11 +242,19 @@ impl AtcConfig {
         while let Some(d) = dir {
             let candidate = d.join("atc.toml");
             match std::fs::read_to_string(&candidate) {
-                Ok(contents) => {
-                    let mut cfg = Self::parse_and_validate(&contents)?;
-                    cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
-                    return Ok(Some(cfg));
-                }
+                Ok(contents) => match Self::parse_and_validate(&contents) {
+                    Ok(mut cfg) => {
+                        cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
+                        return Ok(Some(cfg));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Ignoring malformed config at {}: {}",
+                            candidate.display(),
+                            e
+                        );
+                    }
+                },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
                 Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => {}
@@ -1394,6 +1402,27 @@ components = ["base", "git"]
         let cfg = AtcConfig::find_config_upward(&sub).unwrap().unwrap();
         assert_eq!(
             std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_traversal_skips_malformed_config() {
+        let root = tempfile::tempdir().unwrap();
+        // Valid config in root
+        std::fs::write(root.path().join("atc.toml"), "").unwrap();
+        // Malformed config in child dir (invalid TOML key)
+        let mid = root.path().join("mid");
+        std::fs::create_dir_all(&mid).unwrap();
+        std::fs::write(mid.join("atc.toml"), "[invalid key!@#]").unwrap();
+        let sub = mid.join("deep");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Should skip the malformed mid/atc.toml and find root/atc.toml
+        let result = AtcConfig::find_config_upward(&sub).unwrap();
+        assert!(result.is_some());
+        assert_eq!(
+            std::fs::canonicalize(result.unwrap().config_dir.unwrap()).unwrap(),
             std::fs::canonicalize(root.path()).unwrap(),
         );
     }
