@@ -369,7 +369,7 @@ impl ClaudeExecutor {
         let bash_body =
             self.build_tmux_bash_body(opts, &prompt_path, &task_doc_path, sandbox_path.as_deref())?;
 
-        // 4. Create tmux session
+        // 5. Create tmux session
         info!(session = %opts.session_name, "creating tmux session");
         let output = Command::new("tmux")
             .args([
