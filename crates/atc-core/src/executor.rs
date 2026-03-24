@@ -314,7 +314,7 @@ impl ClaudeExecutor {
                 .map(|s| s.as_str())
                 .unwrap_or("main");
             bash_parts.push(format!(
-                "timeout 30 bash -c \"GITKB_ROOT='{}' GITKB_WORKSPACE='{}' git-kb show '{}' > '{}'\" || {{ echo 'error: git-kb show failed or timed out' >&2 ; exit 1 ; }}",
+                "GITKB_ROOT='{}' GITKB_WORKSPACE='{}' timeout 30 git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed or timed out' >&2 ; exit 1 ; }}",
                 shell_escape(kb_root)?,
                 shell_escape(gitkb_workspace)?,
                 shell_escape(&opts.slug)?,
