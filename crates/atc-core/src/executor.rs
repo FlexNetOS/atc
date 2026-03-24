@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{info, warn};
 
 #[async_trait]
@@ -84,19 +85,23 @@ impl ClaudeExecutor {
                 .get("GITKB_ROOT")
                 .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
 
-            let task_doc = Command::new("git-kb")
-                .args(["show", &opts.slug])
-                .env("GITKB_ROOT", kb_root)
-                .env(
-                    "GITKB_WORKSPACE",
-                    opts.env
-                        .get("GITKB_WORKSPACE")
-                        .map(|s| s.as_str())
-                        .unwrap_or("main"),
-                )
-                .kill_on_drop(true)
-                .output()
-                .await?;
+            let task_doc = tokio::time::timeout(
+                Duration::from_secs(30),
+                Command::new("git-kb")
+                    .args(["show", &opts.slug])
+                    .env("GITKB_ROOT", kb_root)
+                    .env(
+                        "GITKB_WORKSPACE",
+                        opts.env
+                            .get("GITKB_WORKSPACE")
+                            .map(|s| s.as_str())
+                            .unwrap_or("main"),
+                    )
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("git-kb show {} timed out", opts.slug))??;
 
             if !task_doc.status.success() {
                 anyhow::bail!(
@@ -174,7 +179,12 @@ impl ClaudeExecutor {
         // Write stdin content (task doc or pre-built content) to claude stdin
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(&stdin_bytes).await?;
+            if let Err(e) = stdin.write_all(&stdin_bytes).await {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(e.into());
+                }
+                warn!(slug = %opts.slug, error = %e, "claude closed stdin early");
+            }
             drop(stdin);
         }
 
@@ -282,9 +292,15 @@ impl ClaudeExecutor {
                 .env
                 .get("GITKB_ROOT")
                 .ok_or_else(|| anyhow::anyhow!("GITKB_ROOT not set in agent env"))?;
+            let gitkb_workspace = opts
+                .env
+                .get("GITKB_WORKSPACE")
+                .map(|s| s.as_str())
+                .unwrap_or("main");
             bash_parts.push(format!(
-                "GITKB_ROOT='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
+                "GITKB_ROOT='{}' GITKB_WORKSPACE='{}' git-kb show '{}' > '{}' || {{ echo 'error: git-kb show failed' >&2 ; exit 1 ; }}",
                 shell_escape(kb_root)?,
+                shell_escape(gitkb_workspace)?,
                 shell_escape(&opts.slug)?,
                 shell_escape(&task_doc_path_str)?,
             ));
