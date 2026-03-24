@@ -250,6 +250,17 @@ impl ClaudeExecutor {
         // Ensure pipe failures propagate (so EXIT_CODE captures claude's exit, not tee's)
         bash_parts.push("set -o pipefail".to_string());
 
+        // Trap EXIT to clean up temp files on any exit path (including early
+        // failures like git-kb show timeout or cd failure).
+        let mut trap_files = vec![
+            format!("'{}'", shell_escape(&prompt_path.to_string_lossy())?),
+            format!("'{}'", shell_escape(&task_doc_path.to_string_lossy())?),
+        ];
+        if let Some(sp) = sandbox_path {
+            trap_files.push(format!("'{}'", shell_escape(&sp.to_string_lossy())?));
+        }
+        bash_parts.push(format!("trap 'rm -f {}' EXIT", trap_files.join(" ")));
+
         // Export env vars (keys are validated to prevent shell injection)
         // Empty value = unset the variable from the inherited environment.
         for (k, v) in &opts.env {
@@ -320,12 +331,7 @@ impl ClaudeExecutor {
             shell_escape(&log_file_str)?,
         ));
 
-        // Cleanup temp files
-        bash_parts.push(format!("rm -f '{}'", shell_escape(&prompt_path_str)?));
-        bash_parts.push(format!("rm -f '{}'", shell_escape(&task_doc_path_str)?));
-        if let Some(sp) = sandbox_path {
-            bash_parts.push(format!("rm -f '{}'", shell_escape(&sp.to_string_lossy())?));
-        }
+        // Exit with Claude's exit code (trap handles temp file cleanup)
         bash_parts.push("exit $EXIT_CODE".to_string());
 
         Ok(bash_parts.join(" ; "))
@@ -664,6 +670,36 @@ mod tests {
         assert!(
             body.contains("cat '/tmp/test.taskdoc'"),
             "bash body should pipe the taskdoc file to claude"
+        );
+        assert!(
+            body.contains("trap 'rm -f"),
+            "bash body should contain a trap for cleanup, got: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_build_tmux_bash_body_task_dispatch_has_timeout_and_trap() {
+        let executor = ClaudeExecutor::default();
+        let mut env = HashMap::new();
+        env.insert("GITKB_ROOT".to_string(), "/tmp/kb".to_string());
+        let opts = make_test_opts(None, env);
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+        assert!(
+            body.contains("timeout 30"),
+            "git-kb show should have a 30s timeout, got: {}",
+            body
+        );
+        assert!(
+            body.contains("trap 'rm -f"),
+            "bash body should contain a trap for cleanup, got: {}",
+            body
         );
     }
 
