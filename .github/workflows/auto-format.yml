@@ -14,14 +14,15 @@ concurrency:
 jobs:
   format:
     name: Auto Format
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     # Only run on PRs from the same repo (not forks)
     if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use PAT to trigger downstream workflows; fallback to GITHUB_TOKEN
+          token: ${{ secrets.PARENT_REPO_PAT || github.token }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
