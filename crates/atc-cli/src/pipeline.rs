@@ -554,7 +554,7 @@ impl<'a> DispatchPipeline<'a> {
             resolved.task_slug.as_deref().unwrap_or(&resolved.branch)
         );
         println!("Resolver:    {}", resolver_name);
-        println!("Directive:        {}", resolved.directive.as_str());
+        println!("Directive:   {}", resolved.directive.as_str());
         println!("Branch:      {}", resolved.branch);
         println!("ID:          {}", resolved.dispatch_id);
         println!("Budget:      ${:.2}", budget);
@@ -589,7 +589,7 @@ fn print_dispatch_confirmation(
     let slug_display = task_slug.unwrap_or("(none)");
     println!("Dispatched: {}", slug_display);
     println!("  Resolver:  {}", resolver_name);
-    println!("  Directive:      {}", directive.as_str());
+    println!("  Directive: {}", directive.as_str());
     println!("  ID:        {}", id);
     println!("  Branch:    {}", branch);
     println!("  Worktree:  {}", worktree_path.display());

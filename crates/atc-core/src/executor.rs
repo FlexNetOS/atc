@@ -14,7 +14,7 @@ pub trait AgentExecutor: Send + Sync {
 pub struct AgentOpts {
     pub slug: String,
     pub worktree_path: PathBuf,
-    pub prompt: String, // rendered system prompt for the mode
+    pub prompt: String, // rendered system prompt for the directive
     pub directive: Directive,
     pub log_file: PathBuf,            // stream-json output destination
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.

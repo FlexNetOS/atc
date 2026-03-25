@@ -198,7 +198,7 @@ fn save_review_artifact(
     log_dir: &Path,
     dispatch_id: &str,
     artifacts: &Artifacts,
-    _mode: &Directive,
+    _directive: &Directive,
 ) -> Result<()> {
     let head_commit = artifacts.commits.last().cloned().unwrap_or_default();
 

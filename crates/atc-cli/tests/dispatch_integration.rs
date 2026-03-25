@@ -203,7 +203,7 @@ fn test_directives() -> HashMap<String, DirectiveConfig> {
         directives.insert(
             key.to_string(),
             DirectiveConfig {
-                template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
+                template_inline: Some(format!("Test prompt for {{{{slug}}}} directive {key}.")),
                 ..Default::default()
             },
         );
