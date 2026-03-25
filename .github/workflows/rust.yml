@@ -81,10 +81,5 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      - name: Install nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
       - name: Test
-        run: cargo nextest run --profile ci
+        run: cargo test --all-targets
