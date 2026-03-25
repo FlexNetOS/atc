@@ -13,7 +13,8 @@ runs:
         LOCK_DIR="/tmp/sccache-install.lock.d"
         if ! command -v sccache &> /dev/null; then
           (
-            trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
+            lock_acquired=0
+            trap '[ "$lock_acquired" -eq 1 ] && rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
             deadline=$((SECONDS + 120))
             until mkdir "${LOCK_DIR}" 2>/dev/null; do
               if [ "$SECONDS" -ge "$deadline" ]; then
@@ -22,6 +23,7 @@ runs:
               fi
               sleep 1
             done
+            lock_acquired=1
             if ! command -v sccache &> /dev/null; then
               echo "Installing sccache..."
               brew install sccache
@@ -30,4 +32,5 @@ runs:
         fi
         # Start sccache server (creates cache dir automatically)
         sccache --start-server 2>&1 | grep -v "server already running" || true
-        sccache --show-stats
+        echo "--- sccache stats (job start baseline) ---"
+        sccache --show-stats || true
