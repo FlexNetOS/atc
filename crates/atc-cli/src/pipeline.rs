@@ -32,12 +32,19 @@ impl<'a> DispatchPipeline<'a> {
         let resolved = resolver.resolve(input, opts, self.config).await?;
 
         // 3. Validate
-        if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments) && opts.pr_url.is_none() {
+        // PR URL can come from --pr-url or from template --param pr=<url>
+        let effective_pr_url = opts
+            .pr_url
+            .clone()
+            .or_else(|| opts.params.get("pr").cloned());
+        if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments)
+            && effective_pr_url.is_none()
+        {
             // Rollback resolver state
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
             resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
-                "{} mode requires a PR URL (--pr-url). Cannot dispatch without it.",
+                "{} mode requires a PR URL (--pr-url or --param pr=<url>). Cannot dispatch without it.",
                 resolved.mode.as_str()
             );
         }
@@ -80,7 +87,7 @@ impl<'a> DispatchPipeline<'a> {
         // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
         //    when dry_run is set), so we can return immediately.
         if opts.dry_run {
-            return self.dry_run(&resolved, opts, budget, turns, resolver.name());
+            return self.dry_run(&resolved, effective_pr_url.as_deref(), budget, turns, resolver.name());
         }
 
         // 5. Ensure worktree (skip if --no-worktree)
@@ -105,19 +112,9 @@ impl<'a> DispatchPipeline<'a> {
                 None => meta.as_ref().map(|m| m.repo.clone()),
             };
 
-            let kb_basename = match workspace_root.file_name() {
-                Some(name) => name.to_string_lossy().into_owned(),
-                None => {
-                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                    resolver.on_cleanup(&tmp_record, self.config, None).await;
-                    anyhow::bail!("workspace_root has no basename");
-                }
-            };
-
             let worktree_base = dispatch_cfg.resolved_worktree_base();
             let wt_opts = WorktreeOpts {
                 worktree_base: &worktree_base,
-                kb_basename: &kb_basename,
                 repo: repo.as_deref(),
                 branch: &resolved.branch,
                 meta_workspace_root: &workspace_root,
@@ -247,7 +244,7 @@ impl<'a> DispatchPipeline<'a> {
                 branch: resolved.branch.clone(),
                 worktree_path: worktree_path.clone(),
                 mode: resolved.mode.clone(),
-                pr_url: opts.pr_url.clone(),
+                pr_url: effective_pr_url.clone(),
                 params: opts.params.clone(),
                 kb_root: kb_root.to_path_buf(),
                 log_dir: log_dir.clone(),
@@ -257,10 +254,16 @@ impl<'a> DispatchPipeline<'a> {
             let provider_output =
                 atc_core::providers::run_providers(&providers, &dispatch_ctx).await;
 
-            // Apply template_vars to rendered prompt (e.g., {{prefetch}})
+            // Apply template_vars to rendered prompt. Provider vars were rendered
+            // as deferred placeholders (__ATC_DEFER_<var>__) by the template
+            // engine; replace those now. Also replace raw {{var}} for backward
+            // compatibility with non-template dispatches.
             for (key, value) in &provider_output.template_vars {
-                let placeholder = format!("{{{{{}}}}}", key);
-                rendered_prompt = rendered_prompt.replace(&placeholder, value);
+                let deferred = atc_core::prompt_engine::deferred_placeholder(key);
+                rendered_prompt = rendered_prompt.replace(&deferred, value);
+                // Backward compat: also replace raw {{key}} (e.g. component-assembled prompts)
+                let raw_placeholder = format!("{{{{{}}}}}", key);
+                rendered_prompt = rendered_prompt.replace(&raw_placeholder, value);
             }
 
             // Write provider output files to worktree
@@ -396,7 +399,7 @@ impl<'a> DispatchPipeline<'a> {
             mode: resolved.mode.clone(),
             retries: opts.retries,
             resolver: resolver.name().to_string(),
-            pr_url: opts.pr_url.clone(),
+            pr_url: effective_pr_url.clone(),
             no_worktree: opts.no_worktree,
             original_input: Some(input.to_string()),
             checks: HealthChecks::default(),
@@ -427,7 +430,7 @@ impl<'a> DispatchPipeline<'a> {
 
         // "Agent starting" PR comment
         if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments) {
-            if let Some(ref url) = opts.pr_url {
+            if let Some(ref url) = effective_pr_url {
                 let comment = format!(
                     "\u{1f916} Agent starting: {} on {}",
                     resolved.mode.as_str(),
@@ -523,7 +526,7 @@ impl<'a> DispatchPipeline<'a> {
     fn dry_run(
         &self,
         resolved: &atc_core::resolver::ResolvedInput,
-        opts: &RunOpts,
+        pr_url: Option<&str>,
         budget: f64,
         turns: u32,
         resolver_name: &str,
@@ -539,10 +542,7 @@ impl<'a> DispatchPipeline<'a> {
         println!("ID:          {}", resolved.dispatch_id);
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
-        println!(
-            "PR URL:      {}",
-            opts.pr_url.as_deref().unwrap_or("(none)")
-        );
+        println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
         Ok(DispatchOutcome {
             id: resolved.dispatch_id.clone(),
             session: resolved.dispatch_id.clone(),
