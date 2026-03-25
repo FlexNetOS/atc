@@ -786,9 +786,7 @@ Working on PR: {{pr}}
             render_template_with_deferred(&tmpl_path, &params, &["prefetch"], &config, None)
                 .await
                 .unwrap();
-        assert!(output
-            .body
-            .contains("https://github.com/org/repo/pull/1"));
+        assert!(output.body.contains("https://github.com/org/repo/pull/1"));
         assert!(output.body.contains(&deferred_placeholder("prefetch")));
         // User-supplied var should be resolved, not deferred
         assert!(!output.body.contains("{{pr_url}}"));
@@ -796,10 +794,7 @@ Working on PR: {{pr}}
 
     #[test]
     fn test_deferred_placeholder_format() {
-        assert_eq!(
-            deferred_placeholder("prefetch"),
-            "__ATC_DEFER_prefetch__"
-        );
+        assert_eq!(deferred_placeholder("prefetch"), "__ATC_DEFER_prefetch__");
     }
 
     #[tokio::test]

@@ -37,8 +37,7 @@ impl<'a> DispatchPipeline<'a> {
             .pr_url
             .clone()
             .or_else(|| opts.params.get("pr").cloned());
-        if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments)
-            && effective_pr_url.is_none()
+        if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments) && effective_pr_url.is_none()
         {
             // Rollback resolver state
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
@@ -87,7 +86,13 @@ impl<'a> DispatchPipeline<'a> {
         // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
         //    when dry_run is set), so we can return immediately.
         if opts.dry_run {
-            return self.dry_run(&resolved, effective_pr_url.as_deref(), budget, turns, resolver.name());
+            return self.dry_run(
+                &resolved,
+                effective_pr_url.as_deref(),
+                budget,
+                turns,
+                resolver.name(),
+            );
         }
 
         // 5. Ensure worktree (skip if --no-worktree)

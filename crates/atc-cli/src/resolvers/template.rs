@@ -492,7 +492,9 @@ mod tests {
 
         // User-supplied param should be resolved
         assert!(
-            result.system_prompt.contains("https://github.com/org/repo/pull/42"),
+            result
+                .system_prompt
+                .contains("https://github.com/org/repo/pull/42"),
             "expected PR URL in prompt, got: {}",
             result.system_prompt
         );

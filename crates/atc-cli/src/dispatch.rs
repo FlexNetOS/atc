@@ -353,14 +353,7 @@ pub async fn ensure_worktree(
     if let Some(repo_alias) = repo {
         let output = tokio::process::Command::new("meta")
             .args([
-                "git",
-                "worktree",
-                "create",
-                branch,
-                "--repo",
-                repo_alias,
-                "--branch",
-                branch,
+                "git", "worktree", "create", branch, "--repo", repo_alias, "--branch", branch,
             ])
             .env("META_WORKTREES", worktree_base)
             .env("GITKB_ROOT", kb_root)
