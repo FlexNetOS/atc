@@ -1,0 +1,33 @@
+name: Setup sccache
+description: >
+  Install sccache (if absent) and start the server. Effective only for
+  debug-profile builds; release-profile jobs (LTO) should not use this.
+
+runs:
+  using: composite
+  steps:
+    - name: Install and start sccache
+      shell: bash
+      run: |
+        # Install sccache if not present (with portable mkdir-based lock)
+        LOCK_DIR="/tmp/sccache-install.lock.d"
+        if ! command -v sccache &> /dev/null; then
+          (
+            deadline=$((SECONDS + 120))
+            until mkdir "${LOCK_DIR}" 2>/dev/null; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "Timed out waiting for sccache install lock" >&2
+                exit 1
+              fi
+              sleep 1
+            done
+            trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
+            if ! command -v sccache &> /dev/null; then
+              echo "Installing sccache..."
+              brew install sccache
+            fi
+          )
+        fi
+        # Start sccache server (creates cache dir automatically)
+        sccache --start-server 2>/dev/null || true
+        sccache --show-stats
