@@ -146,9 +146,7 @@ pub async fn run_post_completion(
         Directive::ReviewFix | Directive::PrComments
     ) {
         if let Some(log_dir) = log_file.parent() {
-            if let Err(e) =
-                save_review_artifact(log_dir, &input.dispatch_id, &artifacts)
-            {
+            if let Err(e) = save_review_artifact(log_dir, &input.dispatch_id, &artifacts) {
                 warn!(id = %input.dispatch_id, error = %e, "failed to save review artifact");
             }
         }
@@ -194,11 +192,7 @@ pub async fn run_post_completion(
 }
 
 /// Save a structured JSON review artifact for cross-run continuity.
-fn save_review_artifact(
-    log_dir: &Path,
-    dispatch_id: &str,
-    artifacts: &Artifacts,
-) -> Result<()> {
+fn save_review_artifact(log_dir: &Path, dispatch_id: &str, artifacts: &Artifacts) -> Result<()> {
     let head_commit = artifacts.commits.last().cloned().unwrap_or_default();
 
     let pr_url = artifacts.pr_urls.first().cloned().unwrap_or_default();
@@ -572,12 +566,7 @@ mod tests {
             summary: Some("Fixed the bug".to_string()),
             ..Default::default()
         };
-        save_review_artifact(
-            dir.path(),
-            "test-dispatch",
-            &artifacts,
-        )
-        .unwrap();
+        save_review_artifact(dir.path(), "test-dispatch", &artifacts).unwrap();
 
         let artifact_path = dir.path().join("test-dispatch-review-artifact.json");
         assert!(artifact_path.exists());
