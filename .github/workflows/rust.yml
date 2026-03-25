@@ -50,7 +50,7 @@ jobs:
 
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true
 
   check:
     name: Check & Test
@@ -98,4 +98,4 @@ jobs:
 
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true

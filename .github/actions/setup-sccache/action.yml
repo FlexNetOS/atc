@@ -31,6 +31,6 @@ runs:
           )
         fi
         # Start sccache server (creates cache dir automatically)
-        sccache --start-server 2>&1 | grep -v "server already running" || true
+        sccache --start-server 2>&1 | grep -v "already running" || true
         echo "--- sccache stats (job start baseline) ---"
         sccache --show-stats || true
