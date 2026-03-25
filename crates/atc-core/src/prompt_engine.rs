@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{expand_tilde, AtcConfig};
-use crate::types::Mode;
+use crate::types::Directive;
 
 /// Result of rendering a template: the rendered body and a list of directive/component names.
 #[derive(Debug, Clone)]
@@ -19,22 +19,22 @@ pub struct TemplateOutput {
 /// in order with `\n\n` separators. After assembly, any `{{> partial}}` Handlebars
 /// partial tags are expanded via the 3-level partial resolver.
 pub async fn assemble_system_prompt(
-    mode: &Mode,
+    directive: &Directive,
     slug: &str,
-    directive: &str,
+    directive_text: &str,
     config: &AtcConfig,
     worktree_path: Option<&Path>,
 ) -> Result<String> {
-    let mode_key = mode.as_str();
-    let mode_config = config
-        .modes
-        .get(mode_key)
-        .with_context(|| format!("no mode config for '{mode_key}'"))?;
+    let directive_key = directive.as_str();
+    let directive_config = config
+        .directives
+        .get(directive_key)
+        .with_context(|| format!("no directive config for '{directive_key}'"))?;
 
-    let components = mode_config
+    let components = directive_config
         .components
         .as_ref()
-        .with_context(|| format!("mode '{mode_key}' has no components list"))?;
+        .with_context(|| format!("directive '{directive_key}' has no components list"))?;
 
     let components_dir = resolve_dir(&config.prompt.components_dir, config.config_dir.as_deref());
 
@@ -59,16 +59,22 @@ pub async fn assemble_system_prompt(
     let mut rendered = hbs
         .render_template(
             &assembled,
-            &serde_json::json!({ "slug": slug, "directive": directive }),
+            &serde_json::json!({ "slug": slug, "directive": directive_text }),
         )
         .with_context(|| {
-            format!("failed to expand partials in assembled prompt for mode '{mode_key}'")
+            format!("failed to expand partials in assembled prompt for directive '{directive_key}'")
         })?;
 
     // Append the directive only if not already present — either inlined via
     // {{directive}} in a component or expanded through a partial.
-    if !directive.trim().is_empty() && !template_owns_directive && !rendered.contains(directive) {
-        rendered.push_str(&format!("\n\n---\nAdditional directive: {}", directive));
+    if !directive_text.trim().is_empty()
+        && !template_owns_directive
+        && !rendered.contains(directive_text)
+    {
+        rendered.push_str(&format!(
+            "\n\n---\nAdditional directive: {}",
+            directive_text
+        ));
     }
 
     Ok(rendered)
@@ -161,32 +167,33 @@ pub async fn render_template_with_deferred(
 /// Top-level prompt rendering — replaces the old `templates::render_prompt`.
 ///
 /// Resolution order:
-/// 1. Mode has `components` → assemble from component files
-/// 2. Mode has `template_path` → read file + simple token replacement (backward compat)
-/// 3. Mode has `template_inline` → use inline string (backward compat)
+/// 1. Directive has `components` → assemble from component files
+/// 2. Directive has `template_path` → read file + simple token replacement (backward compat)
+/// 3. Directive has `template_inline` → use inline string (backward compat)
 /// 4. Error
 pub async fn render_prompt(
-    mode: &Mode,
+    directive: &Directive,
     slug: &str,
     config: &AtcConfig,
-    directive: &str,
+    directive_text: &str,
     worktree_path: Option<&Path>,
 ) -> Result<String> {
-    let mode_key = mode.as_str();
+    let directive_key = directive.as_str();
 
-    if let Some(mode_config) = config.modes.get(mode_key) {
+    if let Some(directive_config) = config.directives.get(directive_key) {
         // Path 1: Component assembly
-        if mode_config.components.is_some() {
+        if directive_config.components.is_some() {
             let prompt =
-                assemble_system_prompt(mode, slug, directive, config, worktree_path).await?;
+                assemble_system_prompt(directive, slug, directive_text, config, worktree_path)
+                    .await?;
             return Ok(prompt);
         }
 
         // Path 2: template_path (backward compat with simple token replacement)
-        if let Some(ref path_str) = mode_config.template_path {
-            if mode_config.template_inline.is_some() {
+        if let Some(ref path_str) = directive_config.template_path {
+            if directive_config.template_inline.is_some() {
                 tracing::warn!(
-                    mode = mode_key,
+                    directive = directive_key,
                     "both template_path and template_inline set; using template_path"
                 );
             }
@@ -204,26 +211,26 @@ pub async fn render_prompt(
                 .await
                 .with_context(|| {
                     format!(
-                        "failed to read template file '{}' for mode '{}'",
+                        "failed to read template file '{}' for directive '{}'",
                         expanded.display(),
-                        mode_key,
+                        directive_key,
                     )
                 })?;
-            return Ok(apply_legacy_tokens(&content, slug, directive));
+            return Ok(apply_legacy_tokens(&content, slug, directive_text));
         }
 
         // Path 3: template_inline (backward compat)
-        if let Some(ref inline) = mode_config.template_inline {
+        if let Some(ref inline) = directive_config.template_inline {
             if !inline.trim().is_empty() {
-                return Ok(apply_legacy_tokens(inline, slug, directive));
+                return Ok(apply_legacy_tokens(inline, slug, directive_text));
             }
         }
     }
 
     anyhow::bail!(
-        "no template configured for mode '{}': set [modes.{}] components, template_path, or template_inline in atc.toml",
-        mode_key,
-        mode_key,
+        "no template configured for directive '{}': set [directives.{}] components, template_path, or template_inline in atc.toml",
+        directive_key,
+        directive_key,
     )
 }
 
@@ -438,7 +445,7 @@ fn resolve_dir(dir: &str, config_dir: Option<&Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModeConfig, PromptConfig};
+    use crate::config::{DirectiveConfig, PromptConfig};
     use std::collections::HashMap;
 
     // --- split_frontmatter tests ---
@@ -550,10 +557,10 @@ Body content here."#;
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string(), "git".to_string()]),
                 ..Default::default()
             },
@@ -566,11 +573,11 @@ Body content here."#;
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
 
-        let result = assemble_system_prompt(&Mode::Implement, "test-slug", "", &config, None)
+        let result = assemble_system_prompt(&Directive::Implement, "test-slug", "", &config, None)
             .await
             .unwrap();
         assert!(result.contains("Base content."));
@@ -595,10 +602,10 @@ Body content here."#;
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["nonexistent".to_string()]),
                 ..Default::default()
             },
@@ -611,11 +618,11 @@ Body content here."#;
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
 
-        let err = assemble_system_prompt(&Mode::Implement, "test-slug", "", &config, None)
+        let err = assemble_system_prompt(&Directive::Implement, "test-slug", "", &config, None)
             .await
             .unwrap_err();
         assert!(
@@ -635,10 +642,10 @@ Body content here."#;
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 ..Default::default()
             },
@@ -651,11 +658,11 @@ Body content here."#;
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
 
-        let result = assemble_system_prompt(&Mode::Implement, "my-task", "", &config, None)
+        let result = assemble_system_prompt(&Directive::Implement, "my-task", "", &config, None)
             .await
             .unwrap();
         assert!(
@@ -836,19 +843,19 @@ Working on PR: {{pr}}
 
     #[tokio::test]
     async fn test_render_prompt_inline_backward_compat() {
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 template_inline: Some("Task: {{slug}}".to_string()),
                 ..Default::default()
             },
         );
         let config = AtcConfig {
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/abc", &config, "", None)
+        let result = render_prompt(&Directive::Implement, "tasks/abc", &config, "", None)
             .await
             .unwrap();
         assert_eq!(result, "Task: tasks/abc");
@@ -860,19 +867,19 @@ Working on PR: {{pr}}
         let path = dir.path().join("custom.txt");
         std::fs::write(&path, "File: {{slug}}.").unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 template_path: Some(path.to_string_lossy().into_owned()),
                 ..Default::default()
             },
         );
         let config = AtcConfig {
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
+        let result = render_prompt(&Directive::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap();
         assert_eq!(result, "File: tasks/t.");
@@ -888,10 +895,10 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 template_inline: Some("Inline fallback".to_string()),
                 ..Default::default()
@@ -904,10 +911,10 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
+        let result = render_prompt(&Directive::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap();
         assert!(result.contains("Component content."));
@@ -924,10 +931,10 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 ..Default::default()
             },
@@ -939,12 +946,18 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "focus on tests", None)
-            .await
-            .unwrap();
+        let result = render_prompt(
+            &Directive::Implement,
+            "tasks/t",
+            &config,
+            "focus on tests",
+            None,
+        )
+        .await
+        .unwrap();
         assert!(result.contains("Component content."));
         assert!(result.contains("Additional directive: focus on tests"));
     }
@@ -959,10 +972,10 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 ..Default::default()
             },
@@ -974,10 +987,10 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
+        let result = render_prompt(&Directive::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap();
         assert!(result.contains("Component content."));
@@ -998,10 +1011,10 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 ..Default::default()
             },
@@ -1013,14 +1026,19 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
 
-        let result =
-            assemble_system_prompt(&Mode::Implement, "my-task", "focus on tests", &config, None)
-                .await
-                .unwrap();
+        let result = assemble_system_prompt(
+            &Directive::Implement,
+            "my-task",
+            "focus on tests",
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             result.contains("Directive: focus on tests"),
             "directive should be available in Handlebars context, got: {result}"
@@ -1042,10 +1060,10 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 ..Default::default()
             },
@@ -1057,12 +1075,18 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "focus on tests", None)
-            .await
-            .unwrap();
+        let result = render_prompt(
+            &Directive::Implement,
+            "tasks/t",
+            &config,
+            "focus on tests",
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             result.contains("Inline directive: focus on tests"),
             "directive should be expanded inline, got: {result}"
@@ -1088,10 +1112,10 @@ Working on PR: {{pr}}
         // The partial itself embeds {{directive}}.
         std::fs::write(partials_dir.join("instructions.md"), "Focus: {{directive}}").unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string()]),
                 ..Default::default()
             },
@@ -1103,12 +1127,18 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
-        let result = render_prompt(&Mode::Implement, "tasks/t", &config, "write tests", None)
-            .await
-            .unwrap();
+        let result = render_prompt(
+            &Directive::Implement,
+            "tasks/t",
+            &config,
+            "write tests",
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             result.contains("Focus: write tests"),
             "partial should expand directive, got: {result}"
@@ -1148,10 +1178,10 @@ Working on PR: {{pr}}
         let partials_dir = dir.path().join("partials");
         std::fs::create_dir_all(&partials_dir).unwrap();
 
-        let mut modes = HashMap::new();
-        modes.insert(
+        let mut directives = HashMap::new();
+        directives.insert(
             "implement".to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 components: Some(vec!["base".to_string(), "git".to_string()]),
                 ..Default::default()
             },
@@ -1163,11 +1193,11 @@ Working on PR: {{pr}}
                 templates_dir: "templates".to_string(),
                 partials_dir: "partials".to_string(),
             },
-            modes,
+            directives,
             ..Default::default()
         };
 
-        let result = assemble_system_prompt(&Mode::Implement, "s", "", &config, None)
+        let result = assemble_system_prompt(&Directive::Implement, "s", "", &config, None)
             .await
             .unwrap();
         assert!(
@@ -1181,11 +1211,12 @@ Working on PR: {{pr}}
     #[tokio::test]
     async fn test_render_prompt_no_config_errors() {
         let config = AtcConfig::default();
-        let err = render_prompt(&Mode::Implement, "tasks/t", &config, "", None)
+        let err = render_prompt(&Directive::Implement, "tasks/t", &config, "", None)
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("no template configured for mode"),
+            err.to_string()
+                .contains("no template configured for directive"),
             "unexpected error: {err}"
         );
     }

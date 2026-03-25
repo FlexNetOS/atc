@@ -25,9 +25,9 @@ pub struct AtcConfig {
     /// Prompt engine configuration (components, templates, partials directories).
     #[serde(default)]
     pub prompt: PromptConfig,
-    /// Per-mode template overrides. Keys are mode names (e.g. "implement", "review-fix").
+    /// Per-directive template overrides. Keys are directive names (e.g. "implement", "review-fix").
     #[serde(default)]
-    pub modes: HashMap<String, ModeConfig>,
+    pub directives: HashMap<String, DirectiveConfig>,
     /// Resolver chain configuration.
     #[serde(default)]
     pub resolvers: ResolversConfig,
@@ -117,50 +117,50 @@ impl AtcConfig {
                 && cfg.health.cost_warning_threshold >= 0.0,
             "health.cost_warning_threshold must be a finite non-negative number"
         );
-        // Validate mode keys against known Mode variants + per-mode overrides
-        for key in cfg.modes.keys() {
-            key.parse::<crate::types::Mode>().map_err(|_| {
+        // Validate directive keys against known Directive variants + per-mode overrides
+        for key in cfg.directives.keys() {
+            key.parse::<crate::types::Directive>().map_err(|_| {
                 anyhow::anyhow!(
-                    "unknown mode '{}' in [modes.{}]; valid modes: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
+                    "unknown directive '{}' in [directives.{}]; valid directives: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
                     key, key,
                 )
             })?;
-            let mode_cfg = cfg.modes.get(key).unwrap();
-            if let Some(components) = &mode_cfg.components {
+            let directive_cfg = cfg.directives.get(key).unwrap();
+            if let Some(components) = &directive_cfg.components {
                 anyhow::ensure!(
                     !components.is_empty(),
-                    "modes.{}.components must contain at least one component name",
+                    "directives.{}.components must contain at least one component name",
                     key
                 );
                 for name in components {
                     anyhow::ensure!(
                         !name.trim().is_empty(),
-                        "modes.{}.components contains an empty component name",
+                        "directives.{}.components contains an empty component name",
                         key
                     );
                     anyhow::ensure!(
                         !name.contains('/') && !name.contains('\\') && !name.contains(".."),
-                        "modes.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
+                        "directives.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
                         key,
                         name
                     );
                 }
             }
-            if let Some(budget) = mode_cfg.max_budget_usd {
+            if let Some(budget) = directive_cfg.max_budget_usd {
                 anyhow::ensure!(
                     budget > 0.0 && budget.is_finite(),
-                    "modes.{}.max_budget_usd must be a positive finite number",
+                    "directives.{}.max_budget_usd must be a positive finite number",
                     key
                 );
             }
-            if let Some(turns) = mode_cfg.max_turns {
-                anyhow::ensure!(turns > 0, "modes.{}.max_turns must be >= 1", key);
+            if let Some(turns) = directive_cfg.max_turns {
+                anyhow::ensure!(turns > 0, "directives.{}.max_turns must be >= 1", key);
             }
-            if let Some(providers) = &mode_cfg.providers {
+            if let Some(providers) = &directive_cfg.providers {
                 for name in providers {
                     anyhow::ensure!(
                         crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
-                        "unknown provider '{}' in modes.{}.providers; valid providers: {}",
+                        "unknown provider '{}' in directives.{}.providers; valid providers: {}",
                         name,
                         key,
                         crate::providers::KNOWN_PROVIDERS.join(", ")
@@ -484,17 +484,17 @@ impl Default for BatchConfig {
     }
 }
 
-/// Per-mode template override configuration.
+/// Per-directive template override configuration.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModeConfig {
+pub struct DirectiveConfig {
     /// Path to a template file on disk. Supports `~` expansion.
     pub template_path: Option<String>,
     /// Inline template string. Ignored if `template_path` is also set.
     pub template_inline: Option<String>,
-    /// Per-mode budget override (USD). Takes precedence over global dispatch.max_budget_usd.
+    /// Per-directive budget override (USD). Takes precedence over global dispatch.max_budget_usd.
     pub max_budget_usd: Option<f64>,
-    /// Per-mode turns override. Takes precedence over global dispatch.max_turns.
+    /// Per-directive turns override. Takes precedence over global dispatch.max_turns.
     pub max_turns: Option<u32>,
     /// Ordered list of component names. Each name maps to `<components_dir>/<name>.md`.
     /// When set, the system prompt is assembled by concatenating these components.
@@ -920,58 +920,58 @@ max_budget_usd = 10.0
     }
 
     #[test]
-    fn test_parse_modes_from_toml() {
+    fn test_parse_directives_from_toml() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 template_path = "/etc/atc/implement.md"
 
-[modes.research]
+[directives.research]
 template_inline = "Research prompt for {{slug}}"
 
-[modes.review-fix]
+[directives.review-fix]
 template_path = "~/templates/review.md"
 template_inline = "fallback (ignored)"
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
-        assert_eq!(cfg.modes.len(), 3);
+        assert_eq!(cfg.directives.len(), 3);
 
-        let implement = cfg.modes.get("implement").unwrap();
+        let implement = cfg.directives.get("implement").unwrap();
         assert_eq!(
             implement.template_path.as_deref(),
             Some("/etc/atc/implement.md")
         );
         assert!(implement.template_inline.is_none());
 
-        let research = cfg.modes.get("research").unwrap();
+        let research = cfg.directives.get("research").unwrap();
         assert!(research.template_path.is_none());
         assert_eq!(
             research.template_inline.as_deref(),
             Some("Research prompt for {{slug}}")
         );
 
-        let review_fix = cfg.modes.get("review-fix").unwrap();
+        let review_fix = cfg.directives.get("review-fix").unwrap();
         assert!(review_fix.template_path.is_some());
         assert!(review_fix.template_inline.is_some());
     }
 
     #[test]
-    fn test_mode_config_per_directive_budget() {
+    fn test_directive_config_per_directive_budget() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 template_inline = "test"
 max_budget_usd = 10.0
 max_turns = 500
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
-        let mode = cfg.modes.get("implement").unwrap();
-        assert_eq!(mode.max_budget_usd, Some(10.0));
-        assert_eq!(mode.max_turns, Some(500));
+        let dcfg = cfg.directives.get("implement").unwrap();
+        assert_eq!(dcfg.max_budget_usd, Some(10.0));
+        assert_eq!(dcfg.max_turns, Some(500));
     }
 
     #[test]
-    fn test_mode_config_rejects_unknown_fields() {
+    fn test_directive_config_rejects_unknown_fields() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 template_paht = "typo"
 "#;
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
@@ -982,47 +982,47 @@ template_paht = "typo"
     }
 
     #[test]
-    fn test_unknown_mode_name_rejected() {
+    fn test_unknown_directive_name_rejected() {
         let toml = r#"
-[modes.implment]
+[directives.implment]
 template_inline = "typo in mode name"
 "#;
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(
-            err.to_string().contains("unknown mode 'implment'"),
-            "expected unknown mode error, got: {err}"
+            err.to_string().contains("unknown directive 'implment'"),
+            "expected unknown directive error, got: {err}"
         );
     }
 
     #[test]
-    fn test_valid_mode_names_accepted() {
+    fn test_valid_directive_names_accepted() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 template_inline = "a"
 
-[modes.research]
+[directives.research]
 template_inline = "b"
 
-[modes.kb-update]
+[directives.kb-update]
 template_inline = "c"
 
-[modes.review-fix]
+[directives.review-fix]
 template_inline = "d"
 
-[modes.pr-comments]
+[directives.pr-comments]
 template_inline = "e"
 
-[modes.refine]
+[directives.refine]
 template_inline = "f"
 
-[modes.create-task]
+[directives.create-task]
 template_inline = "g"
 
-[modes.close]
+[directives.close]
 template_inline = "h"
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
-        assert_eq!(cfg.modes.len(), 8);
+        assert_eq!(cfg.directives.len(), 8);
     }
 
     #[test]
@@ -1150,34 +1150,34 @@ max_retries = 5
     }
 
     #[test]
-    fn test_per_mode_rejects_zero_budget() {
-        let toml = "[modes.implement]\nmax_budget_usd = 0.0";
+    fn test_per_directive_rejects_zero_budget() {
+        let toml = "[directives.implement]\nmax_budget_usd = 0.0";
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("modes.implement.max_budget_usd must be a positive finite number"),
+                .contains("directives.implement.max_budget_usd must be a positive finite number"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn test_per_mode_rejects_negative_budget() {
-        let toml = "[modes.implement]\nmax_budget_usd = -5.0";
+    fn test_per_directive_rejects_negative_budget() {
+        let toml = "[directives.implement]\nmax_budget_usd = -5.0";
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("modes.implement.max_budget_usd must be a positive finite number"),
+                .contains("directives.implement.max_budget_usd must be a positive finite number"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn test_per_mode_rejects_zero_turns() {
-        let toml = "[modes.research]\nmax_turns = 0";
+    fn test_per_directive_rejects_zero_turns() {
+        let toml = "[directives.research]\nmax_turns = 0";
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("modes.research.max_turns must be >= 1"),
+                .contains("directives.research.max_turns must be >= 1"),
             "unexpected error: {err}"
         );
     }
@@ -1216,22 +1216,22 @@ max_retries = 5
     }
 
     #[test]
-    fn test_per_mode_valid_overrides_accepted() {
+    fn test_per_directive_valid_overrides_accepted() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 max_budget_usd = 10.0
 max_turns = 500
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
-        let mode = cfg.modes.get("implement").unwrap();
-        assert_eq!(mode.max_budget_usd, Some(10.0));
-        assert_eq!(mode.max_turns, Some(500));
+        let dcfg = cfg.directives.get("implement").unwrap();
+        assert_eq!(dcfg.max_budget_usd, Some(10.0));
+        assert_eq!(dcfg.max_turns, Some(500));
     }
 
     #[test]
     fn test_empty_components_list_rejected() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 components = []
 "#;
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
@@ -1245,7 +1245,7 @@ components = []
     #[test]
     fn test_blank_component_name_rejected() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 components = ["base", "  "]
 "#;
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
@@ -1258,13 +1258,13 @@ components = ["base", "  "]
     #[test]
     fn test_valid_components_accepted() {
         let toml = r#"
-[modes.implement]
+[directives.implement]
 components = ["base", "git"]
 "#;
         let cfg = AtcConfig::parse_and_validate(toml).unwrap();
-        let mode = cfg.modes.get("implement").unwrap();
+        let dcfg = cfg.directives.get("implement").unwrap();
         assert_eq!(
-            mode.components,
+            dcfg.components,
             Some(vec!["base".to_string(), "git".to_string()])
         );
     }
@@ -1273,7 +1273,7 @@ components = ["base", "git"]
     fn test_component_name_path_traversal_rejected() {
         let cases = [("../secret", ".."), ("foo/bar", "/"), ("foo\\\\bar", "\\")];
         for (name, reason) in cases {
-            let toml = format!("[modes.implement]\ncomponents = [\"{name}\"]");
+            let toml = format!("[directives.implement]\ncomponents = [\"{name}\"]");
             let err = AtcConfig::parse_and_validate(&toml).unwrap_err();
             assert!(
                 err.to_string().contains("invalid component name"),

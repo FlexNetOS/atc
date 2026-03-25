@@ -3,7 +3,7 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::{AgentExecutor, AgentOpts};
 use atc_core::registry::Registry;
 use atc_core::resolver::InputResolver;
-use atc_core::types::{DispatchOutcome, DispatchRecord, HealthChecks, Mode, RunOpts, Status};
+use atc_core::types::{Directive, DispatchOutcome, DispatchRecord, HealthChecks, RunOpts, Status};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -37,14 +37,17 @@ impl<'a> DispatchPipeline<'a> {
             .pr_url
             .clone()
             .or_else(|| opts.params.get("pr").cloned());
-        if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments) && effective_pr_url.is_none()
+        if matches!(
+            resolved.directive,
+            Directive::ReviewFix | Directive::PrComments
+        ) && effective_pr_url.is_none()
         {
             // Rollback resolver state
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
             resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
-                "{} mode requires a PR URL (--pr-url or --param pr=<url>). Cannot dispatch without it.",
-                resolved.mode.as_str()
+                "{} directive requires a PR URL (--pr-url or --param pr=<url>). Cannot dispatch without it.",
+                resolved.directive.as_str()
             );
         }
 
@@ -55,21 +58,26 @@ impl<'a> DispatchPipeline<'a> {
             return Err(e);
         }
 
-        // Resolve per-mode budget/turns
+        // Resolve per-directive budget/turns
         let dispatch_cfg = &self.config.dispatch;
-        let mode_key = resolved.mode.as_str();
+        let directive_key = resolved.directive.as_str();
         let budget = opts
             .max_budget_usd
             .or_else(|| {
                 self.config
-                    .modes
-                    .get(mode_key)
+                    .directives
+                    .get(directive_key)
                     .and_then(|m| m.max_budget_usd)
             })
             .unwrap_or(dispatch_cfg.max_budget_usd);
         let turns = opts
             .max_turns
-            .or_else(|| self.config.modes.get(mode_key).and_then(|m| m.max_turns))
+            .or_else(|| {
+                self.config
+                    .directives
+                    .get(directive_key)
+                    .and_then(|m| m.max_turns)
+            })
             .unwrap_or(dispatch_cfg.max_turns);
 
         // Duplicate session detection
@@ -240,7 +248,8 @@ impl<'a> DispatchPipeline<'a> {
         write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
 
         // 7b. Run context providers (non-fatal errors logged, dispatch continues)
-        let providers = atc_core::providers::providers_for_mode(self.config, &resolved.mode);
+        let providers =
+            atc_core::providers::providers_for_directive(self.config, &resolved.directive);
         let mut rendered_prompt = resolved.system_prompt.clone();
         if !providers.is_empty() {
             let dispatch_ctx = atc_core::providers::DispatchContext {
@@ -248,7 +257,7 @@ impl<'a> DispatchPipeline<'a> {
                 task_slug: resolved.task_slug.clone(),
                 branch: resolved.branch.clone(),
                 worktree_path: worktree_path.clone(),
-                mode: resolved.mode.clone(),
+                directive: resolved.directive.clone(),
                 pr_url: effective_pr_url.clone(),
                 params: opts.params.clone(),
                 kb_root: kb_root.to_path_buf(),
@@ -362,7 +371,7 @@ impl<'a> DispatchPipeline<'a> {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
             prompt: rendered_prompt,
-            mode: resolved.mode.clone(),
+            directive: resolved.directive.clone(),
             log_file: log_file.clone(),
             env,
             session_name: session_name.clone(),
@@ -401,7 +410,7 @@ impl<'a> DispatchPipeline<'a> {
             session: handle.session.clone(),
             log_file: log_file.clone(),
             status,
-            mode: resolved.mode.clone(),
+            directive: resolved.directive.clone(),
             retries: opts.retries,
             resolver: resolver.name().to_string(),
             pr_url: effective_pr_url.clone(),
@@ -434,11 +443,14 @@ impl<'a> DispatchPipeline<'a> {
         }
 
         // "Agent starting" PR comment
-        if matches!(resolved.mode, Mode::ReviewFix | Mode::PrComments) {
+        if matches!(
+            resolved.directive,
+            Directive::ReviewFix | Directive::PrComments
+        ) {
             if let Some(ref url) = effective_pr_url {
                 let comment = format!(
                     "\u{1f916} Agent starting: {} on {}",
-                    resolved.mode.as_str(),
+                    resolved.directive.as_str(),
                     resolved.branch
                 );
                 post_pr_comment(url, &comment).await;
@@ -454,7 +466,7 @@ impl<'a> DispatchPipeline<'a> {
         // Post-dispatch confirmation
         print_dispatch_confirmation(
             resolved.task_slug.as_deref(),
-            &resolved.mode,
+            &resolved.directive,
             &resolved.dispatch_id,
             &resolved.branch,
             &worktree_path,
@@ -510,7 +522,7 @@ impl<'a> DispatchPipeline<'a> {
             session: String::new(),
             log_file: PathBuf::new(),
             status: Status::Failed,
-            mode: resolved.mode.clone(),
+            directive: resolved.directive.clone(),
             retries: opts.retries,
             resolver: resolver_name.to_string(),
             pr_url: opts.pr_url.clone(),
@@ -542,7 +554,7 @@ impl<'a> DispatchPipeline<'a> {
             resolved.task_slug.as_deref().unwrap_or(&resolved.branch)
         );
         println!("Resolver:    {}", resolver_name);
-        println!("Mode:        {}", resolved.mode.as_str());
+        println!("Directive:        {}", resolved.directive.as_str());
         println!("Branch:      {}", resolved.branch);
         println!("ID:          {}", resolved.dispatch_id);
         println!("Budget:      ${:.2}", budget);
@@ -566,7 +578,7 @@ pub fn resolver_by_name(name: &str) -> Option<Box<dyn InputResolver>> {
 #[allow(clippy::too_many_arguments)]
 fn print_dispatch_confirmation(
     task_slug: Option<&str>,
-    mode: &Mode,
+    directive: &Directive,
     id: &str,
     branch: &str,
     worktree_path: &Path,
@@ -577,7 +589,7 @@ fn print_dispatch_confirmation(
     let slug_display = task_slug.unwrap_or("(none)");
     println!("Dispatched: {}", slug_display);
     println!("  Resolver:  {}", resolver_name);
-    println!("  Mode:      {}", mode.as_str());
+    println!("  Directive:      {}", directive.as_str());
     println!("  ID:        {}", id);
     println!("  Branch:    {}", branch);
     println!("  Worktree:  {}", worktree_path.display());

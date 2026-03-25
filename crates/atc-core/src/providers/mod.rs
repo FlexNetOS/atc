@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::AtcConfig;
-use crate::types::Mode;
+use crate::types::Directive;
 
 /// Input context available to providers during dispatch preparation.
 pub struct DispatchContext {
@@ -16,7 +16,7 @@ pub struct DispatchContext {
     pub task_slug: Option<String>,
     pub branch: String,
     pub worktree_path: PathBuf,
-    pub mode: Mode,
+    pub directive: Directive,
     pub pr_url: Option<String>,
     /// Key=value pairs from `--param` flags.
     pub params: HashMap<String, String>,
@@ -72,10 +72,13 @@ pub fn make_provider(name: &str) -> Option<Box<dyn ContextProvider>> {
 }
 
 /// Instantiate all providers for a given mode from config.
-pub fn providers_for_mode(config: &AtcConfig, mode: &Mode) -> Vec<Box<dyn ContextProvider>> {
-    let mode_key = mode.as_str();
-    let provider_names = match config.modes.get(mode_key) {
-        Some(mode_cfg) => mode_cfg.providers.clone().unwrap_or_default(),
+pub fn providers_for_directive(
+    config: &AtcConfig,
+    directive: &Directive,
+) -> Vec<Box<dyn ContextProvider>> {
+    let directive_key = directive.as_str();
+    let provider_names = match config.directives.get(directive_key) {
+        Some(directive_cfg) => directive_cfg.providers.clone().unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -193,7 +196,7 @@ mod tests {
             task_slug: None,
             branch: "main".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             pr_url: None,
             params: HashMap::new(),
             kb_root: PathBuf::from("/tmp/kb"),
@@ -271,9 +274,9 @@ mod tests {
     }
 
     #[test]
-    fn test_providers_for_mode_empty_when_no_config() {
+    fn test_providers_for_directive_empty_when_no_config() {
         let config = AtcConfig::default();
-        let providers = providers_for_mode(&config, &Mode::Implement);
+        let providers = providers_for_directive(&config, &Directive::Implement);
         assert!(providers.is_empty());
     }
 

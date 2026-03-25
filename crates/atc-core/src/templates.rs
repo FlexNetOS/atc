@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::config::{expand_tilde, AtcConfig};
-use crate::types::Mode;
+use crate::types::Directive;
 
 /// Resolve and render the system prompt for a mode.
 ///
@@ -12,21 +12,21 @@ use crate::types::Mode;
 ///    template did not contain a `{{directive}}` placeholder (i.e., the
 ///    template didn't handle placement itself).
 pub async fn render_prompt(
-    mode: &Mode,
+    directive: &Directive,
     slug: &str,
     config: &AtcConfig,
-    directive: &str,
+    directive_text: &str,
 ) -> Result<String> {
-    let base = resolve_base_template(mode, config).await?;
+    let base = resolve_base_template(directive, config).await?;
     let template_owns_directive = base.contains("{{directive}}");
     let rendered = base
         .replace("{{slug}}", slug)
-        .replace("{{directive}}", directive);
-    if directive.is_empty() || template_owns_directive {
+        .replace("{{directive}}", directive_text);
+    if directive_text.is_empty() || template_owns_directive {
         Ok(rendered)
     } else {
         Ok(format!(
-            "{rendered}\n\n---\nAdditional directive: {directive}"
+            "{rendered}\n\n---\nAdditional directive: {directive_text}"
         ))
     }
 }
@@ -35,13 +35,13 @@ pub async fn render_prompt(
 /// 1. `template_path` from config (file on disk, ~ expanded)
 /// 2. `template_inline` from config (non-empty string)
 /// 3. Error — no built-in defaults; each project must provide its own templates.
-async fn resolve_base_template(mode: &Mode, config: &AtcConfig) -> Result<String> {
-    let mode_key = mode.as_str();
-    if let Some(mode_config) = config.modes.get(mode_key) {
-        if let Some(ref path_str) = mode_config.template_path {
-            if mode_config.template_inline.is_some() {
+async fn resolve_base_template(directive: &Directive, config: &AtcConfig) -> Result<String> {
+    let directive_key = directive.as_str();
+    if let Some(directive_config) = config.directives.get(directive_key) {
+        if let Some(ref path_str) = directive_config.template_path {
+            if directive_config.template_inline.is_some() {
                 tracing::warn!(
-                    mode = mode_key,
+                    directive = directive_key,
                     "both template_path and template_inline set; using template_path"
                 );
             }
@@ -59,14 +59,14 @@ async fn resolve_base_template(mode: &Mode, config: &AtcConfig) -> Result<String
                 .await
                 .with_context(|| {
                     format!(
-                        "failed to read template file '{}' for mode '{}'",
+                        "failed to read template file '{}' for directive '{}'",
                         expanded.display(),
-                        mode_key,
+                        directive_key,
                     )
                 })?;
             return Ok(content);
         }
-        if let Some(ref inline) = mode_config.template_inline {
+        if let Some(ref inline) = directive_config.template_inline {
             if !inline.trim().is_empty() {
                 return Ok(inline.clone());
             }
@@ -74,31 +74,31 @@ async fn resolve_base_template(mode: &Mode, config: &AtcConfig) -> Result<String
         }
     }
     anyhow::bail!(
-        "no template configured for mode '{}': set [modes.{}] template_path or template_inline in atc.toml",
-        mode_key,
-        mode_key,
+        "no template configured for directive '{}': set [directives.{}] template_path or template_inline in atc.toml",
+        directive_key,
+        directive_key,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ModeConfig;
+    use crate::config::DirectiveConfig;
     use std::collections::HashMap;
 
-    fn config_with_mode(mode_key: &str, mode_config: ModeConfig) -> AtcConfig {
-        let mut modes = HashMap::new();
-        modes.insert(mode_key.to_string(), mode_config);
+    fn config_with_directive(directive_key: &str, directive_config: DirectiveConfig) -> AtcConfig {
+        let mut directives = HashMap::new();
+        directives.insert(directive_key.to_string(), directive_config);
         AtcConfig {
-            modes,
+            directives,
             ..Default::default()
         }
     }
 
-    fn config_with_inline(mode_key: &str, template: &str) -> AtcConfig {
-        config_with_mode(
-            mode_key,
-            ModeConfig {
+    fn config_with_inline(directive_key: &str, template: &str) -> AtcConfig {
+        config_with_directive(
+            directive_key,
+            DirectiveConfig {
                 template_path: None,
                 template_inline: Some(template.to_string()),
                 ..Default::default()
@@ -114,15 +114,15 @@ mod tests {
         let path = dir.path().join("custom.txt");
         std::fs::write(&path, "Custom prompt for {{slug}}.").unwrap();
 
-        let cfg = config_with_mode(
+        let cfg = config_with_directive(
             "implement",
-            ModeConfig {
+            DirectiveConfig {
                 template_path: Some(path.to_string_lossy().into_owned()),
                 template_inline: None,
                 ..Default::default()
             },
         );
-        let result = render_prompt(&Mode::Implement, "tasks/abc", &cfg, "")
+        let result = render_prompt(&Directive::Implement, "tasks/abc", &cfg, "")
             .await
             .unwrap();
         assert_eq!(result, "Custom prompt for tasks/abc.");
@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn test_template_inline_override() {
         let cfg = config_with_inline("research", "Inline prompt for {{slug}}.");
-        let result = render_prompt(&Mode::Research, "tasks/xyz", &cfg, "")
+        let result = render_prompt(&Directive::Research, "tasks/xyz", &cfg, "")
             .await
             .unwrap();
         assert_eq!(result, "Inline prompt for tasks/xyz.");
@@ -147,15 +147,15 @@ mod tests {
         let path = dir.path().join("winner.txt");
         std::fs::write(&path, "From file.").unwrap();
 
-        let cfg = config_with_mode(
+        let cfg = config_with_directive(
             "implement",
-            ModeConfig {
+            DirectiveConfig {
                 template_path: Some(path.to_string_lossy().into_owned()),
                 template_inline: Some("From inline.".to_string()),
                 ..Default::default()
             },
         );
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let result = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap();
         assert_eq!(result, "From file.");
@@ -166,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn test_slug_replaced() {
         let cfg = config_with_inline("implement", "Working on {{slug}} now.");
-        let result = render_prompt(&Mode::Implement, "tasks/gitkb-42", &cfg, "")
+        let result = render_prompt(&Directive::Implement, "tasks/gitkb-42", &cfg, "")
             .await
             .unwrap();
         assert_eq!(result, "Working on tasks/gitkb-42 now.");
@@ -178,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn test_directive_token_replaced_no_tail_block() {
         let cfg = config_with_inline("implement", "Task {{slug}} directive: {{directive}}");
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "focus on tests")
+        let result = render_prompt(&Directive::Implement, "tasks/t", &cfg, "focus on tests")
             .await
             .unwrap();
         // Directive replaced in-place
@@ -195,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn test_directive_appended_when_nonempty_no_placeholder() {
         let cfg = config_with_inline("implement", "Prompt for {{slug}}.");
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "focus on tests")
+        let result = render_prompt(&Directive::Implement, "tasks/t", &cfg, "focus on tests")
             .await
             .unwrap();
         assert!(result.contains("---\nAdditional directive: focus on tests"));
@@ -204,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn test_directive_omitted_when_empty() {
         let cfg = config_with_inline("implement", "Prompt for {{slug}}.");
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let result = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap();
         assert!(!result.contains("Additional directive"));
@@ -215,15 +215,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_when_template_path_missing() {
-        let cfg = config_with_mode(
+        let cfg = config_with_directive(
             "implement",
-            ModeConfig {
+            DirectiveConfig {
                 template_path: Some("/tmp/nonexistent-atc-template-268.txt".to_string()),
                 template_inline: None,
                 ..Default::default()
             },
         );
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let err = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap_err();
         assert!(
@@ -237,11 +237,12 @@ mod tests {
     #[tokio::test]
     async fn test_error_when_no_config() {
         let cfg = AtcConfig::default();
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let err = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("no template configured for mode"),
+            err.to_string()
+                .contains("no template configured for directive"),
             "unexpected error: {err}"
         );
     }
@@ -250,19 +251,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_inline_errors() {
-        let cfg = config_with_mode(
+        let cfg = config_with_directive(
             "implement",
-            ModeConfig {
+            DirectiveConfig {
                 template_path: None,
                 template_inline: Some(String::new()),
                 ..Default::default()
             },
         );
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let err = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("no template configured for mode"),
+            err.to_string()
+                .contains("no template configured for directive"),
             "unexpected error: {err}"
         );
     }
@@ -271,19 +273,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_whitespace_only_inline_errors() {
-        let cfg = config_with_mode(
+        let cfg = config_with_directive(
             "implement",
-            ModeConfig {
+            DirectiveConfig {
                 template_path: None,
                 template_inline: Some("   \n\t  ".to_string()),
                 ..Default::default()
             },
         );
-        let err = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let err = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("no template configured for mode"),
+            err.to_string()
+                .contains("no template configured for directive"),
             "unexpected error: {err}"
         );
     }
@@ -297,9 +300,9 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("impl.txt"), "Relative template for {{slug}}.").unwrap();
 
-        let mut cfg = config_with_mode(
+        let mut cfg = config_with_directive(
             "implement",
-            ModeConfig {
+            DirectiveConfig {
                 template_path: Some("templates/impl.txt".to_string()),
                 template_inline: None,
                 ..Default::default()
@@ -307,57 +310,58 @@ mod tests {
         );
         cfg.config_dir = Some(dir.path().to_path_buf());
 
-        let result = render_prompt(&Mode::Implement, "tasks/t", &cfg, "")
+        let result = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
             .unwrap();
         assert_eq!(result, "Relative template for tasks/t.");
     }
 
-    // -- All 7 modes resolve when configured --
+    // -- All 7 directives resolve when configured --
 
     #[tokio::test]
-    async fn test_all_modes_resolve_with_inline_config() {
-        let modes = [
-            ("implement", Mode::Implement),
-            ("research", Mode::Research),
-            ("kb-update", Mode::KbUpdate),
-            ("review-fix", Mode::ReviewFix),
-            ("pr-comments", Mode::PrComments),
-            ("refine", Mode::Refine),
-            ("create-task", Mode::CreateTask),
-            ("close", Mode::Close),
+    async fn test_all_directives_resolve_with_inline_config() {
+        let all_directives = [
+            ("implement", Directive::Implement),
+            ("research", Directive::Research),
+            ("kb-update", Directive::KbUpdate),
+            ("review-fix", Directive::ReviewFix),
+            ("pr-comments", Directive::PrComments),
+            ("refine", Directive::Refine),
+            ("create-task", Directive::CreateTask),
+            ("close", Directive::Close),
         ];
-        for (key, mode) in &modes {
-            let cfg = config_with_inline(key, &format!("Template for {{{{slug}}}} mode {key}."));
-            let result = render_prompt(mode, "tasks/test-1", &cfg, "").await.unwrap();
+        for (key, d) in &all_directives {
+            let cfg =
+                config_with_inline(key, &format!("Template for {{{{slug}}}} directive {key}."));
+            let result = render_prompt(d, "tasks/test-1", &cfg, "").await.unwrap();
             assert!(
                 result.contains("tasks/test-1"),
-                "mode {key} did not substitute slug: {result}"
+                "directive {key} did not substitute slug: {result}"
             );
         }
     }
 
-    // -- All 7 modes error without config --
+    // -- All 7 directives error without config --
 
     #[tokio::test]
-    async fn test_all_modes_error_without_config() {
+    async fn test_all_directives_error_without_config() {
         let cfg = AtcConfig::default();
-        let modes = [
-            Mode::Implement,
-            Mode::Research,
-            Mode::KbUpdate,
-            Mode::ReviewFix,
-            Mode::PrComments,
-            Mode::Refine,
-            Mode::CreateTask,
-            Mode::Close,
+        let all_directives = [
+            Directive::Implement,
+            Directive::Research,
+            Directive::KbUpdate,
+            Directive::ReviewFix,
+            Directive::PrComments,
+            Directive::Refine,
+            Directive::CreateTask,
+            Directive::Close,
         ];
-        for mode in &modes {
-            let err = render_prompt(mode, "tasks/t", &cfg, "").await.unwrap_err();
+        for d in &all_directives {
+            let err = render_prompt(d, "tasks/t", &cfg, "").await.unwrap_err();
             assert!(
                 err.to_string().contains("no template configured"),
-                "mode {} should error without config: {err}",
-                mode.as_str()
+                "directive {} should error without config: {err}",
+                d.as_str()
             );
         }
     }

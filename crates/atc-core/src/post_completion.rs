@@ -7,7 +7,7 @@
 use crate::config::AtcConfig;
 use crate::registry::Registry;
 use crate::stream_json::{self, Artifacts};
-use crate::types::{Mode, Status};
+use crate::types::{Directive, Status};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -141,10 +141,13 @@ pub async fn run_post_completion(
     }
 
     // 11. Save review artifact if ReviewFix or PrComments mode
-    if matches!(record.mode, Mode::ReviewFix | Mode::PrComments) {
+    if matches!(
+        record.directive,
+        Directive::ReviewFix | Directive::PrComments
+    ) {
         if let Some(log_dir) = log_file.parent() {
             if let Err(e) =
-                save_review_artifact(log_dir, &input.dispatch_id, &artifacts, &record.mode)
+                save_review_artifact(log_dir, &input.dispatch_id, &artifacts, &record.directive)
             {
                 warn!(id = %input.dispatch_id, error = %e, "failed to save review artifact");
             }
@@ -195,7 +198,7 @@ fn save_review_artifact(
     log_dir: &Path,
     dispatch_id: &str,
     artifacts: &Artifacts,
-    _mode: &Mode,
+    _mode: &Directive,
 ) -> Result<()> {
     let head_commit = artifacts.commits.last().cloned().unwrap_or_default();
 
@@ -570,7 +573,13 @@ mod tests {
             summary: Some("Fixed the bug".to_string()),
             ..Default::default()
         };
-        save_review_artifact(dir.path(), "test-dispatch", &artifacts, &Mode::ReviewFix).unwrap();
+        save_review_artifact(
+            dir.path(),
+            "test-dispatch",
+            &artifacts,
+            &Directive::ReviewFix,
+        )
+        .unwrap();
 
         let artifact_path = dir.path().join("test-dispatch-review-artifact.json");
         assert!(artifact_path.exists());

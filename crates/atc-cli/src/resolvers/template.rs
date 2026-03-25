@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use atc_core::config::AtcConfig;
 use atc_core::prompt_engine;
 use atc_core::resolver::{InputResolver, ResolvedInput};
-use atc_core::types::{DispatchRecord, Mode, RunOpts};
+use atc_core::types::{Directive, DispatchRecord, RunOpts};
 
 use crate::dispatch::build_dispatch_id;
 
@@ -146,19 +146,19 @@ impl InputResolver for TemplateResolver {
         )
         .await?;
 
-        // Resolve mode: CLI override > frontmatter directives > default implement
-        let mode = if let Some(ref m) = opts.mode {
+        // Resolve directive: CLI override > frontmatter directives > default implement
+        let resolved_directive = if let Some(ref m) = opts.directive {
             m.clone()
         } else if let Some(first_directive) = output.directives.first() {
-            first_directive.parse::<Mode>().unwrap_or_else(|_| {
-                debug!(directive = %first_directive, "unrecognized mode directive, defaulting to implement");
-                Mode::Implement
+            first_directive.parse::<Directive>().unwrap_or_else(|_| {
+                debug!(directive = %first_directive, "unrecognized directive, defaulting to implement");
+                Directive::Implement
             })
         } else {
-            Mode::Implement
+            Directive::Implement
         };
 
-        info!(template = input, mode = %mode.as_str(), "template resolved");
+        info!(template = input, directive = %resolved_directive.as_str(), "template resolved");
 
         // Use template name with a resolver-specific prefix to avoid collisions
         // with task-derived branches (derive_branch is bijective only for valid
@@ -169,11 +169,11 @@ impl InputResolver for TemplateResolver {
         let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         let branch = format!("tpl--{}-{}-{}-{}", input, ts, pid, seq);
-        let dispatch_id = build_dispatch_id(&branch, &mode);
+        let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
 
         Ok(ResolvedInput {
             system_prompt: output.body,
-            mode,
+            directive: resolved_directive,
             task_slug: None,
             branch,
             dispatch_id,
@@ -331,7 +331,7 @@ mod tests {
 
         let opts = RunOpts {
             input: "../secret".to_string(),
-            mode: None,
+            directive: None,
             params: std::collections::HashMap::new(),
             pr_url: None,
             inline: true,
@@ -407,7 +407,7 @@ mod tests {
 
         let opts = RunOpts {
             input: "review".to_string(),
-            mode: None,
+            directive: None,
             params,
             pr_url: None,
             inline: true,
@@ -424,7 +424,7 @@ mod tests {
         let resolver = TemplateResolver;
         let result = resolver.resolve("review", &opts, &config).await.unwrap();
 
-        assert_eq!(result.mode, Mode::ReviewFix);
+        assert_eq!(result.directive, Directive::ReviewFix);
         assert!(result
             .system_prompt
             .contains("https://github.com/org/repo/pull/1"));
@@ -474,7 +474,7 @@ mod tests {
 
         let opts = RunOpts {
             input: "pr-review".to_string(),
-            mode: None,
+            directive: None,
             params,
             pr_url: None,
             inline: true,
@@ -505,6 +505,6 @@ mod tests {
             "expected deferred placeholder for prefetch, got: {}",
             result.system_prompt
         );
-        assert_eq!(result.mode, Mode::ReviewFix);
+        assert_eq!(result.directive, Directive::ReviewFix);
     }
 }

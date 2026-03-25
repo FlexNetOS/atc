@@ -22,7 +22,7 @@ pub fn format_info(record: &DispatchRecord) -> String {
         add_line(&mut lines, "task_slug", slug);
     }
     add_line(&mut lines, "status", record.status.as_str());
-    add_line(&mut lines, "mode", record.mode.as_str());
+    add_line(&mut lines, "directive", record.directive.as_str());
     add_line(&mut lines, "branch", &record.branch);
     add_line(&mut lines, "resolver", &record.resolver);
 
@@ -106,7 +106,7 @@ pub async fn run_info(registry: Arc<dyn Registry>, arg: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atc_core::types::{HealthChecks, Mode, Status};
+    use atc_core::types::{Directive, HealthChecks, Status};
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
 
@@ -119,7 +119,7 @@ mod tests {
             session: "tasks--gitkb-42@implement@1773293500".to_string(),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status: Status::Done,
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             retries: 1,
             resolver: "task".to_string(),
             pr_url: Some("https://github.com/harmony-labs/gitkb-core/pull/275".to_string()),
@@ -155,7 +155,7 @@ mod tests {
         assert!(output.contains("tasks/gitkb-42"));
         assert!(output.contains("status:"));
         assert!(output.contains("done"));
-        assert!(output.contains("mode:"));
+        assert!(output.contains("directive:"));
         assert!(output.contains("implement"));
         assert!(output.contains("resolver:"));
         assert!(output.contains("task"));

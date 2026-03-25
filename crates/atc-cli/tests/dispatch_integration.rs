@@ -1,8 +1,8 @@
 use anyhow::Result;
-use atc_core::config::{AtcConfig, DispatchConfig, ModeConfig};
+use atc_core::config::{AtcConfig, DirectiveConfig, DispatchConfig};
 use atc_core::executor::{AgentExecutor, AgentHandle, AgentOpts};
 use atc_core::registry::{Registry, SqliteRegistry, StatusFilter};
-use atc_core::types::{Mode, RunOpts, Status};
+use atc_core::types::{Directive, RunOpts, Status};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -187,9 +187,9 @@ exit 0
     make_executable(&script);
 }
 
-/// Build a modes map with template_inline for all modes used in tests.
-fn test_modes() -> HashMap<String, ModeConfig> {
-    let mut modes = HashMap::new();
+/// Build a directives map with template_inline for all directives used in tests.
+fn test_directives() -> HashMap<String, DirectiveConfig> {
+    let mut directives = HashMap::new();
     for key in [
         "implement",
         "research",
@@ -200,15 +200,15 @@ fn test_modes() -> HashMap<String, ModeConfig> {
         "create-task",
         "close",
     ] {
-        modes.insert(
+        directives.insert(
             key.to_string(),
-            ModeConfig {
+            DirectiveConfig {
                 template_inline: Some(format!("Test prompt for {{{{slug}}}} mode {key}.")),
                 ..Default::default()
             },
         );
     }
-    modes
+    directives
 }
 
 fn make_config(
@@ -230,7 +230,7 @@ fn make_config(
             max_retries: 3,
             project_env: true,
         },
-        modes: test_modes(),
+        directives: test_directives(),
         ..Default::default()
     }
 }
@@ -276,10 +276,10 @@ impl Drop for TestFixture {
     }
 }
 
-fn default_run_opts(input: &str, mode: Mode) -> RunOpts {
+fn default_run_opts(input: &str, directive: Directive) -> RunOpts {
     RunOpts {
         input: input.to_string(),
-        mode: Some(mode),
+        directive: Some(directive),
         params: HashMap::new(),
         pr_url: None,
         inline: true,
@@ -324,7 +324,7 @@ async fn test_dispatch_inline_inserts_registry_record() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = default_run_opts("tasks/gitkb-42", Mode::Implement);
+    let opts = default_run_opts("tasks/gitkb-42", Directive::Implement);
     let outcome = dispatch_via_pipeline(
         &fix.config,
         registry.as_ref(),
@@ -344,7 +344,7 @@ async fn test_dispatch_inline_inserts_registry_record() {
     assert_eq!(record.task_slug.as_deref(), Some("tasks/gitkb-42"));
     assert_eq!(record.branch, "tasks--gitkb-42");
     assert_eq!(record.status, Status::Done);
-    assert_eq!(record.mode, Mode::Implement);
+    assert_eq!(record.directive, Directive::Implement);
     assert_eq!(record.resolver, "task");
     assert!(record.session.starts_with("tasks--gitkb-42@implement@"));
 }
@@ -361,7 +361,7 @@ async fn test_dispatch_cas_claim_failure_no_worktree() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = default_run_opts("tasks/gitkb-99", Mode::Implement);
+    let opts = default_run_opts("tasks/gitkb-99", Directive::Implement);
     let result = dispatch_via_pipeline(
         &fix.config,
         registry.as_ref(),
@@ -396,7 +396,7 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 1 });
 
-    let opts = default_run_opts("tasks/gitkb-fail", Mode::Implement);
+    let opts = default_run_opts("tasks/gitkb-fail", Directive::Implement);
     let outcome = dispatch_via_pipeline(
         &fix.config,
         registry.as_ref(),
@@ -419,7 +419,7 @@ async fn test_dispatch_inline_failed_exit_code_produces_failed_status() {
     );
 }
 
-/// Create a stub `git-kb` that returns JSON with directives for mode resolution.
+/// Create a stub `git-kb` that returns JSON with directives for directive resolution.
 fn write_stub_git_show_json(dir: &std::path::Path) {
     let script = dir.join("git-kb");
     std::fs::write(
@@ -468,7 +468,7 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
     // Pass None for mode — should resolve from frontmatter directives
     let opts = RunOpts {
         input: "tasks/gitkb-auto-mode".to_string(),
-        mode: None,
+        directive: None,
         params: HashMap::new(),
         pr_url: None,
         inline: true,
@@ -489,15 +489,15 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
         &opts,
     )
     .await
-    .expect("dispatch with mode from frontmatter failed");
+    .expect("dispatch with directive from frontmatter failed");
 
     assert_eq!(outcome.inline_exit_code, Some(0));
 
     let record = registry.get(&outcome.id).await.unwrap().unwrap();
     assert_eq!(
-        record.mode,
-        Mode::Research,
-        "mode should be resolved from frontmatter directives"
+        record.directive,
+        Directive::Research,
+        "directive should be resolved from frontmatter directives"
     );
 }
 
@@ -513,7 +513,7 @@ async fn test_dispatch_multiple_dispatches_same_task() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    let opts = default_run_opts("tasks/gitkb-dup", Mode::Implement);
+    let opts = default_run_opts("tasks/gitkb-dup", Directive::Implement);
 
     // First dispatch
     let outcome1 = dispatch_via_pipeline(
@@ -563,7 +563,7 @@ async fn test_dispatch_executor_failure_triggers_cleanup() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(FailingExecutor);
 
-    let opts = default_run_opts("tasks/gitkb-exec-fail", Mode::Implement);
+    let opts = default_run_opts("tasks/gitkb-exec-fail", Directive::Implement);
     let result = dispatch_via_pipeline(
         &fix.config,
         registry.as_ref(),
@@ -600,7 +600,7 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
 
     let opts = RunOpts {
         input: "tasks/gitkb-directive".to_string(),
-        mode: Some(Mode::Implement),
+        directive: Some(Directive::Implement),
         params: HashMap::new(),
         pr_url: None,
         inline: true,
@@ -649,7 +649,7 @@ async fn test_dispatch_review_fix_requires_pr_url() {
 
     let opts = RunOpts {
         input: "tasks/gitkb-review".to_string(),
-        mode: Some(Mode::ReviewFix),
+        directive: Some(Directive::ReviewFix),
         params: HashMap::new(),
         pr_url: None, // Missing!
         inline: true,
@@ -692,7 +692,7 @@ async fn test_dispatch_dry_run() {
 
     let opts = RunOpts {
         input: "tasks/gitkb-dry".to_string(),
-        mode: Some(Mode::Implement),
+        directive: Some(Directive::Implement),
         params: HashMap::new(),
         pr_url: None,
         inline: true,
@@ -738,7 +738,7 @@ async fn test_prompt_resolver_dispatch() {
     // Use a raw prompt string that won't match any task or template
     let opts = RunOpts {
         input: "Fix the auth bug in login.rs".to_string(),
-        mode: Some(Mode::Implement),
+        directive: Some(Directive::Implement),
         params: HashMap::new(),
         pr_url: None,
         inline: true,
@@ -772,7 +772,7 @@ async fn test_prompt_resolver_dispatch() {
     let record = registry.get(&outcome.id).await.unwrap().unwrap();
     assert_eq!(record.resolver, "prompt");
     assert!(record.task_slug.is_none());
-    assert_eq!(record.mode, Mode::Implement);
+    assert_eq!(record.directive, Directive::Implement);
 }
 
 #[tokio::test]
@@ -808,7 +808,7 @@ async fn test_template_resolver_dispatch() {
 
     let opts = RunOpts {
         input: "my-review".to_string(),
-        mode: None,
+        directive: None,
         params: HashMap::new(),
         pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
         inline: true,
@@ -837,5 +837,5 @@ async fn test_template_resolver_dispatch() {
     let record = registry.get(&outcome.id).await.unwrap().unwrap();
     assert_eq!(record.resolver, "template");
     assert!(record.task_slug.is_none());
-    assert_eq!(record.mode, Mode::ReviewFix);
+    assert_eq!(record.directive, Directive::ReviewFix);
 }

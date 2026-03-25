@@ -18,10 +18,10 @@ repo = "core"
 [registry]
 path = "$TEST_TMPDIR/test.db"
 
-[modes.review-fix]
+[directives.review-fix]
 providers = ["pr-context", "rebase"]
 
-[modes.implement]
+[directives.implement]
 providers = ["rebase"]
 EOF
 
@@ -39,7 +39,7 @@ repo = "core"
 [registry]
 path = "$TEST_TMPDIR/test.db"
 
-[modes.implement]
+[directives.implement]
 providers = ["nonexistent-provider"]
 EOF
 
@@ -58,7 +58,7 @@ repo = "core"
 [registry]
 path = "$TEST_TMPDIR/test.db"
 
-[modes.implement]
+[directives.implement]
 providers = []
 EOF
 
@@ -75,7 +75,7 @@ repo = "core"
 [registry]
 path = "$TEST_TMPDIR/test.db"
 
-[modes.review-fix]
+[directives.review-fix]
 providers = ["pr-context", "kb-context", "rebase"]
 EOF
 
@@ -87,7 +87,7 @@ EOF
 # PR context provider: end-to-end with mocked gh
 # ---------------------------------------------------------------------------
 
-@test "pr-context provider: dry run includes pr-context in mode config" {
+@test "pr-context provider: dry run includes pr-context in directive config" {
     local config="$TEST_TMPDIR/atc.toml"
     local db="$TEST_TMPDIR/atc.db"
 
@@ -100,7 +100,7 @@ meta_workspace_root = "$TEST_TMPDIR/workspace"
 [registry]
 path = "$db"
 
-[modes.review-fix]
+[directives.review-fix]
 template_inline = "Review PR: {{prefetch}}"
 providers = ["pr-context"]
 EOF
@@ -109,7 +109,7 @@ EOF
 
     # dry-run should show mode config (won't actually run providers
     # since dispatch is short-circuited, but validates config loading)
-    run atc --config "$config" run "review-task" --mode review-fix \
+    run atc --config "$config" run "review-task" --directive review-fix \
         --pr-url "https://github.com/test/repo/pull/1" --dry-run
     assert_success
     assert_output --partial "DRY RUN"

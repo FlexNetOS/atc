@@ -7,14 +7,14 @@ use tracing::info;
 
 use atc_core::config::AtcConfig;
 use atc_core::resolver::{InputResolver, ResolvedInput};
-use atc_core::types::{DispatchRecord, Mode, RunOpts};
+use atc_core::types::{Directive, DispatchRecord, RunOpts};
 
 /// Process-local counter for unique prompt dispatch IDs.
 static PROMPT_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Resolver for raw prompt string dispatches (catch-all fallback).
 ///
-/// Wraps the raw input as the system prompt with a default mode of Implement.
+/// Wraps the raw input as the system prompt with a default directive of Implement.
 pub struct PromptResolver;
 
 #[async_trait]
@@ -34,7 +34,7 @@ impl InputResolver for PromptResolver {
         opts: &RunOpts,
         _config: &AtcConfig,
     ) -> Result<ResolvedInput> {
-        let mode = opts.mode.clone().unwrap_or(Mode::Implement);
+        let resolved_directive = opts.directive.clone().unwrap_or(Directive::Implement);
 
         // Build a unique branch name from timestamp
         let ts = Utc::now().timestamp_millis();
@@ -50,16 +50,16 @@ impl InputResolver for PromptResolver {
         let dispatch_id = format!(
             "{}@{}@{}-{:04x}",
             branch,
-            mode.as_str(),
+            resolved_directive.as_str(),
             ts,
             suffix & 0xffff
         );
 
-        info!(mode = %mode.as_str(), "prompt resolver: dispatching raw prompt");
+        info!(directive = %resolved_directive.as_str(), "prompt resolver: dispatching raw prompt");
 
         Ok(ResolvedInput {
             system_prompt: input.to_string(),
-            mode,
+            directive: resolved_directive,
             task_slug: None,
             branch,
             dispatch_id,
@@ -102,7 +102,7 @@ mod tests {
         let config = AtcConfig::default();
         let opts = RunOpts {
             input: "Fix the bug in auth.rs".to_string(),
-            mode: Some(Mode::Implement),
+            directive: Some(Directive::Implement),
             params: HashMap::new(),
             pr_url: None,
             inline: true,
@@ -122,7 +122,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.system_prompt, "Fix the bug in auth.rs");
-        assert_eq!(result.mode, Mode::Implement);
+        assert_eq!(result.directive, Directive::Implement);
         assert!(result.task_slug.is_none());
         assert!(result.branch.starts_with("prompt-"));
         assert!(result.dispatch_id.contains("@implement@"));
@@ -134,7 +134,7 @@ mod tests {
         let config = AtcConfig::default();
         let opts = RunOpts {
             input: "test".to_string(),
-            mode: None, // Should default to Implement
+            directive: None, // Should default to Implement
             params: HashMap::new(),
             pr_url: None,
             inline: true,
@@ -149,6 +149,6 @@ mod tests {
         };
 
         let result = resolver.resolve("test", &opts, &config).await.unwrap();
-        assert_eq!(result.mode, Mode::Implement);
+        assert_eq!(result.directive, Directive::Implement);
     }
 }

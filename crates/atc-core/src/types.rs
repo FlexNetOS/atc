@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DispatchRecord {
-    /// Dispatch-unique ID: `<branch>@<mode>@<unix-timestamp>`
+    /// Dispatch-unique ID: `<branch>@<directive>@<unix-timestamp>`
     pub id: String,
     /// Nullable — template/prompt dispatches have no task.
     pub task_slug: Option<String>,
@@ -14,7 +14,7 @@ pub struct DispatchRecord {
     pub session: String,
     pub log_file: PathBuf,
     pub status: Status,
-    pub mode: Mode,
+    pub directive: Directive,
     pub retries: u32,
     /// Which InputResolver created this dispatch ("task", "template", "prompt").
     pub resolver: String,
@@ -118,7 +118,7 @@ impl std::fmt::Display for Status {
 #[derive(Debug, Clone, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
-pub enum Mode {
+pub enum Directive {
     Implement,
     Research,
     KbUpdate,
@@ -129,39 +129,39 @@ pub enum Mode {
     Close,
 }
 
-impl Mode {
+impl Directive {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Mode::Implement => "implement",
-            Mode::Research => "research",
-            Mode::KbUpdate => "kb-update",
-            Mode::ReviewFix => "review-fix",
-            Mode::PrComments => "pr-comments",
-            Mode::Refine => "refine",
-            Mode::CreateTask => "create-task",
-            Mode::Close => "close",
+            Directive::Implement => "implement",
+            Directive::Research => "research",
+            Directive::KbUpdate => "kb-update",
+            Directive::ReviewFix => "review-fix",
+            Directive::PrComments => "pr-comments",
+            Directive::Refine => "refine",
+            Directive::CreateTask => "create-task",
+            Directive::Close => "close",
         }
     }
 }
 
-impl std::str::FromStr for Mode {
+impl std::str::FromStr for Directive {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "implement" => Ok(Mode::Implement),
-            "research" => Ok(Mode::Research),
-            "kb-update" => Ok(Mode::KbUpdate),
-            "review-fix" => Ok(Mode::ReviewFix),
-            "pr-comments" => Ok(Mode::PrComments),
-            "refine" => Ok(Mode::Refine),
-            "create-task" => Ok(Mode::CreateTask),
-            "close" => Ok(Mode::Close),
-            other => Err(anyhow::anyhow!("unknown mode: {}", other)),
+            "implement" => Ok(Directive::Implement),
+            "research" => Ok(Directive::Research),
+            "kb-update" => Ok(Directive::KbUpdate),
+            "review-fix" => Ok(Directive::ReviewFix),
+            "pr-comments" => Ok(Directive::PrComments),
+            "refine" => Ok(Directive::Refine),
+            "create-task" => Ok(Directive::CreateTask),
+            "close" => Ok(Directive::Close),
+            other => Err(anyhow::anyhow!("unknown directive: {}", other)),
         }
     }
 }
 
-impl std::fmt::Display for Mode {
+impl std::fmt::Display for Directive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -172,11 +172,11 @@ impl std::fmt::Display for Mode {
 pub struct RunOpts {
     /// Raw input string (joined from CLI positional args).
     pub input: String,
-    /// Explicit mode override from `--mode`.
-    pub mode: Option<Mode>,
+    /// Explicit directive override from `--directive`.
+    pub directive: Option<Directive>,
     /// Key=value pairs for template rendering.
     pub params: std::collections::HashMap<String, String>,
-    /// PR URL for review-fix / pr-comments modes.
+    /// PR URL for review-fix / pr-comments directives.
     pub pr_url: Option<String>,
     /// Run inline (synchronous, no tmux).
     pub inline: bool,

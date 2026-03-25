@@ -27,7 +27,7 @@ pub mod subprocess;
 pub mod watch;
 
 mod args {
-    use atc_core::types::Mode;
+    use atc_core::types::Directive;
     use clap::{Parser, Subcommand};
     use std::path::PathBuf;
 
@@ -47,9 +47,9 @@ mod args {
         Run {
             /// Input: "task <slug>", template name, or raw prompt string
             input: Vec<String>,
-            /// Mode (implement, research, kb-update, review-fix, pr-comments, refine, create-task, close)
-            #[arg(long, value_parser = clap::value_parser!(Mode))]
-            mode: Option<Mode>,
+            /// Directive (implement, research, kb-update, review-fix, pr-comments, refine, create-task, close)
+            #[arg(long, value_parser = clap::value_parser!(Directive))]
+            directive: Option<Directive>,
             /// Key=value pairs for template rendering
             #[arg(long = "param")]
             param: Vec<String>,
@@ -93,17 +93,17 @@ mod args {
             #[arg(long)]
             auto: bool,
         },
-        /// Render and print the system prompt for a mode (useful for debugging)
+        /// Render and print the system prompt for a directive (useful for debugging)
         Prompt {
-            /// Mode to render
-            #[arg(value_parser = clap::value_parser!(Mode))]
-            mode: Mode,
+            /// Directive to render
+            #[arg(value_parser = clap::value_parser!(Directive))]
+            directive: Directive,
             /// Task slug for {{slug}} interpolation (default: "tasks/example")
             #[arg(long, default_value = "tasks/example")]
             slug: String,
-            /// Additional directive passed into prompt rendering
-            #[arg(long)]
-            directive: Option<String>,
+            /// Additional directive text passed into prompt rendering
+            #[arg(long = "directive-text")]
+            directive_text: Option<String>,
             /// Worktree path for resolving project-level partials
             #[arg(long)]
             worktree_path: Option<PathBuf>,
@@ -123,7 +123,7 @@ mod args {
             /// Message to send to the agent
             message: String,
         },
-        /// Re-dispatch a failed task with the same mode and config
+        /// Re-dispatch a failed task with the same directive and config
         Retry {
             /// Dispatch ID or task slug
             id: String,
@@ -216,7 +216,7 @@ pub async fn run(
     match &args.command {
         Commands::Run {
             input,
-            mode,
+            directive,
             param,
             pr_url,
             inline,
@@ -270,7 +270,7 @@ pub async fn run(
 
             let opts = RunOpts {
                 input: raw_input.clone(),
-                mode: mode.clone(),
+                directive: directive.clone(),
                 params,
                 pr_url: pr_url.clone(),
                 inline: is_inline,
@@ -315,16 +315,16 @@ pub async fn run(
             health::run_health(config, registry, executor, *json, *all, *auto).await
         }
         Commands::Prompt {
-            mode,
-            slug,
             directive,
+            slug,
+            directive_text,
             worktree_path,
         } => {
             let prompt = atc_core::prompt_engine::render_prompt(
-                mode,
+                directive,
                 slug,
                 config,
-                directive.as_deref().unwrap_or(""),
+                directive_text.as_deref().unwrap_or(""),
                 worktree_path.as_deref(),
             )
             .await?;

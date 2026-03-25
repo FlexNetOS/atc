@@ -1,4 +1,4 @@
-use crate::types::Mode;
+use crate::types::Directive;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ pub struct AgentOpts {
     pub slug: String,
     pub worktree_path: PathBuf,
     pub prompt: String, // rendered system prompt for the mode
-    pub mode: Mode,
+    pub directive: Directive,
     pub log_file: PathBuf,            // stream-json output destination
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
     pub session_name: String,         // tmux session name (derived from slug)
@@ -59,7 +59,7 @@ impl ClaudeExecutor {
             format!(
                 "Directive: {}\nTask: {}\nWorking directory: {}\n\n\
                  Follow the system prompt instructions exactly.",
-                opts.mode.as_str(),
+                opts.directive.as_str(),
                 opts.slug,
                 opts.worktree_path.display(),
             )
@@ -69,7 +69,7 @@ impl ClaudeExecutor {
                 "Directive: {}\nTask: {}\nWorking directory: {}\n\n\
                  The task document follows on stdin \u{2014} it IS your plan. \
                  Follow the system prompt instructions exactly.",
-                opts.mode.as_str(),
+                opts.directive.as_str(),
                 opts.slug,
                 opts.worktree_path.display(),
             )
@@ -558,7 +558,7 @@ impl AgentExecutor for ClaudeExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Mode;
+    use crate::types::Directive;
 
     #[test]
     fn test_build_user_prompt() {
@@ -566,7 +566,7 @@ mod tests {
             slug: "tasks/gitkb-42".to_string(),
             worktree_path: PathBuf::from("/tmp/worktrees/gitkb/core"),
             prompt: String::new(),
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             log_file: PathBuf::from("/tmp/log.jsonl"),
             env: HashMap::new(),
             session_name: "test".to_string(),
@@ -590,7 +590,7 @@ mod tests {
             slug: "my-branch".to_string(),
             worktree_path: PathBuf::from("/tmp/worktrees/test"),
             prompt: String::new(),
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             log_file: PathBuf::from("/tmp/log.jsonl"),
             env: HashMap::new(),
             session_name: "test".to_string(),
@@ -671,7 +671,7 @@ mod tests {
             slug: "test-slug".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
             prompt: "test system prompt".to_string(),
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             log_file: PathBuf::from("/tmp/test.jsonl"),
             env,
             session_name: "test-session".to_string(),

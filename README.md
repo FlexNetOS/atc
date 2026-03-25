@@ -127,18 +127,18 @@ components_dir = ".claude/prompts/components"
 templates_dir = ".claude/prompts/templates"
 partials_dir = ".claude/prompts/partials"
 
-# Per-mode configuration
-[modes.implement]
+# Per-directive configuration
+[directives.implement]
 components = ["base", "constraints", "kb-read", "kb-write", "code-read", "code-write", "git", "github"]
 max_budget_usd = 25.0
 providers = ["rebase"]
 
-[modes.review-fix]
+[directives.review-fix]
 components = ["base", "constraints", "code-read", "code-write", "git", "github", "review"]
 max_budget_usd = 10.0
 providers = ["pr-context", "rebase"]
 
-[modes.research]
+[directives.research]
 components = ["base", "constraints", "kb-read", "code-read"]
 max_budget_usd = 7.0
 
