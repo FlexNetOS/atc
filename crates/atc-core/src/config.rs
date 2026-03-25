@@ -955,6 +955,21 @@ template_inline = "fallback (ignored)"
     }
 
     #[test]
+    fn test_parse_legacy_modes_from_toml() {
+        let toml = r#"
+[modes.implement]
+template_inline = "Legacy prompt"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(
+            cfg.directives
+                .get("implement")
+                .and_then(|d| d.template_inline.as_deref()),
+            Some("Legacy prompt")
+        );
+    }
+
+    #[test]
     fn test_directive_config_per_directive_budget() {
         let toml = r#"
 [directives.implement]
