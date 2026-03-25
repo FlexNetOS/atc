@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::AtcConfig;
-use crate::types::Mode;
+use crate::types::Directive;
 
 /// Input context available to providers during dispatch preparation.
 pub struct DispatchContext {
@@ -16,7 +16,7 @@ pub struct DispatchContext {
     pub task_slug: Option<String>,
     pub branch: String,
     pub worktree_path: PathBuf,
-    pub mode: Mode,
+    pub directive: Directive,
     pub pr_url: Option<String>,
     /// Key=value pairs from `--param` flags.
     pub params: HashMap<String, String>,
@@ -71,11 +71,14 @@ pub fn make_provider(name: &str) -> Option<Box<dyn ContextProvider>> {
     }
 }
 
-/// Instantiate all providers for a given mode from config.
-pub fn providers_for_mode(config: &AtcConfig, mode: &Mode) -> Vec<Box<dyn ContextProvider>> {
-    let mode_key = mode.as_str();
-    let provider_names = match config.modes.get(mode_key) {
-        Some(mode_cfg) => mode_cfg.providers.clone().unwrap_or_default(),
+/// Instantiate all providers for a given directive from config.
+pub fn providers_for_directive(
+    config: &AtcConfig,
+    directive: &Directive,
+) -> Vec<Box<dyn ContextProvider>> {
+    let directive_key = directive.as_str();
+    let provider_names = match config.directives.get(directive_key) {
+        Some(directive_cfg) => directive_cfg.providers.clone().unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -84,7 +87,7 @@ pub fn providers_for_mode(config: &AtcConfig, mode: &Mode) -> Vec<Box<dyn Contex
         .filter_map(|name| {
             let provider = make_provider(name);
             if provider.is_none() {
-                tracing::warn!(provider = %name, "unknown provider in mode config, skipping");
+                tracing::warn!(provider = %name, "unknown provider in directive config, skipping");
             }
             provider
         })
@@ -95,7 +98,7 @@ pub fn providers_for_mode(config: &AtcConfig, mode: &Mode) -> Vec<Box<dyn Contex
 ///
 /// Used by the template resolver to register deferred placeholders before
 /// providers run, so Handlebars strict mode doesn't reject provider-injected vars.
-/// We query all providers (not just those for the current mode) because the mode
+/// We query all providers (not just those for the current directive) because the directive
 /// may not be known until after template rendering.
 pub fn all_deferred_template_vars() -> Vec<String> {
     let mut vars = Vec::new();
@@ -193,7 +196,7 @@ mod tests {
             task_slug: None,
             branch: "main".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             pr_url: None,
             params: HashMap::new(),
             kb_root: PathBuf::from("/tmp/kb"),
@@ -271,9 +274,9 @@ mod tests {
     }
 
     #[test]
-    fn test_providers_for_mode_empty_when_no_config() {
+    fn test_providers_for_directive_empty_when_no_config() {
         let config = AtcConfig::default();
-        let providers = providers_for_mode(&config, &Mode::Implement);
+        let providers = providers_for_directive(&config, &Directive::Implement);
         assert!(providers.is_empty());
     }
 

@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use atc_core::config::AtcConfig;
 use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
-use atc_core::types::{DispatchRecord, Mode, RunOpts};
+use atc_core::types::{Directive, DispatchRecord, RunOpts};
 
 use crate::dispatch::{build_dispatch_id, derive_branch};
 use crate::subprocess::run_cmd_with_timeout;
@@ -226,19 +226,19 @@ impl TaskResolver {
         found
     }
 
-    /// Resolve mode from CLI arg or from task frontmatter `directives:` field.
-    async fn resolve_mode(
-        cli_mode: Option<Mode>,
+    /// Resolve directive from CLI arg or from task frontmatter `directives:` field.
+    async fn resolve_directive(
+        cli_directive: Option<Directive>,
         slug: &str,
         kb_root: &Path,
         branch: Option<&str>,
-    ) -> Result<Mode> {
-        if let Some(m) = cli_mode {
-            debug!(mode = %m.as_str(), "mode provided via CLI arg");
+    ) -> Result<Directive> {
+        if let Some(m) = cli_directive {
+            debug!(directive = %m.as_str(), "directive provided via CLI arg");
             return Ok(m);
         }
 
-        debug!("no CLI mode; reading directives from task frontmatter");
+        debug!("no CLI directive; reading directives from task frontmatter");
         let mut cmd = tokio::process::Command::new("git-kb");
         cmd.args(["show", "--json", slug])
             .env("GITKB_ROOT", kb_root)
@@ -275,18 +275,18 @@ impl TaskResolver {
             match directives {
                 serde_json::Value::Array(arr) if !arr.is_empty() => {
                     if let Some(s) = arr[0].as_str() {
-                        return s.parse::<Mode>();
+                        return s.parse::<Directive>();
                     }
                 }
                 serde_json::Value::String(s) => {
-                    return s.parse::<Mode>();
+                    return s.parse::<Directive>();
                 }
                 _ => {}
             }
         }
 
         anyhow::bail!(
-            "no mode specified: pass --mode or set `directives` in task frontmatter for {}",
+            "no directive specified: pass --directive or set `directives` in task frontmatter for {}",
             slug
         );
     }
@@ -430,13 +430,14 @@ impl InputResolver for TaskResolver {
                 })?
         };
 
-        // 1. Resolve mode
-        let mode = Self::resolve_mode(opts.mode.clone(), slug, &kb_root, None).await?;
-        info!(%slug, mode = %mode.as_str(), "mode resolved");
-
-        // 2. Derive branch and dispatch ID
+        // 1. Derive branch and resolve directive in that workspace
         let branch = derive_branch(slug);
-        let dispatch_id = build_dispatch_id(&branch, &mode);
+        let resolved_directive =
+            Self::resolve_directive(opts.directive.clone(), slug, &kb_root, Some(&branch)).await?;
+        info!(%slug, directive = %resolved_directive.as_str(), "directive resolved");
+
+        // 2. Build dispatch ID
+        let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
         let session_name = dispatch_id.clone();
 
         // 3. CAS-claim the task (skip for dry-run to avoid transient state mutation)
@@ -447,12 +448,12 @@ impl InputResolver for TaskResolver {
         // 4. Render system prompt
         // Pass kb_root as worktree_path fallback so project-level .dispatch/partials/
         // can be resolved before the actual worktree is created by the pipeline.
-        let directive = opts.directives.as_deref().unwrap_or("");
+        let directive_text = opts.directives.as_deref().unwrap_or("");
         let prompt = match atc_core::prompt_engine::render_prompt(
-            &mode,
+            &resolved_directive,
             slug,
             config,
-            directive,
+            directive_text,
             Some(kb_root.as_path()),
         )
         .await
@@ -477,7 +478,7 @@ impl InputResolver for TaskResolver {
 
         Ok(ResolvedInput {
             system_prompt: prompt,
-            mode,
+            directive: resolved_directive,
             task_slug: Some(slug.to_string()),
             branch,
             dispatch_id,

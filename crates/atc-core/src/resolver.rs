@@ -4,15 +4,15 @@ use std::path::PathBuf;
 
 use crate::config::AtcConfig;
 use crate::registry::Registry;
-use crate::types::{DispatchRecord, Mode, RunOpts};
+use crate::types::{Directive, DispatchRecord, RunOpts};
 
 /// Result of resolving an input string into dispatch parameters.
 #[derive(Debug, Clone)]
 pub struct ResolvedInput {
     /// Rendered system prompt (from components, templates, or defaults).
     pub system_prompt: String,
-    /// The dispatch mode.
-    pub mode: Mode,
+    /// The dispatch directive.
+    pub directive: Directive,
     /// Task slug (only for task-based dispatches).
     pub task_slug: Option<String>,
     /// Branch name for worktree creation.

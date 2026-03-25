@@ -4,7 +4,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{DispatchRecord, Mode, RunOpts, Status};
+use atc_core::types::{Directive, DispatchRecord, RunOpts, Status};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
@@ -101,7 +101,7 @@ pub fn collect_auto_review_candidates(results: &[HealthResult]) -> Vec<&Dispatch
                 // Don't dispatch a review-fix for a record that is itself a
                 // review-fix — that would loop.  Failed review-fixes should go
                 // through the retry path instead.
-                && r.record.mode != Mode::ReviewFix
+                && r.record.directive != Directive::ReviewFix
         })
         .map(|r| &r.record)
         .collect()
@@ -280,7 +280,7 @@ pub async fn run_health(
             );
             let opts = RunOpts {
                 input: format!("task {task_slug}"),
-                mode: Some(Mode::ReviewFix),
+                directive: Some(Directive::ReviewFix),
                 pr_url,
                 params: std::collections::HashMap::new(),
                 inline: false,
@@ -368,7 +368,7 @@ pub async fn run_health(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atc_core::types::{HealthChecks, Mode};
+    use atc_core::types::{Directive, HealthChecks};
     use chrono::Utc;
 
     fn make_record(status: Status, checks: HealthChecks) -> DispatchRecord {
@@ -380,7 +380,7 @@ mod tests {
             session: "test-session".to_string(),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status,
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_review_skips_review_fix_mode() {
+    fn test_auto_review_skips_review_fix_directive() {
         let checks = HealthChecks {
             agent_exited_clean: true,
             branch_pushed: true,
@@ -638,7 +638,7 @@ mod tests {
             Some("https://github.com/org/repo/pull/1".to_string()),
             None,
         );
-        record.mode = Mode::ReviewFix;
+        record.directive = Directive::ReviewFix;
         let results = vec![HealthResult {
             record,
             changed: true,

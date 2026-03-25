@@ -125,7 +125,7 @@ impl ContextProvider for PrContextProvider {
             serde_json::to_string_pretty(&threads).unwrap_or_default(),
         ));
         // Use template_vars only — preamble_sections would duplicate content
-        // when a mode template contains {{prefetch}}.
+        // when a directive template contains {{prefetch}}.
         output.template_vars.insert("prefetch".to_string(), summary);
 
         Ok(output)

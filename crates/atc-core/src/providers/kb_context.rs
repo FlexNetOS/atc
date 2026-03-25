@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::config::AtcConfig;
     use crate::providers::DispatchContext;
-    use crate::types::Mode;
+    use crate::types::Directive;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -200,7 +200,7 @@ mod tests {
             task_slug: task_slug.map(|s| s.to_string()),
             branch: "main".to_string(),
             worktree_path: PathBuf::from("/tmp/test"),
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             pr_url: None,
             params: HashMap::new(),
             kb_root: PathBuf::from("/tmp/kb"),

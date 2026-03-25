@@ -65,7 +65,7 @@ load helpers/common
     assert_output --partial "tasks/test-1"
     assert_output --partial "status:"
     assert_output --partial "running"
-    assert_output --partial "mode:"
+    assert_output --partial "directive:"
     assert_output --partial "implement"
 }
 

@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
-use atc_core::types::{Mode, Status};
+use atc_core::types::{Directive, Status};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -26,12 +26,12 @@ pub fn derive_branch(slug: &str) -> String {
 /// calls occur within the same millisecond (e.g. scripted/CI environments).
 static DISPATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// Build dispatch ID: `<branch>@<mode>@<unix-ms>-<rand>`.
+/// Build dispatch ID: `<branch>@<directive>@<unix-ms>-<rand>`.
 ///
 /// The 4-hex-digit suffix mixes a monotonic counter with the PID and
 /// sub-millisecond time, guaranteeing uniqueness within a process and
 /// making cross-process collisions effectively impossible.
-pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
+pub fn build_dispatch_id(branch: &str, directive: &Directive) -> String {
     let ts = Utc::now().timestamp_millis();
     let seq = DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -42,7 +42,7 @@ pub fn build_dispatch_id(branch: &str, mode: &Mode) -> String {
     format!(
         "{}@{}@{}-{:04x}",
         branch,
-        mode.as_str(),
+        directive.as_str(),
         ts,
         suffix & 0xffff
     )
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_build_dispatch_id_format() {
-        let id = build_dispatch_id("tasks--gitkb-42", &Mode::Implement);
+        let id = build_dispatch_id("tasks--gitkb-42", &Directive::Implement);
         let parts: Vec<&str> = id.split('@').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], "tasks--gitkb-42");
@@ -454,8 +454,8 @@ mod tests {
 
     #[test]
     fn test_build_dispatch_id_uniqueness() {
-        let id1 = build_dispatch_id("tasks--foo", &Mode::Implement);
-        let id2 = build_dispatch_id("tasks--foo", &Mode::Implement);
+        let id1 = build_dispatch_id("tasks--foo", &Directive::Implement);
+        let id2 = build_dispatch_id("tasks--foo", &Directive::Implement);
         assert_ne!(id1, id2, "consecutive dispatch IDs should differ");
     }
 

@@ -26,7 +26,7 @@ pub enum WatchEvent {
     Started {
         id: String,
         task: Option<String>,
-        mode: String,
+        directive: String,
         worktree: String,
     },
     /// New log line parsed.
@@ -291,7 +291,7 @@ pub async fn run_watch(
         let started = WatchEvent::Started {
             id: record.id.clone(),
             task: record.task_slug.clone(),
-            mode: record.mode.as_str().to_string(),
+            directive: record.directive.as_str().to_string(),
             worktree: record.worktree_path.to_string_lossy().to_string(),
         };
         emit_event(&started, &output_format, &tx_clone);
@@ -392,9 +392,14 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
             println!("{json}");
         }
         OutputFormat::Human => match event {
-            WatchEvent::Started { id, task, mode, .. } => {
+            WatchEvent::Started {
+                id,
+                task,
+                directive,
+                ..
+            } => {
                 let label = task.as_deref().unwrap_or(id);
-                eprintln!("▶ watching {label} ({mode})");
+                eprintln!("▶ watching {label} ({directive})");
             }
             WatchEvent::LogLine {
                 event_type,

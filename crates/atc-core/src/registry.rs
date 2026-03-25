@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   session                   TEXT NOT NULL,
   log_file                  TEXT NOT NULL,
   status                    TEXT NOT NULL DEFAULT 'running',
-  mode                      TEXT NOT NULL,
+  directive                 TEXT NOT NULL,
   retries                   INTEGER NOT NULL DEFAULT 0,
   resolver                  TEXT NOT NULL,
   pr_url                    TEXT,
@@ -193,6 +193,23 @@ impl SqliteRegistry {
                     .execute(pool)
                     .await?;
             }
+
+            // Rename mode → directive column (Mode→Directive migration)
+            let (has_mode_col,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'mode'",
+            )
+            .fetch_one(pool)
+            .await?;
+            let (has_directive_col,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'directive'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_mode_col > 0 && has_directive_col == 0 {
+                sqlx::query("ALTER TABLE dispatches RENAME COLUMN mode TO directive")
+                    .execute(pool)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -247,7 +264,7 @@ impl SqliteRegistry {
         use sqlx::Row;
 
         let status_str: String = row.get("status");
-        let mode_str: String = row.get("mode");
+        let directive_str: String = row.get("directive");
         let dispatched_at_str: String = row.get("dispatched_at");
         let updated_at_str: String = row.get("updated_at");
         let worktree_str: String = row.get("worktree_path");
@@ -261,7 +278,7 @@ impl SqliteRegistry {
             session: row.get("session"),
             log_file: PathBuf::from(log_file_str),
             status: status_str.parse()?,
-            mode: mode_str.parse()?,
+            directive: directive_str.parse()?,
             retries: u32::try_from(row.get::<i32, _>("retries"))
                 .map_err(|_| anyhow::anyhow!("invalid retries value in database"))?,
             resolver: row.get("resolver"),
@@ -300,7 +317,7 @@ impl Registry for SqliteRegistry {
     async fn insert(&self, record: &DispatchRecord) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO dispatches (
-                id, task_slug, branch, worktree_path, session, log_file, status, mode, retries,
+                id, task_slug, branch, worktree_path, session, log_file, status, directive, retries,
                 resolver, pr_url, no_worktree, original_input, kb_root,
                 check_agent_exited_clean, check_branch_pushed, check_pr_created,
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
@@ -327,7 +344,7 @@ impl Registry for SqliteRegistry {
                 .ok_or_else(|| anyhow::anyhow!("log_file must be valid UTF-8"))?,
         )
         .bind(record.status.as_str())
-        .bind(record.mode.as_str())
+        .bind(record.directive.as_str())
         .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
         .bind(&record.resolver)
         .bind(&record.pr_url)
@@ -643,7 +660,7 @@ impl Registry for SqliteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DispatchRecord, HealthChecks, Mode, Status};
+    use crate::types::{Directive, DispatchRecord, HealthChecks, Status};
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -657,7 +674,7 @@ mod tests {
             session: format!("{}@implement@1234567890", id),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status: Status::Running,
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
@@ -687,7 +704,7 @@ mod tests {
         assert_eq!(fetched.id, "tasks--gitkb-42@implement@1234567890");
         assert_eq!(fetched.task_slug.as_deref(), Some("tasks/gitkb-42"));
         assert_eq!(fetched.status, Status::Running);
-        assert_eq!(fetched.mode, Mode::Implement);
+        assert_eq!(fetched.directive, Directive::Implement);
         assert_eq!(fetched.retries, 0);
         assert_eq!(fetched.resolver, "task");
     }
@@ -701,7 +718,7 @@ mod tests {
         r2.task_slug = Some("tasks/gitkb-42".to_string());
         let mut r3 = sample_record("tasks--gitkb-42@review-fix@3000");
         r3.task_slug = Some("tasks/gitkb-42".to_string());
-        r3.mode = Mode::ReviewFix;
+        r3.directive = Directive::ReviewFix;
 
         registry.insert(&r1).await.unwrap();
         registry.insert(&r2).await.unwrap();
@@ -1189,25 +1206,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_all_mode_variants_round_trip() {
+    async fn test_all_directive_variants_round_trip() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
-        let modes = [
-            Mode::Implement,
-            Mode::Research,
-            Mode::KbUpdate,
-            Mode::ReviewFix,
-            Mode::PrComments,
-            Mode::Refine,
-            Mode::CreateTask,
-            Mode::Close,
+        let all_directives = [
+            Directive::Implement,
+            Directive::Research,
+            Directive::KbUpdate,
+            Directive::ReviewFix,
+            Directive::PrComments,
+            Directive::Refine,
+            Directive::CreateTask,
+            Directive::Close,
         ];
-        for (i, mode) in modes.iter().enumerate() {
-            let id = format!("mode-{i}");
+        for (i, d) in all_directives.iter().enumerate() {
+            let id = format!("directive-{i}");
             let mut record = sample_record(&id);
-            record.mode = mode.clone();
+            record.directive = d.clone();
             registry.insert(&record).await.unwrap();
             let fetched = registry.get(&id).await.unwrap().unwrap();
-            assert_eq!(&fetched.mode, mode);
+            assert_eq!(&fetched.directive, d);
         }
     }
 

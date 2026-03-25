@@ -44,9 +44,9 @@ load helpers/common
     assert_failure
 }
 
-@test "atc dispatch with invalid mode fails with clap error" {
-    # Arg order: atc dispatch <SLUG> [MODE]
-    run atc dispatch tasks/test-1 not-a-real-mode
+@test "atc dispatch with invalid directive fails with clap error" {
+    # Arg order: atc dispatch <SLUG> [DIRECTIVE]
+    run atc dispatch tasks/test-1 not-a-real-directive
     [ "$status" -eq 2 ]
     assert_output --partial "invalid value"
 }
@@ -85,18 +85,18 @@ load helpers/common
 }
 
 # ---------------------------------------------------------------------------
-# Mode parsing (validated at clap level)
+# Directive parsing (validated at clap level)
 # ---------------------------------------------------------------------------
 
-@test "all valid modes are accepted by clap" {
-    local modes=(implement research kb-update review-fix pr-comments refine create-task)
-    for mode in "${modes[@]}"; do
-        # Arg order: atc dispatch <SLUG> [MODE]
+@test "all valid directives are accepted by clap" {
+    local directives=(implement research kb-update review-fix pr-comments refine create-task)
+    for d in "${directives[@]}"; do
+        # Arg order: atc dispatch <SLUG> [DIRECTIVE]
         # We just check that clap accepts the mode (it will fail later at config/git-kb).
-        run atc dispatch tasks/test-1 "$mode"
+        run atc dispatch tasks/test-1 "$d"
         # Status 2 = clap parse error — that would be a bug
         if [ "$status" -eq 2 ]; then
-            echo "Mode '$mode' rejected by clap with status 2"
+            echo "Directive '$d' rejected by clap with status 2"
             false
         fi
     done
@@ -106,7 +106,7 @@ load helpers/common
 # Environment variable handling
 # ---------------------------------------------------------------------------
 
-@test "ATC_CI=true enables inline mode implicitly" {
+@test "ATC_CI=true enables inline directive implicitly" {
     write_test_config "$TEST_TMPDIR/atc.toml"
     mkdir -p "$TEST_TMPDIR/workspace"
 

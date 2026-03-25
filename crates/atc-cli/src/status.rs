@@ -46,7 +46,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
         "dispatched_at",
         "status",
         "task",
-        "mode",
+        "directive",
         "cost",
         "turns",
         "duration",
@@ -62,7 +62,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
         } else {
             task.to_string()
         };
-        let mode = r.mode.as_str().to_string();
+        let directive_str = r.directive.as_str().to_string();
         let cost = r
             .cost_usd
             .map(|c| format!("${:.2}", c))
@@ -86,7 +86,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
             dispatched,
             status,
             task_display,
-            mode,
+            directive_str,
             cost,
             turns,
             duration,
@@ -194,7 +194,7 @@ pub async fn run_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atc_core::types::{HealthChecks, Mode};
+    use atc_core::types::{Directive, HealthChecks};
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
 
@@ -207,7 +207,7 @@ mod tests {
             session: "session@implement@123".to_string(),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status,
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,

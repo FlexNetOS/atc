@@ -24,7 +24,7 @@ const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// increase (not exponential across retries) — `max_retries` bounds total spend.
 fn classify_failure_overrides(
     config: &AtcConfig,
-    mode: &str,
+    directive: &str,
     log_file: &std::path::Path,
     id: &str,
 ) -> (Option<f64>, Option<u32>) {
@@ -36,7 +36,7 @@ fn classify_failure_overrides(
                 "last result event: subtype={}",
                 event.subtype
             );
-            compute_overrides(config, mode, &event.subtype)
+            compute_overrides(config, directive, &event.subtype)
         }
         Ok(None) => {
             warn!(id, log_file = %log_file.display(), "no result event found in log");
@@ -52,12 +52,16 @@ fn classify_failure_overrides(
 }
 
 /// Pure computation of overrides from a failure subtype. Separated for testability.
-fn compute_overrides(config: &AtcConfig, mode: &str, subtype: &str) -> (Option<f64>, Option<u32>) {
+fn compute_overrides(
+    config: &AtcConfig,
+    directive: &str,
+    subtype: &str,
+) -> (Option<f64>, Option<u32>) {
     match subtype {
         "error_max_turns" => {
             let current = config
-                .modes
-                .get(mode)
+                .directives
+                .get(directive)
                 .and_then(|m| m.max_turns)
                 .unwrap_or(config.dispatch.max_turns);
             let doubled = current.saturating_mul(2);
@@ -68,8 +72,8 @@ fn compute_overrides(config: &AtcConfig, mode: &str, subtype: &str) -> (Option<f
         }
         "error_max_budget_usd" => {
             let current = config
-                .modes
-                .get(mode)
+                .directives
+                .get(directive)
                 .and_then(|m| m.max_budget_usd)
                 .unwrap_or(config.dispatch.max_budget_usd);
             let doubled = current * 2.0;
@@ -149,7 +153,7 @@ pub async fn run_retry(
 
     // 6. Classify failure and compute budget/turns adjustments
     let (max_budget_override, max_turns_override) =
-        classify_failure_overrides(config, record.mode.as_str(), &record.log_file, id);
+        classify_failure_overrides(config, record.directive.as_str(), &record.log_file, id);
 
     // 6b. Kill old tmux session (non-fatal, with timeout)
     match run_cmd_with_timeout(
@@ -215,7 +219,7 @@ pub async fn run_retry(
         .unwrap_or_else(|| slug.to_string());
     let opts = RunOpts {
         input: input.clone(),
-        mode: Some(record.mode.clone()),
+        directive: Some(record.directive.clone()),
         // TODO: Template params (--param key=val) are not yet persisted in
         // DispatchRecord, so retries re-render with empty bindings. Track in
         // a future schema migration (add `params_json TEXT` column).
@@ -314,7 +318,7 @@ mod tests {
     use async_trait::async_trait;
     use atc_core::executor::{AgentHandle, AgentOpts};
     use atc_core::registry::StatusFilter;
-    use atc_core::types::{DispatchRecord, HealthChecks, Mode};
+    use atc_core::types::{Directive, DispatchRecord, HealthChecks};
     use chrono::Utc;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -442,7 +446,7 @@ mod tests {
             session: "test-session".to_string(),
             log_file: PathBuf::from("/tmp/nonexistent-test.jsonl"),
             status: Status::Failed,
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             retries,
             resolver: "task".to_string(),
             pr_url: None,
@@ -618,11 +622,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_overrides_uses_mode_specific_config() {
+    fn test_compute_overrides_uses_directive_specific_config() {
         let mut config = AtcConfig::default();
-        config.modes.insert(
+        config.directives.insert(
             "research".to_string(),
-            atc_core::config::ModeConfig {
+            atc_core::config::DirectiveConfig {
                 max_turns: Some(500),
                 max_budget_usd: Some(5.0),
                 ..Default::default()
@@ -641,7 +645,7 @@ mod tests {
     #[test]
     fn test_compute_overrides_falls_back_to_dispatch_defaults() {
         let config = AtcConfig::default();
-        // "nonexistent" mode falls back to dispatch defaults
+        // "nonexistent" directive falls back to dispatch defaults
         let (_, turns) = compute_overrides(&config, "nonexistent", "error_max_turns");
         assert_eq!(turns, Some(config.dispatch.max_turns * 2));
 

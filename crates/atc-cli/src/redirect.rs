@@ -81,7 +81,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use atc_core::registry::StatusFilter;
-    use atc_core::types::{DispatchRecord, HealthChecks, Mode};
+    use atc_core::types::{Directive, DispatchRecord, HealthChecks};
     use chrono::Utc;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -182,7 +182,7 @@ mod tests {
             session: "test-session".to_string(),
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status,
-            mode: Mode::Implement,
+            directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
             pr_url: None,
