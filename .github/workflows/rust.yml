@@ -81,5 +81,12 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: Ensure tmux is available
+        run: |
+          if ! command -v tmux &> /dev/null; then
+            brew install tmux
+          fi
+          tmux -V
+
       - name: Test
         run: cargo test --all-targets
