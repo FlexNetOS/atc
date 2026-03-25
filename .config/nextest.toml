@@ -1,0 +1,15 @@
+# nextest configuration for ATC
+# See: https://nexte.st/docs/configuration/
+
+[profile.default]
+retries = 0
+fail-fast = true
+status-level = "pass"
+final-status-level = "flaky"
+test-threads = "num-cpus"
+
+[profile.ci]
+retries = 2
+fail-fast = false
+status-level = "all"
+final-status-level = "fail"
