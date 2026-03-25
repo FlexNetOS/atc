@@ -26,7 +26,7 @@ pub struct AtcConfig {
     #[serde(default)]
     pub prompt: PromptConfig,
     /// Per-directive template overrides. Keys are directive names (e.g. "implement", "review-fix").
-    #[serde(default)]
+    #[serde(default, alias = "modes")]
     pub directives: HashMap<String, DirectiveConfig>,
     /// Resolver chain configuration.
     #[serde(default)]

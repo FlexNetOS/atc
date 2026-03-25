@@ -430,13 +430,13 @@ impl InputResolver for TaskResolver {
                 })?
         };
 
-        // 1. Resolve directive
+        // 1. Derive branch and resolve directive in that workspace
+        let branch = derive_branch(slug);
         let resolved_directive =
-            Self::resolve_directive(opts.directive.clone(), slug, &kb_root, None).await?;
+            Self::resolve_directive(opts.directive.clone(), slug, &kb_root, Some(&branch)).await?;
         info!(%slug, directive = %resolved_directive.as_str(), "directive resolved");
 
-        // 2. Derive branch and dispatch ID
-        let branch = derive_branch(slug);
+        // 2. Build dispatch ID
         let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
         let session_name = dispatch_id.clone();
 

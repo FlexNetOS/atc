@@ -200,7 +200,12 @@ impl SqliteRegistry {
             )
             .fetch_one(pool)
             .await?;
-            if has_mode_col > 0 {
+            let (has_directive_col,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'directive'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_mode_col > 0 && has_directive_col == 0 {
                 sqlx::query("ALTER TABLE dispatches RENAME COLUMN mode TO directive")
                     .execute(pool)
                     .await?;

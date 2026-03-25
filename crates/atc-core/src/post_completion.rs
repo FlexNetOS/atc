@@ -147,7 +147,7 @@ pub async fn run_post_completion(
     ) {
         if let Some(log_dir) = log_file.parent() {
             if let Err(e) =
-                save_review_artifact(log_dir, &input.dispatch_id, &artifacts, &record.directive)
+                save_review_artifact(log_dir, &input.dispatch_id, &artifacts)
             {
                 warn!(id = %input.dispatch_id, error = %e, "failed to save review artifact");
             }
@@ -198,7 +198,6 @@ fn save_review_artifact(
     log_dir: &Path,
     dispatch_id: &str,
     artifacts: &Artifacts,
-    _directive: &Directive,
 ) -> Result<()> {
     let head_commit = artifacts.commits.last().cloned().unwrap_or_default();
 
@@ -577,7 +576,6 @@ mod tests {
             dir.path(),
             "test-dispatch",
             &artifacts,
-            &Directive::ReviewFix,
         )
         .unwrap();
 

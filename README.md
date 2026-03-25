@@ -52,7 +52,7 @@ atc run → resolve input → create worktree → assemble prompt → run provid
 
 2. **Worktree Isolation** — each dispatch gets its own git worktree. Existing worktrees are reused. Collision detection prevents two agents on the same worktree.
 
-3. **Prompt Assembly** — system prompts are assembled from composable component `.md` files per mode config. Templates use [Handlebars](https://handlebarsjs.com/) syntax with 3-level partial resolution.
+3. **Prompt Assembly** — system prompts are assembled from composable component `.md` files per directive config. Templates use [Handlebars](https://handlebarsjs.com/) syntax with 3-level partial resolution.
 
 4. **Context Providers** — pluggable pre-dispatch data assembly. Providers run after prompt assembly, before agent spawn:
    - **PR Context** — fetches PR metadata, comments, reviews, threads in parallel. Generates `triage.md` and `summary.md` in `.dispatch-prefetch/`.
@@ -87,7 +87,7 @@ atc run → resolve input → create worktree → assemble prompt → run provid
 | `atc redirect <id> '<msg>'` | Send message to running agent via tmux |
 | `atc close <slug>` | Verify task completion and close |
 | `atc post-complete [--id <id>]` | Run post-completion (auto or manual recovery) |
-| `atc prompt <mode>` | Preview rendered system prompt |
+| `atc prompt <directive>` | Preview rendered system prompt |
 
 ## Configuration
 
@@ -203,7 +203,7 @@ pub trait ContextProvider: Send + Sync {
 }
 ```
 
-Registered per-mode in config (`providers = ["pr-context", "rebase"]`). Provider errors are non-fatal — logged and skipped.
+Registered per-directive in config (`providers = ["pr-context", "rebase"]`). Provider errors are non-fatal — logged and skipped.
 
 ### Registry
 
@@ -218,7 +218,7 @@ CREATE TABLE dispatches (
   session TEXT NOT NULL,
   log_file TEXT NOT NULL,
   status TEXT NOT NULL,         -- running, done, failed, needs-review, needs-human, stopped, retrying
-  mode TEXT NOT NULL,
+  directive TEXT NOT NULL,
   resolver TEXT NOT NULL,       -- "task", "template", "prompt"
   ...
 );
@@ -290,7 +290,7 @@ Classifies failures and adjusts config:
 |----------|-------------|
 | `ATC_CONFIG` | Config file path |
 | `ATC_ROOT` | Data directory (default `~/.local/share/atc`) |
-| `ATC_CI` | Set to `true` for inline mode (no tmux) |
+| `ATC_CI` | Set to `true` for inline execution (no tmux) |
 | `ATC_NOTIFY_WEBHOOK` | Webhook URL for completion notifications |
 | `GITKB_ROOT` | Set by TaskResolver for agent's KB access |
 | `GITKB_WORKTREE` | Set by TaskResolver for per-branch indexing |
