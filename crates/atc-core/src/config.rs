@@ -117,7 +117,7 @@ impl AtcConfig {
                 && cfg.health.cost_warning_threshold >= 0.0,
             "health.cost_warning_threshold must be a finite non-negative number"
         );
-        // Validate directive keys against known Directive variants + per-mode overrides
+        // Validate directive keys against known Directive variants + per-directive overrides
         for key in cfg.directives.keys() {
             key.parse::<crate::types::Directive>().map_err(|_| {
                 anyhow::anyhow!(
@@ -985,7 +985,7 @@ template_paht = "typo"
     fn test_unknown_directive_name_rejected() {
         let toml = r#"
 [directives.implment]
-template_inline = "typo in mode name"
+template_inline = "typo in directive name"
 "#;
         let err = AtcConfig::parse_and_validate(toml).unwrap_err();
         assert!(

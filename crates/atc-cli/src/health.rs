@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_review_skips_review_fix_mode() {
+    fn test_auto_review_skips_review_fix_directive() {
         let checks = HealthChecks {
             agent_exited_clean: true,
             branch_pushed: true,

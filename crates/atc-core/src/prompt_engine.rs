@@ -13,7 +13,7 @@ pub struct TemplateOutput {
     pub directives: Vec<String>,
 }
 
-/// Assemble a system prompt from component `.md` files listed in the mode config.
+/// Assemble a system prompt from component `.md` files listed in the directive config.
 ///
 /// Each component name maps to `<components_dir>/<name>.md`. Files are concatenated
 /// in order with `\n\n` separators. After assembly, any `{{> partial}}` Handlebars

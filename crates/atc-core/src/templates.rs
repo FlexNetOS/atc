@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::config::{expand_tilde, AtcConfig};
 use crate::types::Directive;
 
-/// Resolve and render the system prompt for a mode.
+/// Resolve and render the system prompt for a directive.
 ///
 /// 1. Resolve base template (config `template_path` → `template_inline`)
 /// 2. Replace `{{slug}}` and `{{directive}}` tokens
@@ -31,7 +31,7 @@ pub async fn render_prompt(
     }
 }
 
-/// Resolve the base template string for a mode using the config override chain:
+/// Resolve the base template string for a directive using the config override chain:
 /// 1. `template_path` from config (file on disk, ~ expanded)
 /// 2. `template_inline` from config (non-empty string)
 /// 3. Error — no built-in defaults; each project must provide its own templates.
@@ -232,7 +232,7 @@ mod tests {
         );
     }
 
-    // -- Error when no config for mode --
+    // -- Error when no config for directive --
 
     #[tokio::test]
     async fn test_error_when_no_config() {

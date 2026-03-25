@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_prompt_default_mode() {
+    async fn test_resolve_prompt_default_directive() {
         let resolver = PromptResolver;
         let config = AtcConfig::default();
         let opts = RunOpts {

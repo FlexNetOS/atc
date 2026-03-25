@@ -140,7 +140,7 @@ pub async fn run_post_completion(
         }
     }
 
-    // 11. Save review artifact if ReviewFix or PrComments mode
+    // 11. Save review artifact if ReviewFix or PrComments directive
     if matches!(
         record.directive,
         Directive::ReviewFix | Directive::PrComments

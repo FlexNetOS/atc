@@ -465,7 +465,7 @@ async fn test_dispatch_resolves_mode_from_frontmatter() {
     let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
     let executor = Arc::new(StubExecutor { exit_code: 0 });
 
-    // Pass None for mode — should resolve from frontmatter directives
+    // Pass None for directive — should resolve from frontmatter directives
     let opts = RunOpts {
         input: "tasks/gitkb-auto-mode".to_string(),
         directive: None,

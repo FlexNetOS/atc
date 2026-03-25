@@ -71,7 +71,7 @@ pub fn make_provider(name: &str) -> Option<Box<dyn ContextProvider>> {
     }
 }
 
-/// Instantiate all providers for a given mode from config.
+/// Instantiate all providers for a given directive from config.
 pub fn providers_for_directive(
     config: &AtcConfig,
     directive: &Directive,
@@ -87,7 +87,7 @@ pub fn providers_for_directive(
         .filter_map(|name| {
             let provider = make_provider(name);
             if provider.is_none() {
-                tracing::warn!(provider = %name, "unknown provider in mode config, skipping");
+                tracing::warn!(provider = %name, "unknown provider in directive config, skipping");
             }
             provider
         })
@@ -98,7 +98,7 @@ pub fn providers_for_directive(
 ///
 /// Used by the template resolver to register deferred placeholders before
 /// providers run, so Handlebars strict mode doesn't reject provider-injected vars.
-/// We query all providers (not just those for the current mode) because the mode
+/// We query all providers (not just those for the current directive) because the directive
 /// may not be known until after template rendering.
 pub fn all_deferred_template_vars() -> Vec<String> {
     let mut vars = Vec::new();

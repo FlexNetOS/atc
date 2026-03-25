@@ -11,7 +11,7 @@ use crate::types::{Directive, DispatchRecord, RunOpts};
 pub struct ResolvedInput {
     /// Rendered system prompt (from components, templates, or defaults).
     pub system_prompt: String,
-    /// The dispatch mode.
+    /// The dispatch directive.
     pub directive: Directive,
     /// Task slug (only for task-based dispatches).
     pub task_slug: Option<String>,
