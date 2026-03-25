@@ -29,5 +29,5 @@ runs:
           )
         fi
         # Start sccache server (creates cache dir automatically)
-        sccache --start-server 2>/dev/null || true
+        sccache --start-server 2>&1 | grep -v "server already running" || true
         sccache --show-stats
