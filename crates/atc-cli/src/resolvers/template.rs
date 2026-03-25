@@ -130,9 +130,21 @@ impl InputResolver for TemplateResolver {
         // Render template — pass just the filename so render_template resolves
         // it against templates_dir internally, avoiding double-resolution when
         // templates_dir is relative and config_dir is None.
-        let output =
-            prompt_engine::render_template(Path::new(&template_name), &params, config, None)
-                .await?;
+        //
+        // Provider-injected template vars (e.g. {{prefetch}} from pr-context)
+        // aren't available yet — they're substituted by the pipeline after
+        // providers run. We query providers for their declared var names so
+        // Handlebars strict mode doesn't reject them.
+        let deferred_owned = atc_core::providers::all_deferred_template_vars();
+        let deferred_vars: Vec<&str> = deferred_owned.iter().map(|s| s.as_str()).collect();
+        let output = prompt_engine::render_template_with_deferred(
+            Path::new(&template_name),
+            &params,
+            &deferred_vars,
+            config,
+            None,
+        )
+        .await?;
 
         // Resolve mode: CLI override > frontmatter directives > default implement
         let mode = if let Some(ref m) = opts.mode {
@@ -422,5 +434,77 @@ mod tests {
             "branch should start with 'tpl--review-', got: {}",
             result.branch
         );
+    }
+
+    /// Template with {{prefetch}} (a provider-injected var) should render
+    /// successfully with a deferred placeholder instead of failing strict mode.
+    #[tokio::test]
+    async fn test_resolve_template_with_deferred_provider_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmpl_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        // Template that references both a user param and a provider-injected var
+        std::fs::write(
+            tmpl_dir.join("pr-review.md"),
+            "---\ndirectives: [review-fix]\n---\nPR: {{pr}}\n\n{{prefetch}}",
+        )
+        .unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+                components_dir: "components".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "pr".to_string(),
+            "https://github.com/org/repo/pull/42".to_string(),
+        );
+
+        let opts = RunOpts {
+            input: "pr-review".to_string(),
+            mode: None,
+            params,
+            pr_url: None,
+            inline: true,
+            force: false,
+            dry_run: false,
+            directives: None,
+            no_worktree: false,
+            max_budget_usd: None,
+            max_turns: None,
+            retries: 0,
+            list: false,
+        };
+
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("pr-review", &opts, &config).await.unwrap();
+
+        // User-supplied param should be resolved
+        assert!(
+            result
+                .system_prompt
+                .contains("https://github.com/org/repo/pull/42"),
+            "expected PR URL in prompt, got: {}",
+            result.system_prompt
+        );
+        // Provider var should be a deferred placeholder, not rejected
+        assert!(
+            result.system_prompt.contains("__ATC_DEFER_prefetch__"),
+            "expected deferred placeholder for prefetch, got: {}",
+            result.system_prompt
+        );
+        assert_eq!(result.mode, Mode::ReviewFix);
     }
 }

@@ -247,7 +247,6 @@ async fn check_worktree_collision(
 /// Parameters for worktree creation/reuse.
 pub struct WorktreeOpts<'a> {
     pub worktree_base: &'a Path,
-    pub kb_basename: &'a str,
     pub repo: Option<&'a str>,
     pub branch: &'a str,
     pub meta_workspace_root: &'a Path,
@@ -273,16 +272,18 @@ pub async fn ensure_worktree(
     registry: &dyn Registry,
 ) -> Result<WorktreeResult> {
     let worktree_base = opts.worktree_base;
-    let kb_basename = opts.kb_basename;
     let repo = opts.repo;
     let branch = opts.branch;
     let meta_workspace_root = opts.meta_workspace_root;
     let kb_root = opts.kb_root;
     let force = opts.force;
 
+    // Use branch name as the worktree directory name so each dispatch gets a
+    // unique path. Previously this used kb_basename, which caused every
+    // dispatch to collide on the same worktree name.
     let worktree_path = match repo {
-        Some(r) => worktree_base.join(kb_basename).join(r),
-        None => worktree_base.join(kb_basename).join(branch),
+        Some(r) => worktree_base.join(branch).join(r),
+        None => worktree_base.join(branch),
     };
 
     // Collision detection
@@ -352,14 +353,7 @@ pub async fn ensure_worktree(
     if let Some(repo_alias) = repo {
         let output = tokio::process::Command::new("meta")
             .args([
-                "git",
-                "worktree",
-                "create",
-                kb_basename,
-                "--repo",
-                repo_alias,
-                "--branch",
-                branch,
+                "git", "worktree", "create", branch, "--repo", repo_alias, "--branch", branch,
             ])
             .env("META_WORKTREES", worktree_base)
             .env("GITKB_ROOT", kb_root)

@@ -74,6 +74,19 @@ pub async fn assemble_system_prompt(
     Ok(rendered)
 }
 
+/// Prefix used for deferred template variables. Provider-injected vars like
+/// `{{prefetch}}` aren't available at template-render time; they're replaced
+/// by the pipeline after providers run. This sentinel lets them pass through
+/// Handlebars strict mode without error.
+pub const DEFERRED_VAR_PREFIX: &str = "__ATC_DEFER_";
+/// Suffix for deferred variable placeholders.
+pub const DEFERRED_VAR_SUFFIX: &str = "__";
+
+/// Build a deferred placeholder string for a variable name.
+pub fn deferred_placeholder(var: &str) -> String {
+    format!("{}{}{}", DEFERRED_VAR_PREFIX, var, DEFERRED_VAR_SUFFIX)
+}
+
 /// Render a Handlebars template file with YAML frontmatter.
 ///
 /// This is a standalone entry point for callers that need full Handlebars
@@ -81,6 +94,10 @@ pub async fn assemble_system_prompt(
 /// by the legacy `template_path` dispatch path, which intentionally uses
 /// simple `{{slug}}`/`{{directive}}` token replacement for backward
 /// compatibility. Use this function directly when you need rich templating.
+///
+/// `deferred_vars` lists variable names that will be injected by providers
+/// after rendering. These are rendered as sentinel placeholders so Handlebars
+/// strict mode doesn't reject them. The pipeline substitutes them later.
 ///
 /// Returns the rendered body and the list of directives from the frontmatter.
 /// Template files have the format:
@@ -97,6 +114,17 @@ pub async fn render_template(
     config: &AtcConfig,
     worktree_path: Option<&Path>,
 ) -> Result<TemplateOutput> {
+    render_template_with_deferred(template_path, params, &[], config, worktree_path).await
+}
+
+/// Like [`render_template`] but accepts a list of deferred variable names.
+pub async fn render_template_with_deferred(
+    template_path: &Path,
+    params: &BTreeMap<String, String>,
+    deferred_vars: &[&str],
+    config: &AtcConfig,
+    worktree_path: Option<&Path>,
+) -> Result<TemplateOutput> {
     // Resolve relative template paths against `prompt.templates_dir`.
     let resolved = if template_path.is_relative() {
         resolve_dir(&config.prompt.templates_dir, config.config_dir.as_deref()).join(template_path)
@@ -109,9 +137,19 @@ pub async fn render_template(
 
     let (frontmatter, body) = split_frontmatter(&raw)?;
 
+    // Inject deferred placeholders for provider-supplied vars so Handlebars
+    // strict mode doesn't reject them. The pipeline replaces these after
+    // providers run.
+    let mut effective_params = params.clone();
+    for var in deferred_vars {
+        if !effective_params.contains_key(*var) {
+            effective_params.insert(var.to_string(), deferred_placeholder(var));
+        }
+    }
+
     let hbs = build_registry(config, worktree_path).await?;
     let rendered = hbs
-        .render_template(body, params)
+        .render_template(body, &effective_params)
         .with_context(|| format!("failed to render template '{}'", template_path.display()))?;
 
     Ok(TemplateOutput {
@@ -705,6 +743,93 @@ Working on PR: {{pr}}
             err.to_string().contains("render"),
             "expected render error for missing var, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_render_template_deferred_vars_pass_through_strict_mode() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        // Template references both a user-supplied var and a deferred provider var
+        let template = "---\ndirectives: [review-fix]\n---\nPR: {{pr_url}}\nContext: {{prefetch}}";
+        let tmpl_path = dir.path().join("test.md");
+        std::fs::write(&tmpl_path, template).unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert(
+            "pr_url".to_string(),
+            "https://github.com/org/repo/pull/1".to_string(),
+        );
+
+        // Without deferred_vars, this should fail (strict mode)
+        let err = render_template(&tmpl_path, &params, &config, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("render"), "got: {err}");
+
+        // With deferred_vars, it should succeed with a placeholder
+        let output =
+            render_template_with_deferred(&tmpl_path, &params, &["prefetch"], &config, None)
+                .await
+                .unwrap();
+        assert!(output.body.contains("https://github.com/org/repo/pull/1"));
+        assert!(output.body.contains(&deferred_placeholder("prefetch")));
+        // User-supplied var should be resolved, not deferred
+        assert!(!output.body.contains("{{pr_url}}"));
+    }
+
+    #[test]
+    fn test_deferred_placeholder_format() {
+        assert_eq!(deferred_placeholder("prefetch"), "__ATC_DEFER_prefetch__");
+    }
+
+    #[tokio::test]
+    async fn test_deferred_var_not_overridden_when_user_supplies_it() {
+        // If the user explicitly provides a value for a "deferred" var,
+        // the user value should win.
+        let dir = tempfile::tempdir().unwrap();
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        let template = "---\ndirectives: []\n---\nData: {{prefetch}}";
+        let tmpl_path = dir.path().join("test.md");
+        std::fs::write(&tmpl_path, template).unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert("prefetch".to_string(), "user-provided-value".to_string());
+
+        let output =
+            render_template_with_deferred(&tmpl_path, &params, &["prefetch"], &config, None)
+                .await
+                .unwrap();
+        assert!(output.body.contains("user-provided-value"));
+        assert!(!output.body.contains("__ATC_DEFER_"));
     }
 
     // --- render_prompt backward compatibility tests ---

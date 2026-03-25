@@ -44,6 +44,15 @@ pub trait ContextProvider: Send + Sync {
     /// Provider name for logging and config reference.
     fn name(&self) -> &str;
 
+    /// Template variable names this provider may inject via `ContextOutput::template_vars`.
+    ///
+    /// The template resolver uses this to register deferred placeholders so
+    /// Handlebars strict mode doesn't reject them before providers run.
+    /// Override this when your provider adds entries to `template_vars`.
+    fn declared_template_vars(&self) -> &[&str] {
+        &[]
+    }
+
     /// Prepare context before agent dispatch.
     /// Called after prompt assembly, before agent spawn.
     async fn prepare(&self, ctx: &DispatchContext) -> anyhow::Result<ContextOutput>;
@@ -80,6 +89,27 @@ pub fn providers_for_mode(config: &AtcConfig, mode: &Mode) -> Vec<Box<dyn Contex
             provider
         })
         .collect()
+}
+
+/// Collect all declared template variable names from every known provider.
+///
+/// Used by the template resolver to register deferred placeholders before
+/// providers run, so Handlebars strict mode doesn't reject provider-injected vars.
+/// We query all providers (not just those for the current mode) because the mode
+/// may not be known until after template rendering.
+pub fn all_deferred_template_vars() -> Vec<String> {
+    let mut vars = Vec::new();
+    for name in KNOWN_PROVIDERS {
+        if let Some(p) = make_provider(name) {
+            for v in p.declared_template_vars() {
+                let s = (*v).to_string();
+                if !vars.contains(&s) {
+                    vars.push(s);
+                }
+            }
+        }
+    }
+    vars
 }
 
 /// Run all providers concurrently and merge their outputs.
@@ -245,5 +275,33 @@ mod tests {
         let config = AtcConfig::default();
         let providers = providers_for_mode(&config, &Mode::Implement);
         assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn test_all_deferred_template_vars_includes_prefetch() {
+        let vars = all_deferred_template_vars();
+        assert!(
+            vars.contains(&"prefetch".to_string()),
+            "expected 'prefetch' in deferred vars, got: {:?}",
+            vars
+        );
+    }
+
+    #[test]
+    fn test_pr_context_declares_template_vars() {
+        let provider = make_provider("pr-context").unwrap();
+        assert_eq!(provider.declared_template_vars(), &["prefetch"]);
+    }
+
+    #[test]
+    fn test_kb_context_declares_no_template_vars() {
+        let provider = make_provider("kb-context").unwrap();
+        assert!(provider.declared_template_vars().is_empty());
+    }
+
+    #[test]
+    fn test_rebase_declares_no_template_vars() {
+        let provider = make_provider("rebase").unwrap();
+        assert!(provider.declared_template_vars().is_empty());
     }
 }
