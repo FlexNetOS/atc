@@ -454,7 +454,7 @@ exit 1
 }
 
 #[tokio::test]
-async fn test_dispatch_resolves_mode_from_frontmatter() {
+async fn test_dispatch_resolves_directive_from_frontmatter() {
     let _guard = PATH_MUTEX.lock().await;
 
     let fix = TestFixture::new();

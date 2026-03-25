@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_overrides_uses_mode_specific_config() {
+    fn test_compute_overrides_uses_directive_specific_config() {
         let mut config = AtcConfig::default();
         config.directives.insert(
             "research".to_string(),
