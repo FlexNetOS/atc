@@ -20,8 +20,10 @@ jobs:
     steps:
       - name: Require PAT for workflow retriggers
         shell: bash
+        env:
+          PARENT_REPO_PAT: ${{ secrets.PARENT_REPO_PAT }}
         run: |
-          test -n "${{ secrets.PARENT_REPO_PAT }}" || {
+          test -n "$PARENT_REPO_PAT" || {
             echo "PARENT_REPO_PAT must be configured for auto-format pushes to retrigger CI" >&2
             exit 1
           }
