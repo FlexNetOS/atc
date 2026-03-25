@@ -25,6 +25,10 @@ impl ContextProvider for PrContextProvider {
         "pr-context"
     }
 
+    fn declared_template_vars(&self) -> &[&str] {
+        &["prefetch"]
+    }
+
     async fn prepare(&self, ctx: &DispatchContext) -> anyhow::Result<ContextOutput> {
         // Determine PR URL: explicit or from params
         let pr_url = ctx

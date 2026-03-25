@@ -133,13 +133,14 @@ impl InputResolver for TemplateResolver {
         //
         // Provider-injected template vars (e.g. {{prefetch}} from pr-context)
         // aren't available yet — they're substituted by the pipeline after
-        // providers run. We list them as deferred so Handlebars strict mode
-        // doesn't reject them.
-        let deferred_vars: &[&str] = &["prefetch"];
+        // providers run. We query providers for their declared var names so
+        // Handlebars strict mode doesn't reject them.
+        let deferred_owned = atc_core::providers::all_deferred_template_vars();
+        let deferred_vars: Vec<&str> = deferred_owned.iter().map(|s| s.as_str()).collect();
         let output = prompt_engine::render_template_with_deferred(
             Path::new(&template_name),
             &params,
-            deferred_vars,
+            &deferred_vars,
             config,
             None,
         )
