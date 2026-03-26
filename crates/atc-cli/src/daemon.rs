@@ -100,11 +100,12 @@ pub async fn run_daemon(
     let source_handles = start_sources(
         config,
         &opts.sources,
+        &queues,
         queue.clone(),
         state.shutdown.clone(),
         state.shutdown_notify.clone(),
     )
-    .await;
+    .await?;
 
     let drain_interval = std::time::Duration::from_secs(config.daemon.drain_interval_secs.max(1));
 
@@ -121,11 +122,22 @@ pub async fn run_daemon(
 
     // Main drain loop
     while !state.shutdown.load(Ordering::SeqCst) {
-        // Check available capacity
-        let running = registry
+        // Check available capacity — on error, skip this cycle rather than
+        // assuming zero running (which would dispatch past max_concurrent).
+        let running = match registry
             .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
             .await
-            .unwrap_or_default();
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "failed to read active dispatch count, skipping drain cycle");
+                tokio::select! {
+                    _ = tokio::time::sleep(drain_interval) => {}
+                    _ = state.shutdown_notify.notified() => {}
+                }
+                continue;
+            }
+        };
 
         if running.len() < opts.max_concurrent {
             // Drain from each queue
@@ -149,11 +161,18 @@ pub async fn run_daemon(
                         break;
                     }
 
-                    // Recheck available slots before each dispatch
-                    let running = registry
+                    // Recheck available slots before each dispatch — on error,
+                    // break the drain loop rather than assuming spare capacity.
+                    let running = match registry
                         .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
                         .await
-                        .unwrap_or_default();
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(error = %e, "failed to recheck active count, breaking drain loop");
+                            break;
+                        }
+                    };
                     if running.len() >= opts.max_concurrent {
                         break; // At capacity, wait for next cycle
                     }
@@ -173,6 +192,10 @@ pub async fn run_daemon(
                     .await
                     {
                         Ok(dispatch_id) => {
+                            // Persist dispatch_id while still 'dispatching' so
+                            // recovery can correlate even if we crash before the
+                            // status flip.
+                            let _ = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await;
                             if let Err(e) =
                                 queue.queue_mark_dispatched(&item.id, &dispatch_id).await
                             {
@@ -250,26 +273,32 @@ pub async fn run_daemon(
 async fn start_sources(
     config: &AtcConfig,
     source_names: &[String],
+    daemon_queues: &[String],
     queue: Arc<atc_core::registry::SqliteRegistry>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+) -> Result<Vec<tokio::task::JoinHandle<()>>> {
     let mut handles = Vec::new();
+    // Use the first daemon queue for built-in source defaults
+    let default_queue = daemon_queues
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("default");
 
     for name in source_names {
         let source_config = match config.sources.get(name) {
             Some(c) => c.clone(),
             None => {
-                // Built-in source names
+                // Built-in source names — use daemon's effective queue, not hardcoded "default"
                 match name.as_str() {
                     "ready" => SourceConfig::Ready(atc_core::source::ReadySourceConfig {
                         poll_interval_secs: 10,
                         limit: 3,
-                        queue: "default".to_string(),
+                        queue: default_queue.to_string(),
                     }),
                     "board" => SourceConfig::Board(atc_core::source::BoardSourceConfig {
                         poll_interval_secs: 10,
-                        queue: "default".to_string(),
+                        queue: default_queue.to_string(),
                         filter_status: vec!["ready".to_string()],
                         exclude_tags: vec![],
                         require_unassigned: true,
@@ -281,14 +310,16 @@ async fn start_sources(
                     }),
                     "events" => SourceConfig::Events(atc_core::source::EventsSourceConfig {
                         poll_interval_secs: 5,
-                        queue: "default".to_string(),
+                        queue: default_queue.to_string(),
                         filter: Some("document:updated".to_string()),
                         path: Some("tasks/".to_string()),
                         trigger_on_status: vec!["ready".to_string()],
                     }),
-                    _ => {
-                        warn!(source = %name, "unknown source, skipping");
-                        continue;
+                    unknown => {
+                        anyhow::bail!(
+                            "unknown source '{}'; valid built-in sources: ready, board, events",
+                            unknown
+                        );
                     }
                 }
             }
@@ -320,7 +351,7 @@ async fn start_sources(
         handles.push(handle);
     }
 
-    handles
+    Ok(handles)
 }
 
 /// Run a git subprocess with timeout and kill_on_drop.
@@ -456,26 +487,31 @@ async fn run_source_iteration(
 
             let output = run_git_cmd(&args).await?;
 
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(slug) = event.get("slug").and_then(|s| s.as_str()) {
-                            let status = event.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                            if cfg.trigger_on_status.is_empty()
-                                || cfg.trigger_on_status.iter().any(|s| s == status)
-                            {
-                                let item = atc_core::queue::EnqueueItem {
-                                    queue_name: queue_name.to_string(),
-                                    input_type: atc_core::queue::QueueInputType::Task,
-                                    input_value: slug.to_string(),
-                                    mode: None,
-                                    priority: atc_core::queue::Priority::Medium,
-                                    params: None,
-                                    enqueued_by: Some(format!("source:{}", name)),
-                                };
-                                let _ = queue.enqueue(item).await;
-                            }
+            if !output.status.success() {
+                anyhow::bail!(
+                    "events source failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Some(slug) = event.get("slug").and_then(|s| s.as_str()) {
+                        let status = event.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                        if cfg.trigger_on_status.is_empty()
+                            || cfg.trigger_on_status.iter().any(|s| s == status)
+                        {
+                            let item = atc_core::queue::EnqueueItem {
+                                queue_name: queue_name.to_string(),
+                                input_type: atc_core::queue::QueueInputType::Task,
+                                input_value: slug.to_string(),
+                                mode: None,
+                                priority: atc_core::queue::Priority::Medium,
+                                params: None,
+                                enqueued_by: Some(format!("source:{}", name)),
+                            };
+                            let _ = queue.enqueue(item).await;
                         }
                     }
                 }

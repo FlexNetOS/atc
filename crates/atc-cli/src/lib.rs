@@ -515,6 +515,7 @@ pub async fn run(
                 view: view.clone(),
                 stdin: *stdin,
                 enqueued_by: "user".to_string(),
+                workspace_root: config.config_dir.clone(),
             };
             enqueue::run_enqueue(registry.as_ref(), &opts).await
         }

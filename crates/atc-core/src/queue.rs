@@ -218,6 +218,11 @@ pub trait DispatchQueue: Send + Sync {
     /// Returns true if the claim succeeded (row was still pending).
     async fn queue_claim(&self, id: &str) -> Result<bool>;
 
+    /// Persist the dispatch_id on a 'dispatching' row before flipping status.
+    /// This ensures recovery can correlate even if the process crashes before
+    /// `queue_mark_dispatched` completes.
+    async fn queue_set_dispatch_id(&self, id: &str, dispatch_id: &str) -> Result<()>;
+
     /// Mark a queue item as dispatched with the registry dispatch_id.
     async fn queue_mark_dispatched(&self, id: &str, dispatch_id: &str) -> Result<()>;
 

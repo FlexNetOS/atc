@@ -837,6 +837,17 @@ impl DispatchQueue for SqliteRegistry {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn queue_set_dispatch_id(&self, id: &str, dispatch_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE dispatch_queue SET dispatch_id = ?1 WHERE id = ?2 AND status = 'dispatching'",
+        )
+        .bind(dispatch_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn queue_mark_dispatched(&self, id: &str, dispatch_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -890,18 +901,27 @@ impl DispatchQueue for SqliteRegistry {
     }
 
     async fn queue_recover(&self, queue_names: &[&str]) -> Result<(u64, u64)> {
-        // Check dispatching rows — if they have a matching dispatch_id in registry, mark dispatched.
-        // Otherwise, reset to pending. Scoped to the specified queues.
+        if queue_names.is_empty() {
+            return Ok((0, 0));
+        }
+
+        // Check dispatching rows that have been stuck longer than the staleness
+        // cutoff (60s). This avoids stealing rows from workers that are legitimately
+        // mid-dispatch. If they have a matching dispatch_id in registry, mark
+        // dispatched. Otherwise, reset to pending.
+        let staleness_cutoff = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
         let placeholders: Vec<String> =
             (1..=queue_names.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
-            "SELECT * FROM dispatch_queue WHERE status = 'dispatching' AND queue_name IN ({})",
-            placeholders.join(", ")
+            "SELECT * FROM dispatch_queue WHERE status = 'dispatching' AND queue_name IN ({}) AND claimed_at <= ?{}",
+            placeholders.join(", "),
+            queue_names.len() + 1,
         );
         let mut query = sqlx::query(&sql);
         for name in queue_names {
             query = query.bind(*name);
         }
+        query = query.bind(&staleness_cutoff);
         let dispatching_rows = query.fetch_all(&self.pool).await?;
 
         let mut recovered = 0u64;
@@ -1888,6 +1908,15 @@ mod tests {
         };
         registry.queue_claim(&id).await.unwrap();
 
+        // Back-date claimed_at so recovery considers it stale
+        let old_time = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+        sqlx::query("UPDATE dispatch_queue SET claimed_at = ?1 WHERE id = ?2")
+            .bind(&old_time)
+            .bind(&id)
+            .execute(&registry.pool)
+            .await
+            .unwrap();
+
         // Recover should reset to pending (no dispatch_id means it never completed)
         let (recovered, completed) = registry.queue_recover(&["default"]).await.unwrap();
         assert_eq!(recovered, 1);
@@ -1897,6 +1926,36 @@ mod tests {
         let items = registry.queue_list("default").await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].input_value, "tasks/crashed");
+    }
+
+    #[tokio::test]
+    async fn test_queue_recover_skips_recent_claims() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        // Enqueue and claim an item (simulating active dispatch)
+        let result = registry
+            .enqueue(sample_enqueue_item("tasks/active"))
+            .await
+            .unwrap();
+        let id = match result {
+            EnqueueResult::Enqueued { id } => id,
+            _ => panic!("expected Enqueued"),
+        };
+        registry.queue_claim(&id).await.unwrap();
+
+        // Recent claim should NOT be recovered (staleness cutoff)
+        let (recovered, completed) = registry.queue_recover(&["default"]).await.unwrap();
+        assert_eq!(recovered, 0);
+        assert_eq!(completed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_queue_recover_empty_queues() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        // Empty queue_names should return (0, 0) without SQL error
+        let (recovered, completed) = registry.queue_recover(&[]).await.unwrap();
+        assert_eq!(recovered, 0);
+        assert_eq!(completed, 0);
     }
 
     #[tokio::test]

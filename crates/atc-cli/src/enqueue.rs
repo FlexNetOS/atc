@@ -41,6 +41,10 @@ pub struct EnqueueOpts {
     pub stdin: bool,
     /// Source label (who enqueued).
     pub enqueued_by: String,
+    /// Workspace root for git kb subprocess calls.
+    /// When set, git commands use this as current_dir so --config/ATC_CONFIG
+    /// works from outside the KB repo.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 /// Run the `atc enqueue` command.
@@ -65,7 +69,7 @@ pub async fn run_enqueue(
 
     if opts.ready {
         // Delegated selection: kb_ready
-        let slugs = kb_ready_slugs(opts.limit).await?;
+        let slugs = kb_ready_slugs(opts.limit, opts.workspace_root.as_deref()).await?;
         if slugs.is_empty() {
             println!("No ready tasks found.");
             return Ok(());
@@ -77,7 +81,7 @@ pub async fn run_enqueue(
         }
     } else if opts.board {
         // Delegated selection: board query
-        let slugs = board_query_slugs(opts).await?;
+        let slugs = board_query_slugs(opts, opts.workspace_root.as_deref()).await?;
         if slugs.is_empty() {
             println!("No matching tasks found.");
             return Ok(());
@@ -89,7 +93,7 @@ pub async fn run_enqueue(
         }
     } else if let Some(ref view_slug) = opts.view {
         // Delegated selection: saved view
-        let slugs = view_query_slugs(view_slug).await?;
+        let slugs = view_query_slugs(view_slug, opts.workspace_root.as_deref()).await?;
         if slugs.is_empty() {
             println!("No results from view '{}'.", view_slug);
             return Ok(());
@@ -204,29 +208,38 @@ fn print_result(input: &str, result: &EnqueueResult) {
 }
 
 /// Run a git subprocess with timeout and kill_on_drop.
-async fn run_git_cmd(args: &[&str]) -> Result<std::process::Output> {
-    let output = tokio::time::timeout(
-        CMD_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "git {} timed out after {}s",
-            args.join(" "),
-            CMD_TIMEOUT.as_secs()
-        )
-    })??;
+async fn run_git_cmd(
+    args: &[&str],
+    workspace_root: Option<&std::path::Path>,
+) -> Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args).kill_on_drop(true);
+    if let Some(root) = workspace_root {
+        cmd.current_dir(root);
+    }
+    let output = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git {} timed out after {}s",
+                args.join(" "),
+                CMD_TIMEOUT.as_secs()
+            )
+        })??;
     Ok(output)
 }
 
 /// Query `git kb ready` for top-scored task slugs.
-async fn kb_ready_slugs(limit: u32) -> Result<Vec<String>> {
+async fn kb_ready_slugs(
+    limit: u32,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Vec<String>> {
     let limit_str = limit.to_string();
-    let output = run_git_cmd(&["kb", "ready", "--limit", &limit_str, "--format", "slugs"]).await?;
+    let output = run_git_cmd(
+        &["kb", "ready", "--limit", &limit_str, "--format", "slugs"],
+        workspace_root,
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -242,7 +255,10 @@ async fn kb_ready_slugs(limit: u32) -> Result<Vec<String>> {
 }
 
 /// Query `git kb list` for tasks matching board filters.
-async fn board_query_slugs(opts: &EnqueueOpts) -> Result<Vec<String>> {
+async fn board_query_slugs(
+    opts: &EnqueueOpts,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Vec<String>> {
     let mut args = vec!["kb", "list", "--type", "task", "--format", "slugs"];
 
     let status_filter;
@@ -258,7 +274,7 @@ async fn board_query_slugs(opts: &EnqueueOpts) -> Result<Vec<String>> {
         args.push("--unassigned");
     }
 
-    let output = run_git_cmd(&args).await?;
+    let output = run_git_cmd(&args, workspace_root).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -274,8 +290,15 @@ async fn board_query_slugs(opts: &EnqueueOpts) -> Result<Vec<String>> {
 }
 
 /// Query a saved view via `git kb list --view` for task slugs.
-async fn view_query_slugs(view_slug: &str) -> Result<Vec<String>> {
-    let output = run_git_cmd(&["kb", "list", "--view", view_slug, "--format", "slugs"]).await?;
+async fn view_query_slugs(
+    view_slug: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Vec<String>> {
+    let output = run_git_cmd(
+        &["kb", "list", "--view", view_slug, "--format", "slugs"],
+        workspace_root,
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

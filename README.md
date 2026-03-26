@@ -142,7 +142,7 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | `atc status` | Table view of all dispatches |
 | `atc info <id>` | Detailed view of a single dispatch |
 | `atc logs [-f] <id>` | Tail stream-json logs (human-readable) |
-| `atc health [--auto]` | Run 6-signal health checks |
+| `atc health [--auto]` | Run 6-signal health checks (`--auto` dispatches review-fix for NeedsReview) |
 | `atc watch [--format ndjson]` | Stream live events from running agents |
 | `atc stop <id>` | Kill tmux session, mark stopped |
 | `atc cleanup <id>` | Remove worktree, unassign task |
@@ -373,13 +373,13 @@ CREATE TABLE dispatches (
 |---|---|---|---|---|---|---|
 | **Dispatch model** | Queue + daemon + direct | Daemon (Linear poll) | Daemon (30s poll) | Daemon (patrol cycles) | Coordinator spawn | Manual (kanban) |
 | **Tracker integration** | GitKB + pluggable | Linear only | GitHub/Linear/Jira | Built-in (git-backed) | None | Built-in kanban |
-| **Agent runtimes** | Any CLI agent | Codex only | Claude/Codex/Aider/OpenCode | Claude/Copilot | 11 runtimes | Claude/Codex/Cursor/Gemini/Amp |
+| **Agent runtimes** | Any CLI agent | Codex + similar | Claude/Codex/Aider/OpenCode | Claude/Copilot | 11 runtimes | Claude/Codex/Cursor/Gemini/Amp |
 | **Knowledge/context** | GitKB graph + code intel | WORKFLOW.md only | Codebase reading | Git-backed state | SQLite mail | MCP bidirectional |
 | **Code intelligence** | AST call graphs (17 langs) | None | None | None | None | None |
 | **Persistence** | SQLite registry + queue | In-memory | File-based | Git-backed | SQLite (WAL) | File-based |
 | **Health monitoring** | 6-signal (exit->CI->reviews) | Stall detection | 3x retry + escalate | Witness + Deacon | 3-tier watchdog | None |
 | **Workspace isolation** | Git worktrees | Per-issue dirs | Git worktrees + tmux | Git worktrees | Git worktrees + tmux | Git worktrees |
-| **Multi-repo** | Native (meta) | No | No | No | No | No |
+| **Multi-repo** | Native (meta) | No | No | Multi-project rigs | Multi-repo | No |
 | **CI feedback loop** | Via health signals | Yes | Auto-fix | Via Witness | Via Watchdog | No |
 | **Adaptive retry** | Yes (failure-aware) | Exponential backoff | 3x retry | Recovery cycles | Tiered escalation | No |
 | **License** | MIT | Apache-2.0 | MIT | MIT | Unspecified | Apache-2.0 |
@@ -390,16 +390,16 @@ CREATE TABLE dispatches (
 No other orchestrator integrates with a structured knowledge base. Symphony agents read a Linear ticket and start coding. ATC agents get full task documents with acceptance criteria, code call graphs, impact analysis, and organizational memory that persists across sessions.
 
 **2. Agent-agnostic**
-ATC's `AgentExecutor` trait means any CLI agent works. Symphony hardcodes Codex. Devin is proprietary. ATC lets teams use the best agent for the job.
+ATC's `AgentExecutor` trait means any CLI agent works. Most orchestrators support a limited set of runtimes. ATC lets teams use the best agent for the job without code changes.
 
-**3. Multi-repo native (unique to ATC)**
-ATC + meta creates worktrees across multiple repos for a single task. No other orchestrator handles cross-repo changes natively.
+**3. Multi-repo native**
+ATC + meta creates worktrees across multiple repos for a single task. While Gastown and Overstory support multi-project coordination, ATC's meta-repo approach handles cross-repo changes as a single atomic dispatch.
 
 **4. 6-signal health (most comprehensive open-source)**
-Most tools stop at "is the agent alive?" ATC checks: agent exited > branch pushed > PR created > CI passed > reviews approved > threads resolved. Full lifecycle, not just dispatch.
+ATC checks the full lifecycle: agent exited > branch pushed > PR created > CI passed > reviews approved > threads resolved. Other tools implement partial monitoring (Symphony checks proof-of-work, Overstory uses tiered watchdogs), but ATC's 6-signal chain covers the complete dispatch-to-merge path.
 
-**5. Queue-first architecture (unique to ATC)**
-Every other orchestrator hardcodes one dispatch strategy. ATC separates selection (what) from scheduling (when) -- `kb_ready` scoring, board queries, saved views, event streams, custom scripts, or manual enqueue all feed the same queue.
+**5. Queue-first architecture**
+ATC separates selection (what) from scheduling (when) -- `kb_ready` scoring, board queries, saved views, event streams, custom scripts, or manual enqueue all feed the same queue. Other tools offer some dispatch flexibility (Composio AO's planner/executor, Gastown's formulas), but ATC's queue abstraction makes every selection strategy composable with every scheduling policy.
 
 ## Health Check Signals
 

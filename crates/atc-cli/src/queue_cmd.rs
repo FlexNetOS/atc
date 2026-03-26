@@ -31,8 +31,11 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
             .map(|p| p.as_str())
             .unwrap_or("unknown");
         // Truncate long input for display
-        let input_display = if item.input_value.len() > 40 {
-            format!("{}...", &item.input_value[..37])
+        let input_display = if item.input_value.chars().count() > 40 {
+            format!(
+                "{}...",
+                item.input_value.chars().take(37).collect::<String>()
+            )
         } else {
             item.input_value.clone()
         };
@@ -95,6 +98,8 @@ pub async fn run_queue_drain(
             // Convert to RunOpts and dispatch
             match dispatch_queue_item(&item, queue, registry, executor, config).await {
                 Ok(dispatch_id) => {
+                    // Persist dispatch_id while still 'dispatching' for crash recovery
+                    let _ = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await;
                     queue.queue_mark_dispatched(&item.id, &dispatch_id).await?;
                     dispatched += 1;
                     info!(
@@ -134,13 +139,6 @@ pub async fn dispatch_queue_item(
     executor: &dyn AgentExecutor,
     config: &AtcConfig,
 ) -> Result<String> {
-    // Build input string for the resolver chain
-    let input = match row.input_type {
-        QueueInputType::Task => format!("task {}", row.input_value),
-        QueueInputType::Template => row.input_value.clone(),
-        QueueInputType::Prompt => row.input_value.clone(),
-    };
-
     let params: std::collections::HashMap<String, String> = row
         .params
         .as_ref()
@@ -152,11 +150,10 @@ pub async fn dispatch_queue_item(
         })
         .unwrap_or_default();
 
-    // Determine if first word is "task" to force task resolver
-    let (raw_input, force_task) = if let Some(rest) = input.strip_prefix("task ") {
-        (rest.to_string(), true)
-    } else {
-        (input.clone(), false)
+    // Decide force_task from the row's input_type, not from the payload text
+    let (raw_input, force_task) = match row.input_type {
+        QueueInputType::Task => (row.input_value.clone(), true),
+        QueueInputType::Template | QueueInputType::Prompt => (row.input_value.clone(), false),
     };
 
     let opts = RunOpts {
