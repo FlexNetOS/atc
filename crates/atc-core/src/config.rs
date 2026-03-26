@@ -1,3 +1,4 @@
+use crate::source::SourceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,12 @@ pub struct AtcConfig {
     /// Search path configuration for `.atc/` directory resolution.
     #[serde(default)]
     pub paths: PathsConfig,
+    /// Daemon configuration.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+    /// Named source configurations for daemon auto-feed.
+    #[serde(default)]
+    pub sources: HashMap<String, SourceConfig>,
 }
 
 /// `[resolvers]` section — controls resolver order and per-resolver settings.
@@ -112,6 +119,14 @@ impl AtcConfig {
             "dispatch.max_retries must be >= 1"
         );
         anyhow::ensure!(
+            cfg.daemon.drain_interval_secs > 0,
+            "daemon.drain_interval_secs must be >= 1"
+        );
+        anyhow::ensure!(
+            cfg.daemon.max_concurrent > 0,
+            "daemon.max_concurrent must be >= 1"
+        );
+        anyhow::ensure!(
             cfg.watch.poll_interval_secs > 0,
             "watch.poll_interval_secs must be >= 1"
         );
@@ -124,6 +139,13 @@ impl AtcConfig {
                 && cfg.health.cost_warning_threshold >= 0.0,
             "health.cost_warning_threshold must be a finite non-negative number"
         );
+        // Validate source poll intervals
+        for (name, source) in &cfg.sources {
+            anyhow::ensure!(
+                source.poll_interval_secs() > 0,
+                "sources.{name}.poll_interval_secs must be >= 1"
+            );
+        }
         // Validate directive keys against known Directive variants + per-directive overrides
         for (key, directive_cfg) in &cfg.directives {
             Self::validate_directive(key, directive_cfg)?;
@@ -713,6 +735,65 @@ pub struct PathsConfig {
     /// Default: empty (project-local `.atc/` only).
     #[serde(default)]
     pub search_path: Vec<String>,
+}
+
+/// `[daemon]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DaemonConfig {
+    /// Queue drain interval in seconds. Default: 1.
+    #[serde(default = "default_drain_interval_secs")]
+    pub drain_interval_secs: u64,
+    /// Maximum concurrent dispatches across all queues. Default: 5.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Graceful shutdown timeout in seconds. Default: 300 (5 minutes).
+    #[serde(default = "default_graceful_shutdown_timeout_secs")]
+    pub graceful_shutdown_timeout_secs: u64,
+    /// PID file path. Default: ~/.local/share/atc/daemon.pid.
+    pub pid_file: Option<PathBuf>,
+}
+
+fn default_drain_interval_secs() -> u64 {
+    1
+}
+
+fn default_max_concurrent() -> usize {
+    5
+}
+
+fn default_graceful_shutdown_timeout_secs() -> u64 {
+    300
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            drain_interval_secs: default_drain_interval_secs(),
+            max_concurrent: default_max_concurrent(),
+            graceful_shutdown_timeout_secs: default_graceful_shutdown_timeout_secs(),
+            pid_file: None,
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Resolve effective PID file path.
+    pub fn resolved_pid_file(&self, config_dir: Option<&Path>) -> PathBuf {
+        if let Some(ref p) = self.pid_file {
+            let p = expand_tilde(p);
+            return if p.is_absolute() {
+                p
+            } else if let Some(dir) = config_dir {
+                dir.join(p)
+            } else {
+                p
+            };
+        }
+        let root = std::env::var("ATC_ROOT")
+            .map(|p| expand_tilde(Path::new(&p)))
+            .unwrap_or_else(|_| home_dir().join(".local/share/atc"));
+        root.join("daemon.pid")
+    }
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
@@ -1852,5 +1933,113 @@ search_path = ["~/.config/atc", "/etc/atc"]
 
         let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
         assert!(cfg.directives.is_empty());
+    }
+
+    // --- DaemonConfig tests ---
+
+    #[test]
+    fn test_daemon_config_defaults() {
+        let cfg = DaemonConfig::default();
+        assert_eq!(cfg.drain_interval_secs, 1);
+        assert_eq!(cfg.max_concurrent, 5);
+        assert_eq!(cfg.graceful_shutdown_timeout_secs, 300);
+        assert!(cfg.pid_file.is_none());
+    }
+
+    #[test]
+    fn test_daemon_config_from_toml() {
+        let toml = r#"
+[daemon]
+drain_interval_secs = 10
+max_concurrent = 3
+graceful_shutdown_timeout_secs = 60
+pid_file = "/tmp/atc.pid"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.daemon.drain_interval_secs, 10);
+        assert_eq!(cfg.daemon.max_concurrent, 3);
+        assert_eq!(cfg.daemon.graceful_shutdown_timeout_secs, 60);
+        assert_eq!(
+            cfg.daemon.pid_file.as_deref(),
+            Some(Path::new("/tmp/atc.pid"))
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_drain_interval() {
+        let toml = "[daemon]\ndrain_interval_secs = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("daemon.drain_interval_secs must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_max_concurrent() {
+        let toml = "[daemon]\nmax_concurrent = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("daemon.max_concurrent must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_default() {
+        let cfg = DaemonConfig::default();
+        let resolved = cfg.resolved_pid_file(None);
+        assert!(
+            resolved.to_string_lossy().ends_with("daemon.pid"),
+            "unexpected path: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_explicit() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("/custom/daemon.pid")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_pid_file(None),
+            PathBuf::from("/custom/daemon.pid")
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_tilde() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("~/atc/daemon.pid")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_pid_file(None),
+            home_dir().join("atc/daemon.pid")
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_relative_with_config_dir() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("daemon.pid")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_pid_file(Some(Path::new("/project/root"))),
+            PathBuf::from("/project/root/daemon.pid")
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_relative_without_config_dir() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("daemon.pid")),
+            ..Default::default()
+        };
+        // Without config_dir, relative path stays relative
+        assert_eq!(cfg.resolved_pid_file(None), PathBuf::from("daemon.pid"));
     }
 }

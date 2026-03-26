@@ -10,7 +10,9 @@ pub use args::{Args, Commands};
 
 pub mod cleanup;
 pub mod close;
+pub mod daemon;
 pub mod dispatch;
+pub mod enqueue;
 pub mod health;
 pub mod info;
 pub mod init;
@@ -18,6 +20,7 @@ pub mod kb;
 pub mod logs;
 pub mod pipeline;
 pub mod post_complete;
+pub mod queue_cmd;
 pub mod redirect;
 pub mod resolve;
 pub mod resolvers;
@@ -44,7 +47,7 @@ mod args {
 
     #[derive(Subcommand)]
     pub enum Commands {
-        /// Run an agent
+        /// Run an agent (direct dispatch, no queue)
         Run {
             /// Input: "task <slug>", template name, or raw prompt string
             input: Vec<String>,
@@ -198,6 +201,85 @@ mod args {
             #[arg(long)]
             socket: Option<std::path::PathBuf>,
         },
+        /// Add work to the dispatch queue
+        Enqueue {
+            /// Input: "task <slug>", template name, or raw prompt
+            input: Vec<String>,
+            /// Target named queue
+            #[arg(long, default_value = "default")]
+            queue: String,
+            /// Dispatch priority (critical, high, medium, low)
+            #[arg(long, default_value = "medium")]
+            priority: String,
+            /// Override directive/mode for dispatched items
+            #[arg(long)]
+            mode: Option<String>,
+            /// Key=value pairs for template rendering
+            #[arg(long = "param")]
+            param: Vec<String>,
+            /// Delegate selection to kb_ready scoring
+            #[arg(long)]
+            ready: bool,
+            /// Limit for --ready (how many top-scored tasks to enqueue)
+            #[arg(long, default_value = "1")]
+            limit: u32,
+            /// Delegate selection to board query
+            #[arg(long)]
+            board: bool,
+            /// Board filter: status
+            #[arg(long = "status")]
+            status_filter: Option<String>,
+            /// Board filter: only unblocked tasks
+            #[arg(long)]
+            unblocked: bool,
+            /// Board filter: only unassigned tasks
+            #[arg(long)]
+            unassigned: bool,
+            /// Delegate selection to a saved view
+            #[arg(long)]
+            view: Option<String>,
+            /// Read slugs from stdin (one per line)
+            #[arg(long)]
+            stdin: bool,
+        },
+        /// View and manage dispatch queues
+        Queue {
+            #[command(subcommand)]
+            action: Option<QueueAction>,
+            /// Queue name to inspect
+            #[arg(long, default_value = "default")]
+            name: String,
+        },
+        /// Run the continuous dispatch daemon
+        Daemon {
+            #[command(subcommand)]
+            action: Option<DaemonAction>,
+            /// Queue(s) to drain
+            #[arg(long = "queue")]
+            queues: Vec<String>,
+            /// Max concurrent dispatches
+            #[arg(long)]
+            max_concurrent: Option<usize>,
+            /// Activate source(s) alongside the drain loop
+            #[arg(long = "source")]
+            sources: Vec<String>,
+        },
+    }
+
+    #[derive(Subcommand)]
+    pub enum QueueAction {
+        /// Dispatch all pending items in one shot, then exit
+        Drain,
+        /// Remove all pending items from the queue
+        Clear,
+    }
+
+    #[derive(Subcommand)]
+    pub enum DaemonAction {
+        /// Gracefully stop the running daemon
+        Stop,
+        /// Show daemon status (uptime, queue depth, active dispatches)
+        Status,
     }
 }
 
@@ -217,7 +299,7 @@ fn parse_params(param_args: &[String]) -> Result<HashMap<String, String>> {
 pub async fn run(
     args: &Args,
     config: &AtcConfig,
-    registry: Arc<dyn Registry>,
+    registry: Arc<atc_core::registry::SqliteRegistry>,
     executor: Arc<dyn AgentExecutor>,
 ) -> Result<()> {
     match &args.command {
@@ -319,7 +401,15 @@ pub async fn run(
             Ok(())
         }
         Commands::Health { json, all, auto } => {
-            health::run_health(config, registry, executor, *json, *all, *auto).await
+            health::run_health(
+                config,
+                registry.clone() as Arc<dyn Registry>,
+                executor,
+                *json,
+                *all,
+                *auto,
+            )
+            .await
         }
         Commands::Prompt {
             directive,
@@ -350,9 +440,18 @@ pub async fn run(
         Commands::StatusCmd {
             status_filter,
             json,
-        } => status::run_status(registry, status_filter.clone(), *json).await,
-        Commands::Info { id } => info::run_info(registry, id).await,
-        Commands::Logs { arg, follow } => logs::run_logs(registry, config, arg, *follow).await,
+        } => {
+            status::run_status(
+                registry.clone() as Arc<dyn Registry>,
+                status_filter.clone(),
+                *json,
+            )
+            .await
+        }
+        Commands::Info { id } => info::run_info(registry.clone() as Arc<dyn Registry>, id).await,
+        Commands::Logs { arg, follow } => {
+            logs::run_logs(registry.clone() as Arc<dyn Registry>, config, arg, *follow).await
+        }
         Commands::Stop { id } => stop::run_stop(config, registry.as_ref(), id).await,
         Commands::Cleanup { id, done } => {
             cleanup::run_cleanup(config, registry.as_ref(), id.as_deref(), *done).await
@@ -376,7 +475,7 @@ pub async fn run(
         } => {
             watch::run_watch(
                 config,
-                registry.clone(),
+                registry.clone() as Arc<dyn Registry>,
                 id.as_deref(),
                 *all_running,
                 format,
@@ -384,5 +483,77 @@ pub async fn run(
             )
             .await
         }
+        Commands::Enqueue {
+            input,
+            queue,
+            priority,
+            mode,
+            param,
+            ready,
+            limit,
+            board,
+            status_filter,
+            unblocked,
+            unassigned,
+            view,
+            stdin,
+        } => {
+            let priority: atc_core::queue::Priority = priority.parse()?;
+            let params = parse_params(param)?;
+            let opts = enqueue::EnqueueOpts {
+                input: input.clone(),
+                queue: queue.clone(),
+                priority,
+                mode: mode.clone(),
+                params,
+                ready: *ready,
+                limit: *limit,
+                board: *board,
+                status_filter: status_filter.clone(),
+                unblocked: *unblocked,
+                unassigned: *unassigned,
+                view: view.clone(),
+                stdin: *stdin,
+                enqueued_by: "user".to_string(),
+                workspace_root: config.config_dir.clone(),
+            };
+            enqueue::run_enqueue(registry.as_ref(), &opts).await
+        }
+        Commands::Queue { action, name } => match action {
+            Some(args::QueueAction::Drain) => {
+                queue_cmd::run_queue_drain(
+                    registry.as_ref(),
+                    registry.as_ref(),
+                    executor.as_ref(),
+                    config,
+                    name,
+                )
+                .await
+            }
+            Some(args::QueueAction::Clear) => {
+                queue_cmd::run_queue_clear(registry.as_ref(), name).await
+            }
+            None => queue_cmd::run_queue_list(registry.as_ref(), name).await,
+        },
+        Commands::Daemon {
+            action,
+            queues,
+            max_concurrent,
+            sources,
+        } => match action {
+            Some(args::DaemonAction::Stop) => daemon::stop_daemon(config).await,
+            Some(args::DaemonAction::Status) => {
+                daemon::daemon_status(config, registry.as_ref(), registry.as_ref(), queues).await
+            }
+            None => {
+                let max_concurrent = max_concurrent.unwrap_or(config.daemon.max_concurrent);
+                let opts = daemon::DaemonOpts {
+                    queues: queues.clone(),
+                    max_concurrent,
+                    sources: sources.clone(),
+                };
+                daemon::run_daemon(registry, executor, config, &opts).await
+            }
+        },
     }
 }

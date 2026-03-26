@@ -1,0 +1,785 @@
+//! `atc daemon` — long-running process that drains queues and runs sources.
+//!
+//! Architecture:
+//! - QueueDrainer: polls queue, dispatches through pipeline, health-checks running dispatches
+//! - Sources: pluggable selection strategies that feed queues on a timer
+//! - SignalHandler: SIGTERM/SIGINT for graceful shutdown, SIGHUP for config reload
+
+use anyhow::Result;
+use atc_core::config::AtcConfig;
+use atc_core::executor::AgentExecutor;
+use atc_core::queue::{DispatchQueue, QueueInputType, QueueRow};
+use atc_core::registry::{Registry, StatusFilter};
+use atc_core::source::SourceConfig;
+use atc_core::types::Status;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::Notify;
+use tracing::{error, info, warn};
+
+/// Timeout for git subprocess calls.
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Options for `atc daemon`.
+#[derive(Debug)]
+pub struct DaemonOpts {
+    pub queues: Vec<String>,
+    pub max_concurrent: usize,
+    pub sources: Vec<String>,
+}
+
+/// Daemon state.
+struct DaemonState {
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+}
+
+/// Return a log-safe label for a queue item, redacting prompt content.
+pub fn log_label(item: &QueueRow) -> String {
+    if item.input_type == QueueInputType::Prompt {
+        format!("[queue:{}]", item.id)
+    } else {
+        item.input_value.clone()
+    }
+}
+
+/// Run the daemon.
+pub async fn run_daemon(
+    registry: Arc<atc_core::registry::SqliteRegistry>,
+    executor: Arc<dyn AgentExecutor>,
+    config: &AtcConfig,
+    opts: &DaemonOpts,
+) -> Result<()> {
+    let queue = registry.clone();
+    let state = DaemonState {
+        shutdown: Arc::new(AtomicBool::new(false)),
+        shutdown_notify: Arc::new(Notify::new()),
+    };
+
+    // PID file — use exclusive creation to prevent races
+    let pid_file = config
+        .daemon
+        .resolved_pid_file(config.config_dir.as_deref());
+    acquire_pid_file(&pid_file)?;
+    info!(pid_file = %pid_file.display(), "daemon starting");
+
+    // Recover stale queue items
+    let queues = if opts.queues.is_empty() {
+        vec!["default".to_string()]
+    } else {
+        opts.queues.clone()
+    };
+    let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
+    let (recovered, completed) = queue.queue_recover(&queue_refs).await?;
+    if recovered > 0 || completed > 0 {
+        info!(recovered, completed, "recovered stale queue items");
+    }
+
+    // Setup signal handler
+    let shutdown = state.shutdown.clone();
+    let notify = state.shutdown_notify.clone();
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("failed to register SIGINT handler");
+
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, initiating graceful shutdown");
+            }
+            _ = sigint.recv() => {
+                info!("received SIGINT, initiating graceful shutdown");
+            }
+        }
+
+        shutdown.store(true, Ordering::SeqCst);
+        notify.notify_waiters();
+    });
+
+    // Start sources
+    let source_handles = start_sources(
+        config,
+        &opts.sources,
+        &queues,
+        queue.clone(),
+        state.shutdown.clone(),
+        state.shutdown_notify.clone(),
+    )
+    .await?;
+
+    let drain_interval = std::time::Duration::from_secs(config.daemon.drain_interval_secs.max(1));
+
+    println!(
+        "Daemon running (queues: {}, max_concurrent: {}, sources: {})",
+        queues.join(", "),
+        opts.max_concurrent,
+        if opts.sources.is_empty() {
+            "none".to_string()
+        } else {
+            opts.sources.join(", ")
+        }
+    );
+
+    // Main drain loop
+    while !state.shutdown.load(Ordering::SeqCst) {
+        // Check available capacity — on error, skip this cycle rather than
+        // assuming zero running (which would dispatch past max_concurrent).
+        let running = match registry
+            .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "failed to read active dispatch count, skipping drain cycle");
+                tokio::select! {
+                    _ = tokio::time::sleep(drain_interval) => {}
+                    _ = state.shutdown_notify.notified() => {}
+                }
+                continue;
+            }
+        };
+
+        if running.len() < opts.max_concurrent {
+            // Drain from each queue
+            for queue_name in &queues {
+                if state.shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let remaining_slots = opts.max_concurrent.saturating_sub(running.len()) as u32;
+                let items = match queue.queue_peek(queue_name, remaining_slots).await {
+                    Ok(items) => items,
+                    Err(e) => {
+                        warn!(queue = %queue_name, error = %e, "failed to peek queue");
+                        continue;
+                    }
+                };
+
+                for item in items {
+                    if state.shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    // Recheck available slots before each dispatch — on error,
+                    // break the drain loop rather than assuming spare capacity.
+                    let running = match registry
+                        .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(error = %e, "failed to recheck active count, breaking drain loop");
+                            break;
+                        }
+                    };
+                    if running.len() >= opts.max_concurrent {
+                        break; // At capacity, wait for next cycle
+                    }
+
+                    let claim_token = match queue.queue_claim(&item.id).await {
+                        Ok(Some(token)) => token,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            warn!(queue_id = %item.id, error = %e, "failed to claim queue item");
+                            break;
+                        }
+                    };
+
+                    let label = log_label(&item);
+                    match crate::queue_cmd::dispatch_queue_item(
+                        &item,
+                        queue.as_ref(), // Registry
+                        executor.as_ref(),
+                        config,
+                    )
+                    .await
+                    {
+                        Ok(dispatch_id) => {
+                            // Persist dispatch_id while still 'dispatching' so
+                            // recovery can correlate even if we crash before the
+                            // status flip.
+                            if let Err(e) = queue
+                                .queue_set_dispatch_id(&item.id, &claim_token, &dispatch_id)
+                                .await
+                            {
+                                warn!(
+                                    queue_id = %item.id,
+                                    error = %e,
+                                    "failed to persist dispatch_id for crash recovery"
+                                );
+                            }
+                            if let Err(e) = queue
+                                .queue_mark_dispatched(&item.id, &claim_token, &dispatch_id)
+                                .await
+                            {
+                                error!(
+                                    queue_id = %item.id,
+                                    error = %e,
+                                    "failed to mark dispatched"
+                                );
+                            }
+                            info!(
+                                queue_id = %item.id,
+                                dispatch_id = %dispatch_id,
+                                input = %label,
+                                "dispatched from daemon"
+                            );
+                        }
+                        Err(e) => {
+                            let err_msg = format!("{:#}", e);
+                            if let Err(mark_err) = queue
+                                .queue_mark_failed(&item.id, &claim_token, &err_msg)
+                                .await
+                            {
+                                warn!(
+                                    queue_id = %item.id,
+                                    error = %mark_err,
+                                    "failed to mark queue item failed"
+                                );
+                            }
+                            warn!(
+                                queue_id = %item.id,
+                                input = %label,
+                                error = %err_msg,
+                                "daemon dispatch failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wait for drain interval or shutdown signal
+        tokio::select! {
+            _ = tokio::time::sleep(drain_interval) => {}
+            _ = state.shutdown_notify.notified() => {}
+        }
+    }
+
+    // Graceful shutdown
+    info!("shutting down daemon...");
+
+    // Wait for source tasks to finish
+    for handle in source_handles {
+        let _ = handle.await;
+    }
+
+    // Wait for running agents (with timeout)
+    let timeout = std::time::Duration::from_secs(config.daemon.graceful_shutdown_timeout_secs);
+    let start = std::time::Instant::now();
+    loop {
+        let active = registry
+            .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
+            .await
+            .unwrap_or_default();
+        if active.is_empty() || start.elapsed() >= timeout {
+            if !active.is_empty() {
+                warn!(
+                    count = active.len(),
+                    "shutdown timeout reached with active agents"
+                );
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // Clean up PID file
+    let _ = std::fs::remove_file(&pid_file);
+    info!("daemon stopped");
+    println!("Daemon stopped.");
+    Ok(())
+}
+
+/// Start source tasks.
+async fn start_sources(
+    config: &AtcConfig,
+    source_names: &[String],
+    daemon_queues: &[String],
+    queue: Arc<atc_core::registry::SqliteRegistry>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+) -> Result<Vec<tokio::task::JoinHandle<()>>> {
+    let mut handles = Vec::new();
+    // Use the first daemon queue for built-in source defaults
+    let default_queue = daemon_queues
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("default");
+
+    for name in source_names {
+        let source_config = match config.sources.get(name) {
+            Some(c) => c.clone(),
+            None => {
+                // Built-in source names — use daemon's effective queue, not hardcoded "default"
+                match name.as_str() {
+                    "ready" => SourceConfig::Ready(atc_core::source::ReadySourceConfig {
+                        poll_interval_secs: 10,
+                        limit: 3,
+                        queue: default_queue.to_string(),
+                    }),
+                    "board" => SourceConfig::Board(atc_core::source::BoardSourceConfig {
+                        poll_interval_secs: 10,
+                        queue: default_queue.to_string(),
+                        filter_status: vec!["ready".to_string()],
+                        exclude_tags: vec![],
+                        require_unassigned: true,
+                        require_unblocked: true,
+                        view: None,
+                        filter_type: None,
+                        filter_priority: None,
+                        filter_container: None,
+                    }),
+                    "events" => SourceConfig::Events(atc_core::source::EventsSourceConfig {
+                        poll_interval_secs: 5,
+                        queue: default_queue.to_string(),
+                        filter: Some("document:updated".to_string()),
+                        path: Some("tasks/".to_string()),
+                        trigger_on_status: vec!["ready".to_string()],
+                    }),
+                    unknown => {
+                        anyhow::bail!(
+                            "unknown source '{}'; valid built-in sources: ready, board, events",
+                            unknown
+                        );
+                    }
+                }
+            }
+        };
+
+        let queue = queue.clone();
+        let shutdown = shutdown.clone();
+        let name = name.clone();
+        let poll_interval = std::time::Duration::from_secs(source_config.poll_interval_secs());
+        let source_queue = source_config.queue().to_string();
+        let workspace = config.config_dir.clone();
+
+        let shutdown_notify = shutdown_notify.clone();
+        let handle = tokio::spawn(async move {
+            info!(source = %name, "source started");
+            let mut last_poll_start: Option<std::time::Instant> = None;
+            while !shutdown.load(Ordering::SeqCst) {
+                // For events sources, compute --since from actual elapsed time
+                // rather than the fixed poll_interval to avoid gaps when
+                // iterations run late.
+                let since_secs = last_poll_start
+                    .map(|t| t.elapsed().as_secs().max(1))
+                    .unwrap_or(source_config.poll_interval_secs());
+                last_poll_start = Some(std::time::Instant::now());
+
+                if let Err(e) = run_source_iteration(
+                    &name,
+                    &source_config,
+                    &source_queue,
+                    queue.as_ref(),
+                    workspace.as_deref(),
+                    since_secs,
+                )
+                .await
+                {
+                    warn!(source = %name, error = %e, "source iteration failed");
+                }
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Wait for poll interval or shutdown signal
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = shutdown_notify.notified() => {}
+                }
+            }
+            info!(source = %name, "source stopped");
+        });
+        handles.push(handle);
+    }
+
+    Ok(handles)
+}
+
+/// Run a git subprocess with timeout and kill_on_drop.
+async fn run_git_cmd(
+    args: &[&str],
+    workspace_root: Option<&std::path::Path>,
+) -> Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args).kill_on_drop(true);
+    if let Some(root) = workspace_root {
+        cmd.current_dir(root);
+    }
+    let output = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git {} timed out after {}s",
+                args.join(" "),
+                CMD_TIMEOUT.as_secs()
+            )
+        })??;
+    Ok(output)
+}
+
+/// Run a single iteration of a source.
+///
+/// `since_secs` is the number of seconds to look back for the events source.
+/// This is computed from actual elapsed time between polls to avoid gaps when
+/// iterations run late.
+async fn run_source_iteration(
+    name: &str,
+    config: &SourceConfig,
+    queue_name: &str,
+    queue: &dyn DispatchQueue,
+    workspace_root: Option<&std::path::Path>,
+    since_secs: u64,
+) -> Result<()> {
+    match config {
+        SourceConfig::Ready(cfg) => {
+            let limit_str = cfg.limit.to_string();
+            let output = run_git_cmd(
+                &["kb", "ready", "--limit", &limit_str, "--format", "slugs"],
+                workspace_root,
+            )
+            .await?;
+
+            if !output.status.success() {
+                anyhow::bail!(
+                    "git kb ready failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for slug in stdout.lines().filter(|l| !l.trim().is_empty()) {
+                let slug = slug.trim();
+                let item = atc_core::queue::EnqueueItem {
+                    queue_name: queue_name.to_string(),
+                    input_type: atc_core::queue::QueueInputType::Task,
+                    input_value: slug.to_string(),
+                    mode: None,
+                    priority: atc_core::queue::Priority::Medium,
+                    params: None,
+                    enqueued_by: Some(format!("source:{}", name)),
+                };
+                if let Err(e) = queue.enqueue(item).await {
+                    warn!(source = %name, error = %e, "failed to enqueue item");
+                }
+            }
+        }
+        SourceConfig::Board(cfg) => {
+            let cmd = if let Some(ref view) = cfg.view {
+                vec!["kb", "list", "--view", view, "--format", "slugs"]
+            } else {
+                let mut args = vec!["kb", "list", "--format", "slugs"];
+                // Forward configured type filter, defaulting to "task"
+                if let Some(ref types) = cfg.filter_type {
+                    for t in types {
+                        args.push("--type");
+                        args.push(t);
+                    }
+                } else {
+                    args.push("--type");
+                    args.push("task");
+                }
+                // Forward all configured filters
+                for s in &cfg.filter_status {
+                    args.push("--status");
+                    args.push(s);
+                }
+                if cfg.require_unblocked {
+                    args.push("--unblocked");
+                }
+                if cfg.require_unassigned {
+                    args.push("--unassigned");
+                }
+                for tag in &cfg.exclude_tags {
+                    args.push("--exclude-tag");
+                    args.push(tag);
+                }
+                if let Some(ref priorities) = cfg.filter_priority {
+                    for p in priorities {
+                        args.push("--priority");
+                        args.push(p);
+                    }
+                }
+                if let Some(ref container) = cfg.filter_container {
+                    args.push("--container");
+                    args.push(container);
+                }
+                args
+            };
+
+            let output = run_git_cmd(&cmd, workspace_root).await?;
+
+            if !output.status.success() {
+                anyhow::bail!(
+                    "board source failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for slug in stdout.lines().filter(|l| !l.trim().is_empty()) {
+                let slug = slug.trim();
+                let item = atc_core::queue::EnqueueItem {
+                    queue_name: queue_name.to_string(),
+                    input_type: atc_core::queue::QueueInputType::Task,
+                    input_value: slug.to_string(),
+                    mode: None,
+                    priority: atc_core::queue::Priority::Medium,
+                    params: None,
+                    enqueued_by: Some(format!("source:{}", name)),
+                };
+                if let Err(e) = queue.enqueue(item).await {
+                    warn!(source = %name, error = %e, "failed to enqueue item");
+                }
+            }
+        }
+        SourceConfig::Events(cfg) => {
+            // Use actual elapsed time since last poll to avoid gaps when iterations
+            // run late. The caller tracks wall-clock time between polls.
+            let since_str = format!("{}s", since_secs);
+            let mut args = vec!["kb", "events", "--format", "json", "--since", &since_str];
+            if let Some(ref filter) = cfg.filter {
+                args.push("--filter");
+                args.push(filter);
+            }
+            if let Some(ref path) = cfg.path {
+                args.push("--path");
+                args.push(path);
+            }
+
+            let output = run_git_cmd(&args, workspace_root).await?;
+
+            if !output.status.success() {
+                anyhow::bail!(
+                    "events source failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Some(slug) = event.get("slug").and_then(|s| s.as_str()) {
+                        let status = event.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                        if cfg.trigger_on_status.is_empty()
+                            || cfg.trigger_on_status.iter().any(|s| s == status)
+                        {
+                            let item = atc_core::queue::EnqueueItem {
+                                queue_name: queue_name.to_string(),
+                                input_type: atc_core::queue::QueueInputType::Task,
+                                input_value: slug.to_string(),
+                                mode: None,
+                                priority: atc_core::queue::Priority::Medium,
+                                params: None,
+                                enqueued_by: Some(format!("source:{}", name)),
+                            };
+                            if let Err(e) = queue.enqueue(item).await {
+                                warn!(source = %name, error = %e, "failed to enqueue item");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SourceConfig::Script(cfg) => {
+            let output = tokio::time::timeout(
+                CMD_TIMEOUT,
+                tokio::process::Command::new("sh")
+                    .args(["-c", &cfg.command])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("script source timed out after {}s", CMD_TIMEOUT.as_secs())
+            })??;
+
+            if !output.status.success() {
+                anyhow::bail!(
+                    "script source failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+
+                let (input_type, input_value) = if let Some(rest) = trimmed.strip_prefix("task ") {
+                    (atc_core::queue::QueueInputType::Task, rest.to_string())
+                } else if let Some(rest) = trimmed.strip_prefix("prompt ") {
+                    (atc_core::queue::QueueInputType::Prompt, rest.to_string())
+                } else {
+                    (atc_core::queue::QueueInputType::Task, trimmed.to_string())
+                };
+
+                let item = atc_core::queue::EnqueueItem {
+                    queue_name: queue_name.to_string(),
+                    input_type,
+                    input_value,
+                    mode: None,
+                    priority: atc_core::queue::Priority::Medium,
+                    params: None,
+                    enqueued_by: Some(format!("source:{}", name)),
+                };
+                if let Err(e) = queue.enqueue(item).await {
+                    warn!(source = %name, error = %e, "failed to enqueue item");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Acquire the PID file atomically using exclusive creation.
+/// This prevents TOCTOU races where two daemons could both pass the
+/// "is it alive?" check before either writes its PID.
+fn acquire_pid_file(path: &PathBuf) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Check for existing daemon
+    if path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                // Check if process is alive
+                let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+                if alive {
+                    anyhow::bail!(
+                        "daemon already running (PID {}). Use 'atc daemon stop' first.",
+                        pid
+                    );
+                }
+            }
+        }
+        // Stale PID file — remove it
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Write PID file with exclusive create to prevent races
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!("daemon already running (PID file appeared during startup)")
+            } else {
+                anyhow::anyhow!("failed to create PID file: {}", e)
+            }
+        })?;
+    write!(file, "{}", std::process::id())?;
+    Ok(())
+}
+
+/// Stop a running daemon.
+pub async fn stop_daemon(config: &AtcConfig) -> Result<()> {
+    let pid_file = config
+        .daemon
+        .resolved_pid_file(config.config_dir.as_deref());
+    if !pid_file.exists() {
+        println!("No daemon running (PID file not found).");
+        return Ok(());
+    }
+
+    let contents = std::fs::read_to_string(&pid_file)?;
+    let pid: i32 = contents
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid PID in {}", pid_file.display()))?;
+
+    // Send SIGTERM
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if result == 0 {
+        println!("Sent SIGTERM to daemon (PID {}).", pid);
+        // Wait for the process to actually exit before removing PID file
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!("daemon PID {} did not exit within 10s after SIGTERM", pid);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    } else {
+        // Process doesn't exist — clean up stale PID file
+        let _ = std::fs::remove_file(&pid_file);
+        println!("Daemon not running (stale PID file cleaned up).");
+    }
+    Ok(())
+}
+
+/// Show daemon status.
+pub async fn daemon_status(
+    config: &AtcConfig,
+    queue: &atc_core::registry::SqliteRegistry,
+    registry: &dyn Registry,
+    queues: &[String],
+) -> Result<()> {
+    let pid_file = config
+        .daemon
+        .resolved_pid_file(config.config_dir.as_deref());
+    let daemon_running = if pid_file.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                unsafe { libc::kill(pid as i32, 0) == 0 }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    println!(
+        "Daemon: {}",
+        if daemon_running { "running" } else { "stopped" }
+    );
+
+    if daemon_running {
+        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+            println!("PID:    {}", contents.trim());
+        }
+    }
+
+    // Queue depths
+    let queue_names = if queues.is_empty() {
+        vec!["default".to_string()]
+    } else {
+        queues.to_vec()
+    };
+
+    for qn in &queue_names {
+        let count = queue.queue_pending_count(qn).await.unwrap_or(0);
+        println!("Queue '{}': {} pending", qn, count);
+    }
+
+    // Active dispatches
+    let running = registry
+        .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
+        .await
+        .unwrap_or_default();
+    println!("Active dispatches: {}", running.len());
+    println!("Max concurrent:    {}", config.daemon.max_concurrent);
+    println!(
+        "Available slots:   {}",
+        config.daemon.max_concurrent.saturating_sub(running.len())
+    );
+
+    Ok(())
+}
