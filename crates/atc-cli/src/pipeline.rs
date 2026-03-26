@@ -29,12 +29,9 @@ impl<'a> DispatchPipeline<'a> {
         let resolver = self.find_resolver(input).await?;
         info!(resolver = resolver.name(), "selected resolver");
 
-        // 2. Resolve → ResolvedInput
-        let mut resolved = resolver.resolve(input, opts, self.config).await?;
-
-        // 3. Validate
-        // Auto-derive PR URL from comment URL if `--param comment=<url>` is set
-        // and no explicit PR param exists.
+        // 1b. Auto-derive PR URL from comment URL *before* resolve() so that
+        // template resolvers see the `pr` param for branch selection and
+        // `required_params: [pr]` validation.
         let mut effective_params = opts.params.clone();
         let (comment_id, comment_type) = if let Some(comment_url) = effective_params
             .get("comment")
@@ -52,6 +49,18 @@ impl<'a> DispatchPipeline<'a> {
         } else {
             (None, None)
         };
+
+        // 2. Resolve → ResolvedInput (with enriched params so resolvers see `pr`)
+        let resolve_opts = if effective_params != opts.params {
+            let mut patched = opts.clone();
+            patched.params = effective_params.clone();
+            patched
+        } else {
+            opts.clone()
+        };
+        let mut resolved = resolver.resolve(input, &resolve_opts, self.config).await?;
+
+        // 3. Validate
 
         // PR URL can come from --pr-url or from template --param pr=<url>.
         // Filter out blank values — Some("") must be treated as None.

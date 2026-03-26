@@ -96,20 +96,28 @@ pub async fn resolve_gh_token() -> Result<String> {
     Ok(token)
 }
 
+/// Timeout for subprocess helpers (`gh pr view`, `meta project list`, etc.).
+const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Extract the head branch name from a GitHub PR URL via `gh pr view`.
 pub async fn extract_pr_head_branch(pr_url: &str) -> Result<String> {
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            pr_url,
-            "--json",
-            "headRefName",
-            "-q",
-            ".headRefName",
-        ])
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        tokio::process::Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "headRefName",
+                "-q",
+                ".headRefName",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gh pr view timed out after {:?}", SUBPROCESS_TIMEOUT))??;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -141,23 +149,34 @@ pub async fn resolve_pr_repo_path(
         .and_then(|s| s.split("/pull/").next())
         .ok_or_else(|| anyhow::anyhow!("cannot extract org/repo from PR URL: {}", pr_url))?;
 
-    let output = tokio::process::Command::new("meta")
-        .args(["project", "list", "--recursive", "--json"])
-        .current_dir(meta_workspace_root)
-        .output()
-        .await;
+    let output = tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        tokio::process::Command::new("meta")
+            .args(["project", "list", "--recursive", "--json"])
+            .current_dir(meta_workspace_root)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
 
     let output = match output {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
+        Ok(Ok(o)) if o.status.success() => o,
+        Ok(Ok(o)) => {
             debug!(
                 "meta project list failed (exit {:?}), cannot resolve PR repo path",
                 o.status.code()
             );
             return Ok(None);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             debug!("meta not available: {}, cannot resolve PR repo path", e);
+            return Ok(None);
+        }
+        Err(_) => {
+            debug!(
+                "meta project list timed out after {:?}, cannot resolve PR repo path",
+                SUBPROCESS_TIMEOUT
+            );
             return Ok(None);
         }
     };

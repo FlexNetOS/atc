@@ -187,11 +187,22 @@ impl InputResolver for TemplateResolver {
         info!(template = input, directive = %resolved_directive.as_str(), "template resolved");
 
         // Branch resolution priority:
-        // 1. PR param → use PR's actual head branch
+        // 1. PR URL (--pr-url or --param pr=<url>) → use PR's actual head branch
         // 2. Explicit `branch` param
         // 3. Current git branch (if not main/master)
         // 4. Synthetic fallback: tpl--<name>-<ts>-<pid>-<seq>
-        let branch = if let Some(pr_url) = params.get("pr").filter(|s| !s.is_empty()) {
+        let pr_for_branch = opts
+            .pr_url
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                params
+                    .get("pr")
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty())
+            });
+
+        let branch = if let Some(pr_url) = pr_for_branch {
             // Extract head branch from PR (calls `gh pr view`)
             match crate::dispatch::extract_pr_head_branch(pr_url).await {
                 Ok(b) => {

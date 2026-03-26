@@ -712,9 +712,13 @@ fn check_previous_artifact(log_dir: &Path, dispatch_id: &str, pr_url: &str) -> O
             && name != format!("{}-review-artifact.json", dispatch_id)
         {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                // Filter by PR URL — only include artifacts for the same PR
+                // Filter by PR URL — only include artifacts for the same PR.
+                // Legacy artifacts (written before pr_url filtering was added) lack
+                // the field entirely; treat them as matching to preserve backward
+                // compatibility on upgrade.
                 if let Ok(artifact) = serde_json::from_str::<Value>(&content) {
-                    if artifact.get("pr_url").and_then(|v| v.as_str()) == Some(pr_url) {
+                    let artifact_pr = artifact.get("pr_url").and_then(|v| v.as_str());
+                    if artifact_pr.is_none() || artifact_pr == Some(pr_url) {
                         artifacts.push((entry.path(), content));
                     }
                 }
