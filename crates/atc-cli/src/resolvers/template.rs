@@ -149,7 +149,7 @@ impl InputResolver for TemplateResolver {
         let quick_fm = prompt_engine::parse_template_frontmatter(&raw_content)?;
         if let Some(ref required) = quick_fm.required_params {
             for param in required {
-                if !params.get(param.as_str()).is_some_and(|v| !v.is_empty()) {
+                if params.get(param.as_str()).is_none_or(|v| v.is_empty()) {
                     anyhow::bail!("template '{}' requires --param {}=<value>", input, param);
                 }
             }
