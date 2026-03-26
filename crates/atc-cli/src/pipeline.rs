@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::executor::{AgentExecutor, AgentOpts};
 use atc_core::registry::Registry;
@@ -273,30 +273,25 @@ impl<'a> DispatchPipeline<'a> {
             }
         }
 
-        // For template dispatches, assemble system prompt from directive components
-        // (same as task dispatches). The rendered template becomes stdin/user prompt.
+        // For template dispatches, render the system prompt from the directive config
+        // (components, template_path, or template_inline). The rendered template becomes
+        // stdin/user prompt.
         let mut rendered_prompt = if resolved.is_template {
             let slug_for_prompt = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
-            match atc_core::prompt_engine::assemble_system_prompt(
+            atc_core::prompt_engine::render_prompt(
                 &resolved.directive,
                 slug_for_prompt,
-                "",
                 self.config,
+                "",
                 Some(&worktree_path),
             )
             .await
-            {
-                Ok(prompt) => prompt,
-                Err(e) => {
-                    // Fall back to empty prompt if directive has no components configured
-                    tracing::warn!(
-                        directive = %resolved.directive.as_str(),
-                        error = %e,
-                        "failed to assemble system prompt from directive components, using empty prompt"
-                    );
-                    String::new()
-                }
-            }
+            .with_context(|| {
+                format!(
+                    "failed to render system prompt for template dispatch on directive '{}'",
+                    resolved.directive.as_str()
+                )
+            })?
         } else {
             resolved.system_prompt.clone()
         };
