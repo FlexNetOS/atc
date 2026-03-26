@@ -178,6 +178,9 @@ pub struct RunOpts {
     pub params: std::collections::HashMap<String, String>,
     /// PR URL for review-fix / pr-comments directives.
     pub pr_url: Option<String>,
+    /// Target repo path within meta workspace (e.g., "open-source/atc").
+    /// Overrides auto-discovered repo path from PR URL or config.
+    pub repo: Option<String>,
     /// Run inline (synchronous, no tmux).
     pub inline: bool,
     /// Force dispatch even if worktree is in use.

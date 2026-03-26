@@ -91,11 +91,13 @@ impl ContextProvider for PrContextProvider {
         // Previous review artifact (run blocking I/O off the async runtime)
         let log_dir = ctx.log_dir.clone();
         let dispatch_id = ctx.dispatch_id.clone();
-        if let Some(prev_section) =
-            tokio::task::spawn_blocking(move || check_previous_artifact(&log_dir, &dispatch_id))
-                .await
-                .ok()
-                .flatten()
+        let artifact_pr_url = pr_url.clone();
+        if let Some(prev_section) = tokio::task::spawn_blocking(move || {
+            check_previous_artifact(&log_dir, &dispatch_id, &artifact_pr_url)
+        })
+        .await
+        .ok()
+        .flatten()
         {
             summary.push_str("\n\n## Previous Run\n\n");
             summary.push_str(&prev_section);
@@ -698,8 +700,9 @@ async fn fetch_comment_by_endpoint(endpoint: &str) -> Option<String> {
 }
 
 /// Check for previous review artifact from a prior dispatch.
+/// Filters by PR URL to only return artifacts for the same PR.
 /// This performs synchronous I/O and should be called via `spawn_blocking`.
-fn check_previous_artifact(log_dir: &Path, dispatch_id: &str) -> Option<String> {
+fn check_previous_artifact(log_dir: &Path, dispatch_id: &str, pr_url: &str) -> Option<String> {
     let entries = std::fs::read_dir(log_dir).ok()?;
 
     let mut artifacts: Vec<(PathBuf, String)> = Vec::new();
@@ -709,7 +712,16 @@ fn check_previous_artifact(log_dir: &Path, dispatch_id: &str) -> Option<String> 
             && name != format!("{}-review-artifact.json", dispatch_id)
         {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                artifacts.push((entry.path(), content));
+                // Filter by PR URL — only include artifacts for the same PR.
+                // Legacy artifacts (written before pr_url filtering was added) lack
+                // the field entirely; treat them as matching to preserve backward
+                // compatibility on upgrade.
+                if let Ok(artifact) = serde_json::from_str::<Value>(&content) {
+                    let artifact_pr = artifact.get("pr_url").and_then(|v| v.as_str());
+                    if artifact_pr.is_none() || artifact_pr == Some(pr_url) {
+                        artifacts.push((entry.path(), content));
+                    }
+                }
             }
         }
     }
@@ -923,5 +935,81 @@ mod tests {
         );
         assert!(summary.contains("# PR Summary"));
         assert!(summary.contains("(unknown)"));
+    }
+
+    #[test]
+    fn test_check_previous_artifact_filters_by_pr_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path();
+
+        // Create an artifact for a different PR
+        let other_artifact = serde_json::json!({
+            "pr_url": "https://github.com/org/repo/pull/99",
+            "resolved_comments": ["c1", "c2"]
+        });
+        std::fs::write(
+            log_dir.join("other-dispatch-review-artifact.json"),
+            serde_json::to_string(&other_artifact).unwrap(),
+        )
+        .unwrap();
+
+        // Create an artifact for the target PR
+        let target_artifact = serde_json::json!({
+            "pr_url": "https://github.com/org/repo/pull/42",
+            "resolved_comments": ["c3"]
+        });
+        std::fs::write(
+            log_dir.join("target-dispatch-review-artifact.json"),
+            serde_json::to_string(&target_artifact).unwrap(),
+        )
+        .unwrap();
+
+        // Should find the target PR's artifact
+        let result = check_previous_artifact(
+            log_dir,
+            "current-dispatch",
+            "https://github.com/org/repo/pull/42",
+        );
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("c3"), "expected c3 in result, got: {}", text);
+
+        // Should NOT find an artifact for a non-existent PR
+        let result = check_previous_artifact(
+            log_dir,
+            "current-dispatch",
+            "https://github.com/org/repo/pull/999",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_previous_artifact_legacy_missing_pr_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path();
+
+        // Legacy artifact without pr_url field (written before filtering was added)
+        let legacy_artifact = serde_json::json!({
+            "resolved_comments": ["c1", "c2"]
+        });
+        std::fs::write(
+            log_dir.join("legacy-dispatch-review-artifact.json"),
+            serde_json::to_string(&legacy_artifact).unwrap(),
+        )
+        .unwrap();
+
+        // Should match any PR URL (backward compatibility)
+        let result = check_previous_artifact(
+            log_dir,
+            "current-dispatch",
+            "https://github.com/org/repo/pull/42",
+        );
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(
+            text.contains("c1") && text.contains("c2"),
+            "expected c1, c2 in result, got: {}",
+            text
+        );
     }
 }

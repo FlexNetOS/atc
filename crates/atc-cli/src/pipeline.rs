@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::dispatch::{
-    compute_allowed_paths, ensure_worktree, resolve_gh_token, tmux_session_alive,
-    validate_branch_name, write_diag_file, WorktreeOpts,
+    compute_allowed_paths, derive_pr_url_from_comment, ensure_worktree, parse_comment_url,
+    resolve_gh_token, resolve_pr_repo_path, tmux_session_alive, validate_branch_name,
+    write_diag_file, WorktreeOpts,
 };
 
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
@@ -28,16 +29,44 @@ impl<'a> DispatchPipeline<'a> {
         let resolver = self.find_resolver(input).await?;
         info!(resolver = resolver.name(), "selected resolver");
 
-        // 2. Resolve → ResolvedInput
-        let mut resolved = resolver.resolve(input, opts, self.config).await?;
+        // 1b. Auto-derive PR URL from comment URL *before* resolve() so that
+        // template resolvers see the `pr` param for branch selection and
+        // `required_params: [pr]` validation.
+        let mut effective_params = opts.params.clone();
+        let (comment_id, comment_type) = if let Some(comment_url) = effective_params
+            .get("comment")
+            .cloned()
+            .filter(|s| !s.is_empty())
+        {
+            // Auto-derive PR URL from comment URL
+            if !effective_params.contains_key("pr") || effective_params["pr"].is_empty() {
+                if let Some(pr_url) = derive_pr_url_from_comment(&comment_url) {
+                    info!(comment_url = %comment_url, pr_url = %pr_url, "auto-derived PR URL from comment URL");
+                    effective_params.insert("pr".to_string(), pr_url);
+                }
+            }
+            parse_comment_url(&comment_url)
+        } else {
+            (None, None)
+        };
+
+        // 2. Resolve → ResolvedInput (with enriched params so resolvers see `pr`)
+        let mut resolved = if effective_params != opts.params {
+            let mut patched = opts.clone();
+            patched.params = effective_params.clone();
+            resolver.resolve(input, &patched, self.config).await?
+        } else {
+            resolver.resolve(input, opts, self.config).await?
+        };
 
         // 3. Validate
+
         // PR URL can come from --pr-url or from template --param pr=<url>.
         // Filter out blank values — Some("") must be treated as None.
         let effective_pr_url = opts
             .pr_url
             .clone()
-            .or_else(|| opts.params.get("pr").cloned())
+            .or_else(|| effective_params.get("pr").cloned())
             .filter(|s| !s.is_empty());
         if matches!(
             resolved.directive,
@@ -99,7 +128,7 @@ impl<'a> DispatchPipeline<'a> {
             // Compute providers for display
             let mut dry_providers =
                 atc_core::providers::providers_for_directive(self.config, &resolved.directive);
-            if (opts.params.iter().any(|(k, _)| k == "pr") || effective_pr_url.is_some())
+            if (effective_params.contains_key("pr") || effective_pr_url.is_some())
                 && !dry_providers.iter().any(|p| p.name() == "pr-context")
             {
                 if let Some(p) = atc_core::providers::make_provider("pr-context") {
@@ -130,13 +159,43 @@ impl<'a> DispatchPipeline<'a> {
         // falling back to workspace_root for resolvers that don't set it.
         let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
 
-        let (worktree_path, wt_created, wt_is_meta) = if opts.no_worktree {
+        let (worktree_path, wt_created, wt_is_meta, repo_for_context) = if opts.no_worktree {
             // Run in current directory, no worktree creation
-            (cwd.clone(), false, false)
+            (cwd.clone(), false, false, None::<String>)
         } else {
-            let repo = match dispatch_cfg.resolved_repo() {
-                Some(r) => Some(r.to_string()),
-                None => meta.as_ref().map(|m| m.repo.clone()),
+            // Repo resolution priority:
+            // 1. CLI --repo flag (explicit override, highest priority)
+            // 2. PR URL → resolve_pr_repo_path() (auto-resolved)
+            // 3. Config dispatch.repo
+            // 4. Meta discovery fallback
+            let repo = if let Some(ref cli_repo) = opts.repo {
+                Some(cli_repo.clone())
+            } else if let Some(ref pr_url) = effective_pr_url {
+                match resolve_pr_repo_path(pr_url, &workspace_root).await {
+                    Ok(Some(r)) => {
+                        info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
+                        Some(r)
+                    }
+                    Ok(None) => {
+                        info!(pr_url = %pr_url, "could not resolve PR repo to local path, using config/discovery fallback");
+                        match dispatch_cfg.resolved_repo() {
+                            Some(r) => Some(r.to_string()),
+                            None => meta.as_ref().map(|m| m.repo.clone()),
+                        }
+                    }
+                    Err(e) => {
+                        warn!(pr_url = %pr_url, error = %e, "PR repo resolution failed, using config/discovery fallback");
+                        match dispatch_cfg.resolved_repo() {
+                            Some(r) => Some(r.to_string()),
+                            None => meta.as_ref().map(|m| m.repo.clone()),
+                        }
+                    }
+                }
+            } else {
+                match dispatch_cfg.resolved_repo() {
+                    Some(r) => Some(r.to_string()),
+                    None => meta.as_ref().map(|m| m.repo.clone()),
+                }
             };
 
             let worktree_base = dispatch_cfg.resolved_worktree_base();
@@ -156,7 +215,12 @@ impl<'a> DispatchPipeline<'a> {
                     return Err(e);
                 }
             };
-            (wt_result.path, wt_result.created, wt_result.is_meta)
+            (
+                wt_result.path,
+                wt_result.created,
+                wt_result.is_meta,
+                repo.clone(),
+            )
         };
 
         // 5b. Load per-project .dispatch/env (after worktree exists, before env setup)
@@ -267,7 +331,7 @@ impl<'a> DispatchPipeline<'a> {
 
         // Unconditional pr-context: if `pr` param exists or --pr-url is set,
         // ensure pr-context provider runs regardless of directive config.
-        if (opts.params.iter().any(|(k, _)| k == "pr") || effective_pr_url.is_some())
+        if (effective_params.contains_key("pr") || effective_pr_url.is_some())
             && !providers.iter().any(|p| p.name() == "pr-context")
         {
             if let Some(p) = atc_core::providers::make_provider("pr-context") {
@@ -305,10 +369,12 @@ impl<'a> DispatchPipeline<'a> {
                 worktree_path: worktree_path.clone(),
                 directive: resolved.directive.clone(),
                 pr_url: effective_pr_url.clone(),
-                params: opts.params.clone(),
+                params: effective_params.clone(),
                 kb_root: kb_root.to_path_buf(),
                 log_dir: log_dir.clone(),
                 config: std::sync::Arc::new(self.config.clone()),
+                comment_id: comment_id.clone(),
+                comment_type: comment_type.clone(),
             };
 
             let provider_output =
@@ -372,6 +438,32 @@ impl<'a> DispatchPipeline<'a> {
             if !provider_output.preamble_sections.is_empty() {
                 let preamble = provider_output.preamble_sections.join("\n\n---\n\n");
                 rendered_prompt = format!("{}\n\n---\n\n{}", preamble, rendered_prompt);
+            }
+        }
+
+        // 7c. Post-process: {{worktree}} auto-population and meta context injection
+        {
+            let wt_path_str = worktree_path.to_string_lossy();
+            let deferred_wt = atc_core::prompt_engine::deferred_placeholder("worktree");
+            let raw_wt = "{{worktree}}";
+
+            rendered_prompt = rendered_prompt.replace(raw_wt, &wt_path_str);
+            rendered_prompt = rendered_prompt.replace(&deferred_wt, &wt_path_str);
+
+            if let Some(ref mut body) = resolved.template_body {
+                *body = body.replace(raw_wt, &wt_path_str);
+                *body = body.replace(&deferred_wt, &wt_path_str);
+            }
+
+            // Inject meta workspace context for meta worktrees
+            if wt_is_meta {
+                if let Some(ref repo_rel) = repo_for_context {
+                    let context_line = format!(
+                        "\n**Meta worktree context:** The target repo is `{}` within the worktree at `{}`.\n",
+                        repo_rel, wt_path_str
+                    );
+                    rendered_prompt.push_str(&context_line);
+                }
             }
         }
 

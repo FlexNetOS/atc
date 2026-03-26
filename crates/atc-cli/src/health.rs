@@ -282,6 +282,7 @@ pub async fn run_health(
                 input: format!("task {task_slug}"),
                 directive: Some(Directive::ReviewFix),
                 pr_url,
+                repo: None,
                 params: std::collections::HashMap::new(),
                 inline: false,
                 force: false,

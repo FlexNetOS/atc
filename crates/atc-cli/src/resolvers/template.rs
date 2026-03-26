@@ -135,7 +135,11 @@ impl InputResolver for TemplateResolver {
         // aren't available yet — they're substituted by the pipeline after
         // providers run. We query providers for their declared var names so
         // Handlebars strict mode doesn't reject them.
-        let deferred_owned = atc_core::providers::all_deferred_template_vars();
+        let mut deferred_owned = atc_core::providers::all_deferred_template_vars();
+        // {{worktree}} is populated by the pipeline after worktree creation, not by a provider.
+        if !deferred_owned.contains(&"worktree".to_string()) {
+            deferred_owned.push("worktree".to_string());
+        }
         let deferred_vars: Vec<&str> = deferred_owned.iter().map(|s| s.as_str()).collect();
 
         // Pre-render: read frontmatter to validate required_params before rendering.
@@ -182,15 +186,73 @@ impl InputResolver for TemplateResolver {
 
         info!(template = input, directive = %resolved_directive.as_str(), "template resolved");
 
-        // Use template name with a resolver-specific prefix to avoid collisions
-        // with task-derived branches (derive_branch is bijective only for valid
-        // GitKB slugs that contain '/').
-        // Include a timestamp so concurrent dispatches of the same template
-        // get distinct branches (similar to PromptResolver).
-        let ts = chrono::Utc::now().timestamp_millis();
-        let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let branch = format!("tpl--{}-{}-{}-{}", input, ts, pid, seq);
+        // Branch resolution priority:
+        // 1. PR URL (--pr-url or --param pr=<url>) → use PR's actual head branch
+        // 2. Explicit `branch` param
+        // 3. Current git branch (if not main/master)
+        // 4. Synthetic fallback: tpl--<name>-<ts>-<pid>-<seq>
+        let pr_for_branch = opts
+            .pr_url
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                params
+                    .get("pr")
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty())
+            });
+
+        let branch = if let Some(pr_url) = pr_for_branch {
+            // Extract head branch from PR (calls `gh pr view`)
+            match crate::dispatch::extract_pr_head_branch(pr_url).await {
+                Ok(b) => {
+                    info!(pr_url, branch = %b, "using PR head branch");
+                    b
+                }
+                Err(e) => {
+                    debug!(pr_url, error = %e, "failed to extract PR head branch, falling back to synthetic");
+                    let ts = chrono::Utc::now().timestamp_millis();
+                    let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let pid = std::process::id();
+                    format!("tpl--{}-{}-{}-{}", input, ts, pid, seq)
+                }
+            }
+        } else if let Some(b) = params.get("branch").filter(|s| !s.is_empty()) {
+            b.clone()
+        } else {
+            // Check current git branch
+            let current_branch = tokio::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .output()
+                .await
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if !b.is_empty() && b != "main" && b != "master" {
+                            Some(b)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+            match current_branch {
+                Some(b) => {
+                    info!(branch = %b, "using current git branch for template dispatch");
+                    b
+                }
+                None => {
+                    // Synthetic fallback
+                    let ts = chrono::Utc::now().timestamp_millis();
+                    let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let pid = std::process::id();
+                    format!("tpl--{}-{}-{}-{}", input, ts, pid, seq)
+                }
+            }
+        };
         let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
 
         Ok(ResolvedInput {
@@ -358,6 +420,7 @@ mod tests {
             directive: None,
             params: std::collections::HashMap::new(),
             pr_url: None,
+            repo: None,
             inline: true,
             force: false,
             dry_run: false,
@@ -434,6 +497,7 @@ mod tests {
             directive: None,
             params,
             pr_url: None,
+            repo: None,
             inline: true,
             force: false,
             dry_run: false,
@@ -461,9 +525,11 @@ mod tests {
             "system_prompt should be empty for template dispatch"
         );
         assert!(result.task_slug.is_none());
+        // Branch is either the current git branch (if not main/master) or
+        // a synthetic tpl--review-* branch.
         assert!(
-            result.branch.starts_with("tpl--review-"),
-            "branch should start with 'tpl--review-', got: {}",
+            result.branch.starts_with("tpl--review-") || !result.branch.is_empty(),
+            "branch should be non-empty, got: {}",
             result.branch
         );
     }
@@ -509,6 +575,7 @@ mod tests {
             directive: None,
             params,
             pr_url: None,
+            repo: None,
             inline: true,
             force: false,
             dry_run: false,
@@ -566,6 +633,7 @@ mod tests {
             directive: None,
             params,
             pr_url: None,
+            repo: None,
             inline: true,
             force: false,
             dry_run: false,
@@ -755,6 +823,7 @@ mod tests {
             directive: Some(Directive::Implement),
             params: std::collections::HashMap::new(),
             pr_url: None,
+            repo: None,
             inline: true,
             force: false,
             dry_run: false,
