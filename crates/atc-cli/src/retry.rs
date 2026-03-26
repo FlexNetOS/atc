@@ -225,6 +225,8 @@ pub async fn run_retry(
         // a future schema migration (add `params_json TEXT` column).
         params: HashMap::new(),
         pr_url: record.pr_urls.first().cloned(),
+        // TODO: Multi-repo repos paths are not yet persisted in DispatchRecord,
+        // so retries fall back to auto-discovery. See multi-repo retry tracking issue.
         repos: vec![],
         inline: false,
         force: false,

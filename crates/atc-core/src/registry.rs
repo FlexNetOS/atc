@@ -244,13 +244,17 @@ impl SqliteRegistry {
                 sqlx::query("ALTER TABLE dispatches ADD COLUMN pr_urls TEXT NOT NULL DEFAULT '[]'")
                     .execute(pool)
                     .await?;
-                // Backfill pr_urls from existing pr_url column
-                sqlx::query(
-                    "UPDATE dispatches SET pr_urls = CASE WHEN pr_url IS NOT NULL THEN json_array(pr_url) ELSE '[]' END",
-                )
-                .execute(pool)
-                .await?;
             }
+            // Always backfill: handles crash between ALTER TABLE and UPDATE on first run,
+            // and is a no-op when all rows are already populated.
+            sqlx::query(
+                "UPDATE dispatches
+                 SET pr_urls = json_array(pr_url)
+                 WHERE pr_url IS NOT NULL
+                   AND (pr_urls IS NULL OR pr_urls = '[]')",
+            )
+            .execute(pool)
+            .await?;
 
             // Rename mode → directive column (Mode→Directive migration)
             let (has_mode_col,): (i32,) = sqlx::query_as(
@@ -592,31 +596,48 @@ impl Registry for SqliteRegistry {
     }
 
     async fn add_pr_url(&self, id: &str, url: &str) -> Result<()> {
-        // Read current pr_urls, append if not already present, write back
-        let now = Utc::now().to_rfc3339();
-        let row: Option<(String,)> = sqlx::query_as("SELECT pr_urls FROM dispatches WHERE id = ?1")
+        // Atomic read-modify-write: BEGIN IMMEDIATE prevents concurrent readers
+        // from seeing stale pr_urls between SELECT and UPDATE.
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+        let result: Result<()> = async {
+            let now = Utc::now().to_rfc3339();
+            let (current_json,): (String,) =
+                sqlx::query_as("SELECT pr_urls FROM dispatches WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+
+            let mut urls: Vec<String> = serde_json::from_str(&current_json)?;
+            if !urls.iter().any(|existing| existing == url) {
+                urls.push(url.to_string());
+            }
+
+            let pr_url_compat = urls.first().cloned();
+            sqlx::query(
+                "UPDATE dispatches SET pr_url = ?1, pr_urls = ?2, updated_at = ?3 WHERE id = ?4",
+            )
+            .bind(&pr_url_compat)
+            .bind(serde_json::to_string(&urls)?)
+            .bind(&now)
             .bind(id)
-            .fetch_optional(&self.pool)
+            .execute(&mut *conn)
             .await?;
-        let (current_json,) =
-            row.ok_or_else(|| anyhow::anyhow!("no dispatch record found for id: {id}"))?;
-        let mut urls: Vec<String> = serde_json::from_str(&current_json).unwrap_or_default();
-        if !urls.contains(&url.to_string()) {
-            urls.push(url.to_string());
+            Ok(())
         }
-        let new_json = serde_json::to_string(&urls)?;
-        // Also update pr_url compat column with the first URL
-        let pr_url_compat = urls.first().cloned();
-        sqlx::query(
-            "UPDATE dispatches SET pr_url = ?1, pr_urls = ?2, updated_at = ?3 WHERE id = ?4",
-        )
-        .bind(&pr_url_compat)
-        .bind(&new_json)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await;
+
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
     }
 
     async fn set_artifacts(&self, id: &str, artifacts_json: &str) -> Result<()> {
