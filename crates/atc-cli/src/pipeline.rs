@@ -51,14 +51,13 @@ impl<'a> DispatchPipeline<'a> {
         };
 
         // 2. Resolve → ResolvedInput (with enriched params so resolvers see `pr`)
-        let resolve_opts = if effective_params != opts.params {
+        let mut resolved = if effective_params != opts.params {
             let mut patched = opts.clone();
             patched.params = effective_params.clone();
-            patched
+            resolver.resolve(input, &patched, self.config).await?
         } else {
-            opts.clone()
+            resolver.resolve(input, opts, self.config).await?
         };
-        let mut resolved = resolver.resolve(input, &resolve_opts, self.config).await?;
 
         // 3. Validate
 

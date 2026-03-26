@@ -982,4 +982,34 @@ mod tests {
         );
         assert!(result.is_none());
     }
+
+    #[test]
+    fn test_check_previous_artifact_legacy_missing_pr_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path();
+
+        // Legacy artifact without pr_url field (written before filtering was added)
+        let legacy_artifact = serde_json::json!({
+            "resolved_comments": ["c1", "c2"]
+        });
+        std::fs::write(
+            log_dir.join("legacy-dispatch-review-artifact.json"),
+            serde_json::to_string(&legacy_artifact).unwrap(),
+        )
+        .unwrap();
+
+        // Should match any PR URL (backward compatibility)
+        let result = check_previous_artifact(
+            log_dir,
+            "current-dispatch",
+            "https://github.com/org/repo/pull/42",
+        );
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(
+            text.contains("c1") && text.contains("c2"),
+            "expected c1, c2 in result, got: {}",
+            text
+        );
+    }
 }
