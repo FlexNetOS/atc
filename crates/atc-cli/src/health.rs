@@ -254,13 +254,21 @@ pub async fn run_health(
         done_records.extend(extra_done);
 
         for record in &done_records {
-            if let Some(url) = record.pr_urls.first() {
-                // Skip records whose worktree has already been cleaned up
-                if !record.worktree_path.exists() {
-                    continue;
-                }
-                post_completion::cleanup_if_pr_done(url, &record.worktree_path, &worktree_base)
-                    .await;
+            if record.pr_urls.is_empty() || !record.worktree_path.exists() {
+                continue;
+            }
+            // Only clean up worktree when ALL tracked PRs are terminal
+            let all_done = futures::future::join_all(
+                record
+                    .pr_urls
+                    .iter()
+                    .map(|u| post_completion::is_pr_done(u)),
+            )
+            .await
+            .into_iter()
+            .all(|done| done);
+            if all_done {
+                post_completion::cleanup_worktree(&record.worktree_path, &worktree_base).await;
             }
         }
     }
