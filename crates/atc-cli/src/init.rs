@@ -114,15 +114,22 @@ fn build_config_toml(config: &AtcConfig) -> String {
         }
     }
 
-    // Include resolvers if non-default
+    // Include resolvers if non-default.
+    // Use a wrapper struct so nested sub-tables serialize as [resolvers.task] etc.
     let default_resolvers = atc_core::config::ResolversConfig::default();
     if config.resolvers.order != default_resolvers.order
         || config.resolvers.task.enabled != default_resolvers.task.enabled
         || config.resolvers.template.enabled != default_resolvers.template.enabled
         || config.resolvers.prompt.enabled != default_resolvers.prompt.enabled
     {
-        if let Ok(s) = toml::to_string_pretty(&config.resolvers) {
-            parts.push(format!("[resolvers]\n{s}"));
+        #[derive(serde::Serialize)]
+        struct Wrapper<'a> {
+            resolvers: &'a atc_core::config::ResolversConfig,
+        }
+        if let Ok(s) = toml::to_string_pretty(&Wrapper {
+            resolvers: &config.resolvers,
+        }) {
+            parts.push(s);
         }
     }
 
@@ -189,4 +196,149 @@ fn copy_md_files(src: &Path, dst: &Path, label: &str) -> Result<()> {
     }
     println!("  Copied {count} {label}");
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+    use atc_core::config::AtcConfig;
+
+    #[test]
+    fn test_build_config_toml_default_includes_dispatch() {
+        let cfg = AtcConfig::default();
+        let toml = build_config_toml(&cfg);
+        // Default config includes [dispatch] because it has non-Option fields with defaults
+        assert!(
+            toml.contains("[dispatch]"),
+            "default config should include [dispatch] section, got: {toml}"
+        );
+        // But should NOT include sections that are only written when non-default
+        assert!(!toml.contains("[registry]"));
+        assert!(!toml.contains("[resolvers]"));
+        assert!(!toml.contains("[prompt]"));
+    }
+
+    #[test]
+    fn test_build_config_toml_includes_registry_when_set() {
+        let mut cfg = AtcConfig::default();
+        cfg.registry.path = Some("/tmp/test.db".into());
+        let toml = build_config_toml(&cfg);
+        assert!(toml.contains("[registry]"), "missing [registry] section");
+        assert!(toml.contains("test.db"), "missing registry path");
+    }
+
+    #[test]
+    fn test_build_config_toml_includes_notifications_when_set() {
+        let mut cfg = AtcConfig::default();
+        cfg.notifications = Some(atc_core::config::NotificationsConfig {
+            macos: true,
+            webhook_url: Some("https://example.com/hook".into()),
+        });
+        let toml = build_config_toml(&cfg);
+        assert!(
+            toml.contains("[notifications]"),
+            "missing [notifications] section"
+        );
+        assert!(toml.contains("example.com/hook"), "missing webhook URL");
+    }
+
+    #[test]
+    fn test_build_config_toml_resolvers_nested_tables_correct() {
+        let mut cfg = AtcConfig::default();
+        cfg.resolvers.task.enabled = false;
+        let toml = build_config_toml(&cfg);
+        assert!(
+            toml.contains("[resolvers.task]"),
+            "resolvers sub-tables must use dotted keys, got:\n{toml}"
+        );
+        assert!(
+            !toml.contains("\n[task]\n"),
+            "resolvers sub-tables must not appear as top-level tables"
+        );
+    }
+
+    #[test]
+    fn test_build_config_toml_includes_prompt_when_non_default() {
+        let mut cfg = AtcConfig::default();
+        cfg.prompt.components_dir = "custom/components".to_string();
+        let toml = build_config_toml(&cfg);
+        assert!(toml.contains("[prompt]"), "missing [prompt] section");
+        assert!(
+            toml.contains("custom/components"),
+            "missing custom components_dir"
+        );
+    }
+
+    #[test]
+    fn test_build_config_toml_includes_paths_when_non_empty() {
+        let mut cfg = AtcConfig::default();
+        cfg.paths.search_path = vec!["~/.config/atc".into()];
+        let toml = build_config_toml(&cfg);
+        assert!(toml.contains("[paths]"), "missing [paths] section");
+    }
+
+    #[test]
+    fn test_build_config_toml_roundtrip_resolvers() {
+        let mut cfg = AtcConfig::default();
+        cfg.resolvers.task.enabled = false;
+        let toml_str = build_config_toml(&cfg);
+        // The generated TOML should be parseable back
+        let reparsed: AtcConfig = toml::from_str(&toml_str).expect("generated TOML must be valid");
+        assert!(!reparsed.resolvers.task.enabled);
+        assert!(reparsed.resolvers.template.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_run_init_creates_atc_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        run_init(&cfg, false).await.unwrap();
+        assert!(dir.path().join(".atc/config.toml").exists());
+        assert!(dir.path().join(".atc/directives").is_dir());
+        assert!(dir.path().join(".atc/templates").is_dir());
+        assert!(dir.path().join(".atc/components").is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_run_init_fails_if_exists_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let atc_dir = dir.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        let err = run_init(&cfg, false).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_run_init_force_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let atc_dir = dir.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        run_init(&cfg, true).await.unwrap();
+        assert!(dir.path().join(".atc/config.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_init_writes_directive_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        cfg.directives.insert(
+            "implement".to_string(),
+            atc_core::config::DirectiveConfig {
+                max_budget_usd: Some(15.0),
+                ..Default::default()
+            },
+        );
+        run_init(&cfg, false).await.unwrap();
+        let directive_path = dir.path().join(".atc/directives/implement.toml");
+        assert!(directive_path.exists());
+        let contents = std::fs::read_to_string(&directive_path).unwrap();
+        assert!(contents.contains("15.0"));
+    }
 }
