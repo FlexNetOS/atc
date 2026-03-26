@@ -80,8 +80,14 @@ pub async fn run_daemon(
     });
 
     // Start sources
-    let source_handles =
-        start_sources(config, &opts.sources, queue.clone(), state.shutdown.clone()).await;
+    let source_handles = start_sources(
+        config,
+        &opts.sources,
+        queue.clone(),
+        state.shutdown.clone(),
+        state.shutdown_notify.clone(),
+    )
+    .await;
 
     let drain_interval = std::time::Duration::from_secs(config.daemon.drain_interval_secs);
     let queues = if opts.queues.is_empty() {
@@ -114,13 +120,15 @@ pub async fn run_daemon(
         let available_slots = opts.max_concurrent.saturating_sub(active_count);
 
         if available_slots > 0 {
+            let mut remaining_slots: usize = available_slots;
+
             // Drain from each queue
             for queue_name in &queues {
-                if state.shutdown.load(Ordering::SeqCst) {
+                if state.shutdown.load(Ordering::SeqCst) || remaining_slots == 0 {
                     break;
                 }
 
-                let items = match queue.queue_peek(queue_name, available_slots as u32).await {
+                let items = match queue.queue_peek(queue_name, remaining_slots as u32).await {
                     Ok(items) => items,
                     Err(e) => {
                         warn!(queue = %queue_name, error = %e, "failed to peek queue");
@@ -129,7 +137,7 @@ pub async fn run_daemon(
                 };
 
                 for item in items {
-                    if state.shutdown.load(Ordering::SeqCst) {
+                    if state.shutdown.load(Ordering::SeqCst) || remaining_slots == 0 {
                         break;
                     }
 
@@ -156,6 +164,7 @@ pub async fn run_daemon(
                                     "failed to mark dispatched"
                                 );
                             }
+                            remaining_slots = remaining_slots.saturating_sub(1);
                             info!(
                                 queue_id = %item.id,
                                 dispatch_id = %dispatch_id,
@@ -226,6 +235,7 @@ async fn start_sources(
     source_names: &[String],
     queue: Arc<atc_core::registry::SqliteRegistry>,
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -273,6 +283,7 @@ async fn start_sources(
         let poll_interval = std::time::Duration::from_secs(source_config.poll_interval_secs());
         let source_queue = source_config.queue().to_string();
 
+        let shutdown_notify = shutdown_notify.clone();
         let handle = tokio::spawn(async move {
             info!(source = %name, "source started");
             while !shutdown.load(Ordering::SeqCst) {
@@ -281,7 +292,11 @@ async fn start_sources(
                 {
                     warn!(source = %name, error = %e, "source iteration failed");
                 }
-                tokio::time::sleep(poll_interval).await;
+                // Wait for poll interval or shutdown signal
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = shutdown_notify.notified() => {}
+                }
             }
             info!(source = %name, "source stopped");
         });
