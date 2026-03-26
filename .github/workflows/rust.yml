@@ -93,8 +93,13 @@ jobs:
           fi
           tmux -V
 
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Test
-        run: cargo test --all-targets
+        run: cargo nextest run --profile ci
 
       - name: sccache stats
         if: always()
