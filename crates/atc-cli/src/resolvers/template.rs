@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -137,6 +137,24 @@ impl InputResolver for TemplateResolver {
         // Handlebars strict mode doesn't reject them.
         let deferred_owned = atc_core::providers::all_deferred_template_vars();
         let deferred_vars: Vec<&str> = deferred_owned.iter().map(|s| s.as_str()).collect();
+
+        // Pre-render: read frontmatter to validate required_params before rendering.
+        // We do a lightweight parse of the raw file first.
+        let raw_content = tokio::fs::read_to_string(&template_path)
+            .await
+            .with_context(|| {
+                format!("failed to read template file '{}'", template_path.display())
+            })?;
+        // Quick frontmatter parse just to check required_params
+        let quick_fm = prompt_engine::parse_template_frontmatter(&raw_content)?;
+        if let Some(ref required) = quick_fm.required_params {
+            for param in required {
+                if params.get(param.as_str()).is_none_or(|v| v.is_empty()) {
+                    anyhow::bail!("template '{}' requires --param {}=<value>", input, param);
+                }
+            }
+        }
+
         let output = prompt_engine::render_template_with_deferred(
             Path::new(&template_name),
             &params,
@@ -146,9 +164,13 @@ impl InputResolver for TemplateResolver {
         )
         .await?;
 
-        // Resolve directive: CLI override > frontmatter directives > default implement
+        // Resolve directive: CLI override > frontmatter `directive:` (singular) >
+        // legacy `directives:` list > default implement
         let resolved_directive = if let Some(ref m) = opts.directive {
             m.clone()
+        } else if let Some(ref d) = output.directive {
+            d.parse::<Directive>()
+                .with_context(|| format!("unknown directive '{}' in template '{}'", d, input))?
         } else if let Some(first_directive) = output.directives.first() {
             first_directive.parse::<Directive>().unwrap_or_else(|_| {
                 debug!(directive = %first_directive, "unrecognized directive, defaulting to implement");
@@ -172,13 +194,15 @@ impl InputResolver for TemplateResolver {
         let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
 
         Ok(ResolvedInput {
-            system_prompt: output.body,
+            system_prompt: String::new(), // pipeline assembles from directive components
             directive: resolved_directive,
             task_slug: None,
             branch,
             dispatch_id,
             env_overrides: std::collections::HashMap::new(),
             kb_root: None,
+            is_template: true,
+            template_body: Some(output.body),
         })
     }
 
@@ -425,9 +449,17 @@ mod tests {
         let result = resolver.resolve("review", &opts, &config).await.unwrap();
 
         assert_eq!(result.directive, Directive::ReviewFix);
-        assert!(result
-            .system_prompt
-            .contains("https://github.com/org/repo/pull/1"));
+        assert!(result.is_template);
+        let body = result.template_body.as_deref().unwrap();
+        assert!(
+            body.contains("https://github.com/org/repo/pull/1"),
+            "expected PR URL in template_body, got: {}",
+            body
+        );
+        assert!(
+            result.system_prompt.is_empty(),
+            "system_prompt should be empty for template dispatch"
+        );
         assert!(result.task_slug.is_none());
         assert!(
             result.branch.starts_with("tpl--review-"),
@@ -491,20 +523,276 @@ mod tests {
         let resolver = TemplateResolver;
         let result = resolver.resolve("pr-review", &opts, &config).await.unwrap();
 
+        assert!(result.is_template);
+        let body = result.template_body.as_deref().unwrap();
         // User-supplied param should be resolved
         assert!(
-            result
-                .system_prompt
-                .contains("https://github.com/org/repo/pull/42"),
-            "expected PR URL in prompt, got: {}",
-            result.system_prompt
+            body.contains("https://github.com/org/repo/pull/42"),
+            "expected PR URL in template_body, got: {}",
+            body
         );
         // Provider var should be a deferred placeholder, not rejected
         assert!(
-            result.system_prompt.contains("__ATC_DEFER_prefetch__"),
+            body.contains("__ATC_DEFER_prefetch__"),
             "expected deferred placeholder for prefetch, got: {}",
-            result.system_prompt
+            body
         );
         assert_eq!(result.directive, Directive::ReviewFix);
+    }
+
+    /// Helper to create a test config with templates, partials, and components dirs.
+    fn test_config(dir: &std::path::Path) -> AtcConfig {
+        let tmpl_dir = dir.join("templates");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        let partials_dir = dir.join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        let comp_dir = dir.join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        AtcConfig {
+            config_dir: Some(dir.to_path_buf()),
+            prompt: PromptConfig {
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+                components_dir: "components".to_string(),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn test_opts(input: &str, params: std::collections::HashMap<String, String>) -> RunOpts {
+        RunOpts {
+            input: input.to_string(),
+            directive: None,
+            params,
+            pr_url: None,
+            inline: true,
+            force: false,
+            dry_run: false,
+            directives: None,
+            no_worktree: false,
+            max_budget_usd: None,
+            max_turns: None,
+            retries: 0,
+            list: false,
+        }
+    }
+
+    /// Test `directive:` (singular) frontmatter field resolves the directive.
+    #[tokio::test]
+    async fn test_resolve_template_directive_singular() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/close.md"),
+            "---\ndirective: close\n---\nClose this task.",
+        )
+        .unwrap();
+
+        let opts = test_opts("close", std::collections::HashMap::new());
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("close", &opts, &config).await.unwrap();
+
+        assert_eq!(result.directive, Directive::Close);
+        assert!(result.is_template);
+        assert_eq!(result.template_body.as_deref(), Some("Close this task."));
+    }
+
+    /// Test required_params validation rejects missing params.
+    #[tokio::test]
+    async fn test_resolve_template_required_params_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/pr-review.md"),
+            "---\ndirective: review-fix\nrequired_params: [pr]\n---\nReview PR: {{pr}}",
+        )
+        .unwrap();
+
+        let opts = test_opts("pr-review", std::collections::HashMap::new());
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("pr-review", &opts, &config).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires --param pr="),
+            "expected required_params error, got: {}",
+            err
+        );
+    }
+
+    /// Test required_params validation passes when params provided.
+    #[tokio::test]
+    async fn test_resolve_template_required_params_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/pr-review.md"),
+            "---\ndirective: review-fix\nrequired_params: [pr]\n---\nReview PR: {{pr}}\n\n{{prefetch}}",
+        )
+        .unwrap();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "pr".to_string(),
+            "https://github.com/org/repo/pull/1".to_string(),
+        );
+
+        let opts = test_opts("pr-review", params);
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("pr-review", &opts, &config).await.unwrap();
+
+        assert_eq!(result.directive, Directive::ReviewFix);
+        assert!(result.is_template);
+        let body = result.template_body.as_deref().unwrap();
+        assert!(body.contains("https://github.com/org/repo/pull/1"));
+    }
+
+    /// Test each of the 6 templates resolves to the correct directive.
+    #[tokio::test]
+    async fn test_resolve_all_six_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let tmpl_dir = dir.path().join("templates");
+
+        // Create all 6 templates
+        std::fs::write(
+            tmpl_dir.join("pr-review.md"),
+            "---\ndirective: review-fix\nrequired_params: [pr]\n---\nReview {{pr}}\n\n{{prefetch}}",
+        )
+        .unwrap();
+        std::fs::write(
+            tmpl_dir.join("pr-comment.md"),
+            "---\ndirective: pr-comments\nrequired_params: [pr]\n---\nComment on {{pr}}\n\n{{prefetch}}",
+        )
+        .unwrap();
+        std::fs::write(
+            tmpl_dir.join("branch-review.md"),
+            "---\ndirective: review-fix\n---\nReview branch.",
+        )
+        .unwrap();
+        std::fs::write(
+            tmpl_dir.join("close.md"),
+            "---\ndirective: close\n---\nClose task.",
+        )
+        .unwrap();
+        std::fs::write(
+            tmpl_dir.join("push-branch.md"),
+            "---\ndirective: implement\n---\nPush branch.",
+        )
+        .unwrap();
+        std::fs::write(
+            tmpl_dir.join("swot.md"),
+            "---\ndirective: research\n---\nSWOT analysis.",
+        )
+        .unwrap();
+
+        let resolver = TemplateResolver;
+
+        // pr-review → review-fix
+        let mut params = std::collections::HashMap::new();
+        params.insert("pr".to_string(), "https://example.com/pull/1".to_string());
+        let opts = test_opts("pr-review", params);
+        let r = resolver.resolve("pr-review", &opts, &config).await.unwrap();
+        assert_eq!(r.directive, Directive::ReviewFix);
+        assert!(r.is_template);
+
+        // pr-comment → pr-comments
+        let mut params = std::collections::HashMap::new();
+        params.insert("pr".to_string(), "https://example.com/pull/2".to_string());
+        let opts = test_opts("pr-comment", params);
+        let r = resolver
+            .resolve("pr-comment", &opts, &config)
+            .await
+            .unwrap();
+        assert_eq!(r.directive, Directive::PrComments);
+
+        // branch-review → review-fix
+        let opts = test_opts("branch-review", std::collections::HashMap::new());
+        let r = resolver
+            .resolve("branch-review", &opts, &config)
+            .await
+            .unwrap();
+        assert_eq!(r.directive, Directive::ReviewFix);
+
+        // close → close
+        let opts = test_opts("close", std::collections::HashMap::new());
+        let r = resolver.resolve("close", &opts, &config).await.unwrap();
+        assert_eq!(r.directive, Directive::Close);
+
+        // push-branch → implement
+        let opts = test_opts("push-branch", std::collections::HashMap::new());
+        let r = resolver
+            .resolve("push-branch", &opts, &config)
+            .await
+            .unwrap();
+        assert_eq!(r.directive, Directive::Implement);
+
+        // swot → research
+        let opts = test_opts("swot", std::collections::HashMap::new());
+        let r = resolver.resolve("swot", &opts, &config).await.unwrap();
+        assert_eq!(r.directive, Directive::Research);
+    }
+
+    /// Test that CLI --directive override takes precedence over template frontmatter.
+    #[tokio::test]
+    async fn test_resolve_template_cli_directive_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/swot.md"),
+            "---\ndirective: research\n---\nSWOT analysis.",
+        )
+        .unwrap();
+
+        let opts = RunOpts {
+            input: "swot".to_string(),
+            directive: Some(Directive::Implement),
+            params: std::collections::HashMap::new(),
+            pr_url: None,
+            inline: true,
+            force: false,
+            dry_run: false,
+            directives: None,
+            no_worktree: false,
+            max_budget_usd: None,
+            max_turns: None,
+            retries: 0,
+            list: false,
+        };
+
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("swot", &opts, &config).await.unwrap();
+        assert_eq!(result.directive, Directive::Implement);
+    }
+
+    /// Test unknown directive in template frontmatter produces a clear error.
+    #[tokio::test]
+    async fn test_resolve_template_unknown_directive_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/bad.md"),
+            "---\ndirective: nonexistent-directive\n---\nBody.",
+        )
+        .unwrap();
+
+        let opts = test_opts("bad", std::collections::HashMap::new());
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("bad", &opts, &config).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown directive"),
+            "expected unknown directive error, got: {}",
+            err
+        );
     }
 }

@@ -8,7 +8,7 @@ use atc_core::queue::{DispatchQueue, EnqueueItem, EnqueueResult, Priority, Queue
 use std::io::BufRead;
 
 /// Timeout for git subprocess calls.
-const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// CLI options for `atc enqueue`.
 #[derive(Debug)]
@@ -208,7 +208,7 @@ fn print_result(input: &str, result: &EnqueueResult) {
 }
 
 /// Run a git subprocess with timeout and kill_on_drop.
-async fn run_git_cmd(
+pub(crate) async fn run_git_cmd(
     args: &[&str],
     workspace_root: Option<&std::path::Path>,
 ) -> Result<std::process::Output> {
