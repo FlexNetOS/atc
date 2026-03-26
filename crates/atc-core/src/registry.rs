@@ -857,7 +857,7 @@ impl DispatchQueue for SqliteRegistry {
         claim_token: &str,
         dispatch_id: &str,
     ) -> Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE dispatch_queue SET dispatch_id = ?1 WHERE id = ?2 AND status = 'dispatching' AND claimed_at = ?3",
         )
         .bind(dispatch_id)
@@ -865,6 +865,12 @@ impl DispatchQueue for SqliteRegistry {
         .bind(claim_token)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!(
+                "queue_set_dispatch_id: no matching row for id={} (claim may have been stolen)",
+                id
+            );
+        }
         Ok(())
     }
 
@@ -875,7 +881,7 @@ impl DispatchQueue for SqliteRegistry {
         dispatch_id: &str,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE dispatch_queue SET status = 'dispatched', dispatch_id = ?1, dispatched_at = ?2 WHERE id = ?3 AND status = 'dispatching' AND claimed_at = ?4",
         )
         .bind(dispatch_id)
@@ -884,11 +890,17 @@ impl DispatchQueue for SqliteRegistry {
         .bind(claim_token)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!(
+                "queue_mark_dispatched: no matching row for id={} (claim may have been stolen)",
+                id
+            );
+        }
         Ok(())
     }
 
     async fn queue_mark_failed(&self, id: &str, claim_token: &str, error: &str) -> Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE dispatch_queue SET status = 'failed', error = ?1 WHERE id = ?2 AND status = 'dispatching' AND claimed_at = ?3",
         )
         .bind(error)
@@ -896,6 +908,12 @@ impl DispatchQueue for SqliteRegistry {
         .bind(claim_token)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!(
+                "queue_mark_failed: no matching row for id={} (claim may have been stolen)",
+                id
+            );
+        }
         Ok(())
     }
 

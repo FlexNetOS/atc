@@ -185,7 +185,16 @@ pub async fn dispatch_queue_item(
 
     let opts = RunOpts {
         input: raw_input.clone(),
-        directive: row.mode.as_ref().and_then(|m| m.parse().ok()),
+        directive: match &row.mode {
+            Some(m) => match m.parse() {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    warn!(queue_id = %row.id, mode = %m, "invalid directive/mode, ignoring");
+                    None
+                }
+            },
+            None => None,
+        },
         params,
         pr_url: None,
         inline: false,

@@ -470,7 +470,17 @@ async fn run_source_iteration(
             let cmd = if let Some(ref view) = cfg.view {
                 vec!["kb", "list", "--view", view, "--format", "slugs"]
             } else {
-                let mut args = vec!["kb", "list", "--type", "task", "--format", "slugs"];
+                let mut args = vec!["kb", "list", "--format", "slugs"];
+                // Forward configured type filter, defaulting to "task"
+                if let Some(ref types) = cfg.filter_type {
+                    for t in types {
+                        args.push("--type");
+                        args.push(t);
+                    }
+                } else {
+                    args.push("--type");
+                    args.push("task");
+                }
                 // Forward all configured filters
                 for s in &cfg.filter_status {
                     args.push("--status");
@@ -485,12 +495,6 @@ async fn run_source_iteration(
                 for tag in &cfg.exclude_tags {
                     args.push("--exclude-tag");
                     args.push(tag);
-                }
-                if let Some(ref types) = cfg.filter_type {
-                    for t in types {
-                        args.push("--type");
-                        args.push(t);
-                    }
                 }
                 if let Some(ref priorities) = cfg.filter_priority {
                     for p in priorities {
