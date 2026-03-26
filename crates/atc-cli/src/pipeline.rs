@@ -32,11 +32,13 @@ impl<'a> DispatchPipeline<'a> {
         let mut resolved = resolver.resolve(input, opts, self.config).await?;
 
         // 3. Validate
-        // PR URL can come from --pr-url or from template --param pr=<url>
+        // PR URL can come from --pr-url or from template --param pr=<url>.
+        // Filter out blank values — Some("") must be treated as None.
         let effective_pr_url = opts
             .pr_url
             .clone()
-            .or_else(|| opts.params.get("pr").cloned());
+            .or_else(|| opts.params.get("pr").cloned())
+            .filter(|s| !s.is_empty());
         if matches!(
             resolved.directive,
             Directive::ReviewFix | Directive::PrComments
