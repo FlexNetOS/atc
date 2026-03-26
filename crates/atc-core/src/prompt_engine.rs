@@ -431,7 +431,7 @@ fn strip_agent_header_line(content: &str) -> String {
 }
 
 /// Resolve a directory path relative to config_dir if it's relative.
-fn resolve_dir(dir: &str, config_dir: Option<&Path>) -> PathBuf {
+pub fn resolve_dir(dir: &str, config_dir: Option<&Path>) -> PathBuf {
     let p = expand_tilde(Path::new(dir));
     if p.is_absolute() {
         p

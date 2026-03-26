@@ -10,6 +10,10 @@ pub struct AtcConfig {
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
 
+    /// Whether config was loaded from `.atc/config.toml` (true) vs legacy `atc.toml` (false).
+    #[serde(skip)]
+    pub atc_dir_mode: bool,
+
     #[serde(default)]
     pub registry: RegistryConfig,
     #[serde(default)]
@@ -31,6 +35,9 @@ pub struct AtcConfig {
     /// Resolver chain configuration.
     #[serde(default)]
     pub resolvers: ResolversConfig,
+    /// Search path configuration for `.atc/` directory resolution.
+    #[serde(default)]
+    pub paths: PathsConfig,
 }
 
 /// `[resolvers]` section — controls resolver order and per-resolver settings.
@@ -118,55 +125,8 @@ impl AtcConfig {
             "health.cost_warning_threshold must be a finite non-negative number"
         );
         // Validate directive keys against known Directive variants + per-directive overrides
-        for key in cfg.directives.keys() {
-            key.parse::<crate::types::Directive>().map_err(|_| {
-                anyhow::anyhow!(
-                    "unknown directive '{}' in [directives.{}]; valid directives: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
-                    key, key,
-                )
-            })?;
-            let directive_cfg = cfg.directives.get(key).unwrap();
-            if let Some(components) = &directive_cfg.components {
-                anyhow::ensure!(
-                    !components.is_empty(),
-                    "directives.{}.components must contain at least one component name",
-                    key
-                );
-                for name in components {
-                    anyhow::ensure!(
-                        !name.trim().is_empty(),
-                        "directives.{}.components contains an empty component name",
-                        key
-                    );
-                    anyhow::ensure!(
-                        !name.contains('/') && !name.contains('\\') && !name.contains(".."),
-                        "directives.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
-                        key,
-                        name
-                    );
-                }
-            }
-            if let Some(budget) = directive_cfg.max_budget_usd {
-                anyhow::ensure!(
-                    budget > 0.0 && budget.is_finite(),
-                    "directives.{}.max_budget_usd must be a positive finite number",
-                    key
-                );
-            }
-            if let Some(turns) = directive_cfg.max_turns {
-                anyhow::ensure!(turns > 0, "directives.{}.max_turns must be >= 1", key);
-            }
-            if let Some(providers) = &directive_cfg.providers {
-                for name in providers {
-                    anyhow::ensure!(
-                        crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
-                        "unknown provider '{}' in directives.{}.providers; valid providers: {}",
-                        name,
-                        key,
-                        crate::providers::KNOWN_PROVIDERS.join(", ")
-                    );
-                }
-            }
+        for (key, directive_cfg) in &cfg.directives {
+            Self::validate_directive(key, directive_cfg)?;
         }
         // Validate resolver order — warn on unknown resolver names (typos)
         let known_resolvers = ["task", "template", "prompt"];
@@ -184,7 +144,7 @@ impl AtcConfig {
     /// Load config using resolution order:
     /// 1. `--config <path>` CLI flag (passed as argument)
     /// 2. `ATC_CONFIG` environment variable
-    /// 3. Walk up from CWD looking for `atc.toml` (project-level discovery)
+    /// 3. Walk up from CWD looking for `.atc/config.toml` or `atc.toml` (project-level discovery)
     /// 4. `~/.config/atc/config.toml` (XDG user config)
     ///
     /// Returns default config if no file is found.
@@ -194,7 +154,7 @@ impl AtcConfig {
             let path = expand_tilde(path);
             let contents = std::fs::read_to_string(&path)?;
             let mut cfg = Self::parse_and_validate(&contents)?;
-            cfg.config_dir = path.parent().map(|p| p.to_path_buf());
+            cfg.apply_file_context(&path);
             return Ok(cfg);
         }
 
@@ -209,7 +169,7 @@ impl AtcConfig {
                 )
             })?;
             let mut cfg = Self::parse_and_validate(&contents)?;
-            cfg.config_dir = path.parent().map(|p| p.to_path_buf());
+            cfg.apply_file_context(&path);
             return Ok(cfg);
         }
 
@@ -235,41 +195,198 @@ impl AtcConfig {
         Ok(Self::default())
     }
 
-    /// Walk up from `start` looking for `atc.toml`. Returns the first valid
-    /// config found, or `None` if no config is discovered before reaching the
-    /// filesystem root. This is a best-effort helper: malformed configs and I/O
-    /// errors are logged and skipped rather than propagated.
+    /// Walk up from `start` looking for `.atc/config.toml` or `atc.toml`.
+    /// Prefers `.atc/config.toml` at each directory level, falling back to
+    /// `atc.toml`. Returns the first valid config found, or `None` if no
+    /// config is discovered before reaching the filesystem root.
     fn find_config_upward(start: &Path) -> Option<Self> {
         let mut dir = Some(start.to_path_buf());
         while let Some(d) = dir {
-            let candidate = d.join("atc.toml");
-            match std::fs::read_to_string(&candidate) {
-                Ok(contents) => match Self::parse_and_validate(&contents) {
-                    Ok(mut cfg) => {
-                        cfg.config_dir = candidate.parent().map(|p| p.to_path_buf());
-                        return Some(cfg);
-                    }
+            // Try .atc/config.toml first, then atc.toml
+            for candidate in [d.join(".atc/config.toml"), d.join("atc.toml")] {
+                match std::fs::read_to_string(&candidate) {
+                    Ok(contents) => match Self::parse_and_validate(&contents) {
+                        Ok(mut cfg) => {
+                            cfg.apply_file_context(&candidate);
+                            return Some(cfg);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Ignoring malformed config at {}: {}",
+                                candidate.display(),
+                                e
+                            );
+                        }
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => {}
                     Err(e) => {
                         tracing::warn!(
-                            "Ignoring malformed config at {}: {}",
-                            candidate.display(),
-                            e
+                            "Unexpected I/O error reading {}: {e}; skipping",
+                            candidate.display()
                         );
                     }
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
-                Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "Unexpected I/O error reading {}: {e}; skipping",
-                        candidate.display()
-                    );
                 }
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
         None
+    }
+
+    /// Check if a config file path looks like `.atc/config.toml`.
+    fn is_atc_dir_config(path: &Path) -> bool {
+        path.file_name().and_then(|f| f.to_str()) == Some("config.toml")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|f| f.to_str())
+                == Some(".atc")
+    }
+
+    /// Apply `.atc/` directory post-processing to a freshly-parsed config.
+    ///
+    /// Sets `config_dir` (project root for `.atc/config.toml`, parent dir for
+    /// legacy `atc.toml`), `atc_dir_mode`, and loads directive files + defaults
+    /// when in `.atc/` mode. Call this after `parse_and_validate` for any config
+    /// loaded from a file path.
+    fn apply_file_context(&mut self, path: &Path) {
+        let is_atc_dir = Self::is_atc_dir_config(path);
+        self.config_dir = if is_atc_dir {
+            // .atc/config.toml → config_dir is project root (parent of .atc/)
+            path.parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+        } else {
+            path.parent().map(|p| p.to_path_buf())
+        };
+        self.atc_dir_mode = is_atc_dir;
+        if is_atc_dir {
+            self.apply_atc_dir_defaults();
+            self.load_directive_files();
+        }
+    }
+
+    /// Validate a single directive entry (name + config).
+    /// Used by both `parse_and_validate` and `load_directive_files`.
+    fn validate_directive(key: &str, directive_cfg: &DirectiveConfig) -> anyhow::Result<()> {
+        key.parse::<crate::types::Directive>().map_err(|_| {
+            anyhow::anyhow!(
+                "unknown directive '{}' in [directives.{}]; valid directives: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
+                key, key,
+            )
+        })?;
+        if let Some(components) = &directive_cfg.components {
+            anyhow::ensure!(
+                !components.is_empty(),
+                "directives.{}.components must contain at least one component name",
+                key
+            );
+            for name in components {
+                anyhow::ensure!(
+                    !name.trim().is_empty(),
+                    "directives.{}.components contains an empty component name",
+                    key
+                );
+                anyhow::ensure!(
+                    !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+                    "directives.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
+                    key,
+                    name
+                );
+            }
+        }
+        if let Some(budget) = directive_cfg.max_budget_usd {
+            anyhow::ensure!(
+                budget > 0.0 && budget.is_finite(),
+                "directives.{}.max_budget_usd must be a positive finite number",
+                key
+            );
+        }
+        if let Some(turns) = directive_cfg.max_turns {
+            anyhow::ensure!(turns > 0, "directives.{}.max_turns must be >= 1", key);
+        }
+        if let Some(providers) = &directive_cfg.providers {
+            for name in providers {
+                anyhow::ensure!(
+                    crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
+                    "unknown provider '{}' in directives.{}.providers; valid providers: {}",
+                    name,
+                    key,
+                    crate::providers::KNOWN_PROVIDERS.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// When loaded from `.atc/config.toml`, apply `.atc/`-convention defaults
+    /// for prompt directories if they haven't been explicitly set in the config file.
+    fn apply_atc_dir_defaults(&mut self) {
+        if self.prompt.components_dir == default_components_dir() {
+            self.prompt.components_dir = ".atc/components".to_string();
+        }
+        if self.prompt.templates_dir == default_templates_dir() {
+            self.prompt.templates_dir = ".atc/templates".to_string();
+        }
+        if self.prompt.partials_dir == default_partials_dir() {
+            self.prompt.partials_dir = ".atc/partials".to_string();
+        }
+    }
+
+    /// Load directive config files from `.atc/directives/*.toml`.
+    /// File-based directives are loaded first; then `[directives.*]` from
+    /// config.toml overrides them (config takes priority).
+    fn load_directive_files(&mut self) {
+        let Some(ref config_dir) = self.config_dir else {
+            return;
+        };
+        let directives_dir = config_dir.join(".atc/directives");
+        let entries = match std::fs::read_dir(&directives_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        // Save config-level overrides so they take priority
+        let config_overrides = self.directives.clone();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let directive_name = stem.to_string();
+            // Skip if config.toml already has this directive (config overrides files)
+            if config_overrides.contains_key(&directive_name) {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => match toml::from_str::<DirectiveConfig>(&contents) {
+                    Ok(dcfg) => {
+                        if let Err(e) = Self::validate_directive(&directive_name, &dcfg) {
+                            tracing::warn!(
+                                "Ignoring invalid directive file {}: {}",
+                                path.display(),
+                                e
+                            );
+                            continue;
+                        }
+                        self.directives.insert(directive_name, dcfg);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Ignoring malformed directive file {}: {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Cannot read directive file {}: {}", path.display(), e);
+                }
+            }
+        }
     }
 }
 
@@ -582,6 +699,20 @@ impl Default for WatchConfig {
             cost_threshold: default_cost_threshold(),
         }
     }
+}
+
+/// `[paths]` section — search path for `.atc/` directory resolution.
+/// Project-local `.atc/` is always checked first; these paths provide fallbacks.
+///
+/// **Note:** `search_path` is parsed and persisted but not yet consumed at runtime.
+/// It is reserved for a future multi-directory lookup feature.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PathsConfig {
+    /// Additional directories to search for components, templates, and directives.
+    /// Project-local `.atc/` takes priority, then these paths in order.
+    /// Default: empty (project-local `.atc/` only).
+    #[serde(default)]
+    pub search_path: Vec<String>,
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset
@@ -1471,5 +1602,255 @@ components = ["base", "git"]
             std::fs::canonicalize(result.unwrap().config_dir.unwrap()).unwrap(),
             std::fs::canonicalize(root.path()).unwrap(),
         );
+    }
+
+    // --- .atc/ directory convention tests ---
+
+    #[test]
+    fn test_traversal_finds_atc_dir_config() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "[batch]\nmax_concurrency = 42").unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 42);
+        assert!(cfg.atc_dir_mode);
+        // config_dir should be the project root, not .atc/
+        assert_eq!(
+            std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_atc_dir_config_preferred_over_atc_toml() {
+        let root = tempfile::tempdir().unwrap();
+        // Both .atc/config.toml and atc.toml exist
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "[batch]\nmax_concurrency = 99").unwrap();
+        std::fs::write(root.path().join("atc.toml"), "[batch]\nmax_concurrency = 1").unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 99);
+        assert!(cfg.atc_dir_mode);
+    }
+
+    #[test]
+    fn test_atc_dir_config_sets_default_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert!(cfg.atc_dir_mode);
+        assert_eq!(cfg.prompt.components_dir, ".atc/components");
+        assert_eq!(cfg.prompt.templates_dir, ".atc/templates");
+        assert_eq!(cfg.prompt.partials_dir, ".atc/partials");
+    }
+
+    #[test]
+    fn test_atc_dir_explicit_prompt_paths_not_overridden() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(
+            atc_dir.join("config.toml"),
+            "[prompt]\ncomponents_dir = \"custom/comps\"",
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert_eq!(cfg.prompt.components_dir, "custom/comps");
+    }
+
+    #[test]
+    fn test_atc_dir_loads_directive_files() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        std::fs::write(
+            atc_dir.join("directives/implement.toml"),
+            r#"components = ["base", "git"]
+max_budget_usd = 15.0
+"#,
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        let dcfg = cfg.directives.get("implement").unwrap();
+        assert_eq!(
+            dcfg.components,
+            Some(vec!["base".to_string(), "git".to_string()])
+        );
+        assert_eq!(dcfg.max_budget_usd, Some(15.0));
+    }
+
+    #[test]
+    fn test_config_toml_directives_override_files() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        // File-based directive
+        std::fs::write(
+            atc_dir.join("directives/implement.toml"),
+            "max_budget_usd = 10.0",
+        )
+        .unwrap();
+        // Config-level override takes priority
+        std::fs::write(
+            atc_dir.join("config.toml"),
+            "[directives.implement]\nmax_budget_usd = 50.0",
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        let dcfg = cfg.directives.get("implement").unwrap();
+        assert_eq!(dcfg.max_budget_usd, Some(50.0));
+    }
+
+    #[test]
+    fn test_fallback_to_atc_toml_when_no_atc_dir() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("atc.toml"), "[batch]\nmax_concurrency = 7").unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 7);
+        assert!(!cfg.atc_dir_mode);
+        // Legacy mode keeps old default paths
+        assert_eq!(cfg.prompt.components_dir, ".claude/prompts/components");
+    }
+
+    #[test]
+    fn test_traversal_finds_atc_dir_in_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "[batch]\nmax_concurrency = 33").unwrap();
+        let child = root.path().join("sub/deep");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let cfg = AtcConfig::find_config_upward(&child).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 33);
+        assert!(cfg.atc_dir_mode);
+    }
+
+    #[test]
+    fn test_is_atc_dir_config_detection() {
+        assert!(AtcConfig::is_atc_dir_config(Path::new(
+            "/foo/.atc/config.toml"
+        )));
+        assert!(AtcConfig::is_atc_dir_config(Path::new(".atc/config.toml")));
+        assert!(!AtcConfig::is_atc_dir_config(Path::new("/foo/atc.toml")));
+        assert!(!AtcConfig::is_atc_dir_config(Path::new("/foo/config.toml")));
+        assert!(!AtcConfig::is_atc_dir_config(Path::new(
+            "/foo/.atc/other.toml"
+        )));
+    }
+
+    #[test]
+    fn test_paths_config_parsed() {
+        let toml = r#"
+[paths]
+search_path = ["~/.config/atc", "/etc/atc"]
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.paths.search_path, vec!["~/.config/atc", "/etc/atc"]);
+    }
+
+    #[test]
+    fn test_load_explicit_atc_dir_config() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(&atc_dir).unwrap();
+        let config_path = atc_dir.join("config.toml");
+        std::fs::write(&config_path, "[batch]\nmax_concurrency = 88").unwrap();
+
+        let cfg = AtcConfig::load(Some(&config_path)).unwrap();
+        assert_eq!(cfg.batch.max_concurrency, 88);
+        assert!(cfg.atc_dir_mode);
+        // config_dir should be the project root (parent of .atc/)
+        assert_eq!(
+            std::fs::canonicalize(cfg.config_dir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_directive_file_malformed_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        // Valid directive file
+        std::fs::write(
+            atc_dir.join("directives/research.toml"),
+            "max_budget_usd = 5.0",
+        )
+        .unwrap();
+        // Malformed directive file — should be skipped
+        std::fs::write(atc_dir.join("directives/implement.toml"), "[not valid!!!").unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        // research should be loaded, implement should be skipped
+        assert!(cfg.directives.contains_key("research"));
+        assert!(!cfg.directives.contains_key("implement"));
+    }
+
+    #[test]
+    fn test_directive_file_invalid_name_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        // Unknown directive name — should be skipped with a warning
+        std::fs::write(
+            atc_dir.join("directives/unknown-action.toml"),
+            "max_budget_usd = 5.0",
+        )
+        .unwrap();
+        // Valid directive file
+        std::fs::write(
+            atc_dir.join("directives/research.toml"),
+            "max_budget_usd = 5.0",
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert!(cfg.directives.contains_key("research"));
+        assert!(!cfg.directives.contains_key("unknown-action"));
+    }
+
+    #[test]
+    fn test_directive_file_invalid_budget_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        // Zero budget is invalid — should be skipped
+        std::fs::write(
+            atc_dir.join("directives/implement.toml"),
+            "max_budget_usd = 0.0",
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert!(!cfg.directives.contains_key("implement"));
+    }
+
+    #[test]
+    fn test_directive_file_non_toml_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        // .md file should be ignored
+        std::fs::write(atc_dir.join("directives/README.md"), "# Directives").unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert!(cfg.directives.is_empty());
     }
 }
