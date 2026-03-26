@@ -7,6 +7,9 @@ use anyhow::Result;
 use atc_core::queue::{DispatchQueue, EnqueueItem, EnqueueResult, Priority, QueueInputType};
 use std::io::BufRead;
 
+/// Timeout for git subprocess calls.
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// CLI options for `atc enqueue`.
 #[derive(Debug)]
 pub struct EnqueueOpts {
@@ -45,6 +48,18 @@ pub async fn run_enqueue(
     queue: &(dyn DispatchQueue + Send + Sync),
     opts: &EnqueueOpts,
 ) -> Result<()> {
+    // Reject ambiguous mode combinations
+    let delegated = u8::from(opts.ready)
+        + u8::from(opts.board)
+        + u8::from(opts.view.is_some())
+        + u8::from(opts.stdin);
+    let has_explicit_input = !opts.input.is_empty();
+    if delegated > 1 || (delegated > 0 && has_explicit_input) {
+        anyhow::bail!(
+            "choose exactly one of positional input, --ready, --board, --view, or --stdin"
+        );
+    }
+
     let mut total_enqueued = 0u32;
     let mut total_skipped = 0u32;
 
@@ -126,6 +141,10 @@ fn parse_input_line(line: &str) -> (QueueInputType, String) {
     match parts.first().copied() {
         Some("task") if parts.len() > 1 => (QueueInputType::Task, parts[1].to_string()),
         Some("prompt") if parts.len() > 1 => (QueueInputType::Prompt, parts[1].to_string()),
+        // Bare "task" or "prompt" without a value is an error — treat as prompt text
+        Some("task") | Some("prompt") if parts.len() == 1 => {
+            (QueueInputType::Prompt, line.to_string())
+        }
         _ => {
             // If it looks like a slug (contains /), treat as task
             if line.contains('/') && !line.contains(' ') {
@@ -184,19 +203,30 @@ fn print_result(input: &str, result: &EnqueueResult) {
     }
 }
 
+/// Run a git subprocess with timeout and kill_on_drop.
+async fn run_git_cmd(args: &[&str]) -> Result<std::process::Output> {
+    let output = tokio::time::timeout(
+        CMD_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "git {} timed out after {}s",
+            args.join(" "),
+            CMD_TIMEOUT.as_secs()
+        )
+    })??;
+    Ok(output)
+}
+
 /// Query `git kb ready` for top-scored task slugs.
 async fn kb_ready_slugs(limit: u32) -> Result<Vec<String>> {
-    let output = tokio::process::Command::new("git")
-        .args([
-            "kb",
-            "ready",
-            "--limit",
-            &limit.to_string(),
-            "--format",
-            "slugs",
-        ])
-        .output()
-        .await?;
+    let limit_str = limit.to_string();
+    let output = run_git_cmd(&["kb", "ready", "--limit", &limit_str, "--format", "slugs"]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -228,10 +258,7 @@ async fn board_query_slugs(opts: &EnqueueOpts) -> Result<Vec<String>> {
         args.push("--unassigned");
     }
 
-    let output = tokio::process::Command::new("git")
-        .args(&args)
-        .output()
-        .await?;
+    let output = run_git_cmd(&args).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -246,16 +273,13 @@ async fn board_query_slugs(opts: &EnqueueOpts) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Query a saved view via `git kb view` for task slugs.
+/// Query a saved view via `git kb list --view` for task slugs.
 async fn view_query_slugs(view_slug: &str) -> Result<Vec<String>> {
-    let output = tokio::process::Command::new("git")
-        .args(["kb", "view", view_slug, "--format", "slugs"])
-        .output()
-        .await?;
+    let output = run_git_cmd(&["kb", "list", "--view", view_slug, "--format", "slugs"]).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git kb view failed: {}", stderr.trim());
+        anyhow::bail!("git kb list --view failed: {}", stderr.trim());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

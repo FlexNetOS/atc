@@ -263,9 +263,6 @@ mod args {
             /// Activate source(s) alongside the drain loop
             #[arg(long = "source")]
             sources: Vec<String>,
-            /// Run in background (write PID file)
-            #[arg(long)]
-            detach: bool,
         },
     }
 
@@ -542,7 +539,6 @@ pub async fn run(
             queues,
             max_concurrent,
             sources,
-            detach,
         } => match action {
             Some(args::DaemonAction::Stop) => daemon::stop_daemon(config),
             Some(args::DaemonAction::Status) => {
@@ -554,7 +550,6 @@ pub async fn run(
                     queues: queues.clone(),
                     max_concurrent,
                     sources: sources.clone(),
-                    detach: *detach,
                 };
                 daemon::run_daemon(registry, executor, config, &opts).await
             }

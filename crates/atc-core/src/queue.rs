@@ -111,6 +111,16 @@ impl Priority {
             Priority::Low => "low",
         }
     }
+
+    pub fn from_i32(val: i32) -> Option<Self> {
+        match val {
+            0 => Some(Priority::Critical),
+            25 => Some(Priority::High),
+            50 => Some(Priority::Medium),
+            75 => Some(Priority::Low),
+            _ => None,
+        }
+    }
 }
 
 impl std::str::FromStr for Priority {
@@ -169,7 +179,7 @@ impl Default for EnqueueItem {
     fn default() -> Self {
         Self {
             queue_name: "default".to_string(),
-            input_type: QueueInputType::Prompt,
+            input_type: QueueInputType::Task,
             input_value: String::new(),
             mode: None,
             priority: Priority::default(),
@@ -223,7 +233,7 @@ pub trait DispatchQueue: Send + Sync {
     /// Check if an input_value is already pending or dispatching in a queue.
     async fn queue_has_pending(&self, queue_name: &str, input_value: &str) -> Result<bool>;
 
-    /// Recover 'dispatching' rows on daemon restart.
+    /// Recover 'dispatching' rows on daemon restart, scoped to the given queues.
     /// Returns (recovered_to_pending, marked_dispatched) counts.
-    async fn queue_recover(&self) -> Result<(u64, u64)>;
+    async fn queue_recover(&self, queue_names: &[&str]) -> Result<(u64, u64)>;
 }

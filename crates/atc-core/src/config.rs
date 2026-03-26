@@ -119,6 +119,10 @@ impl AtcConfig {
             "dispatch.max_retries must be >= 1"
         );
         anyhow::ensure!(
+            cfg.daemon.drain_interval_secs > 0,
+            "daemon.drain_interval_secs must be >= 1"
+        );
+        anyhow::ensure!(
             cfg.watch.poll_interval_secs > 0,
             "watch.poll_interval_secs must be >= 1"
         );

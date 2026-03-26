@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS dispatch_queue (
     dispatch_id TEXT,
     enqueued_at TEXT NOT NULL,
     enqueued_by TEXT,
+    claimed_at  TEXT,
     dispatched_at TEXT,
     error       TEXT
 );
@@ -814,9 +815,11 @@ impl DispatchQueue for SqliteRegistry {
     }
 
     async fn queue_claim(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
-            "UPDATE dispatch_queue SET status = 'dispatching' WHERE id = ?1 AND status = 'pending'",
+            "UPDATE dispatch_queue SET status = 'dispatching', claimed_at = ?1 WHERE id = ?2 AND status = 'pending'",
         )
+        .bind(&now)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -875,13 +878,20 @@ impl DispatchQueue for SqliteRegistry {
         Ok(count > 0)
     }
 
-    async fn queue_recover(&self) -> Result<(u64, u64)> {
+    async fn queue_recover(&self, queue_names: &[&str]) -> Result<(u64, u64)> {
         // Check dispatching rows — if they have a matching dispatch_id in registry, mark dispatched.
-        // Otherwise, reset to pending.
-        let dispatching_rows =
-            sqlx::query("SELECT * FROM dispatch_queue WHERE status = 'dispatching'")
-                .fetch_all(&self.pool)
-                .await?;
+        // Otherwise, reset to pending. Scoped to the specified queues.
+        let placeholders: Vec<String> =
+            (1..=queue_names.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT * FROM dispatch_queue WHERE status = 'dispatching' AND queue_name IN ({})",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query(&sql);
+        for name in queue_names {
+            query = query.bind(*name);
+        }
+        let dispatching_rows = query.fetch_all(&self.pool).await?;
 
         let mut recovered = 0u64;
         let mut completed = 0u64;
@@ -1868,7 +1878,7 @@ mod tests {
         registry.queue_claim(&id).await.unwrap();
 
         // Recover should reset to pending (no dispatch_id means it never completed)
-        let (recovered, completed) = registry.queue_recover().await.unwrap();
+        let (recovered, completed) = registry.queue_recover(&["default"]).await.unwrap();
         assert_eq!(recovered, 1);
         assert_eq!(completed, 0);
 

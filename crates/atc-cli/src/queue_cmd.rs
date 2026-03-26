@@ -3,7 +3,7 @@
 use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
-use atc_core::queue::{DispatchQueue, QueueInputType, QueueRow};
+use atc_core::queue::{DispatchQueue, Priority, QueueInputType, QueueRow};
 use atc_core::registry::Registry;
 use atc_core::types::RunOpts;
 use tracing::{info, warn};
@@ -27,13 +27,9 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
     );
     println!("{}", "-".repeat(80));
     for item in &items {
-        let priority_str = match item.priority {
-            0 => "critical",
-            25 => "high",
-            50 => "medium",
-            75 => "low",
-            n => &format!("{}", n),
-        };
+        let priority_str = Priority::from_i32(item.priority)
+            .map(|p| p.as_str())
+            .unwrap_or("unknown");
         // Truncate long input for display
         let input_display = if item.input_value.len() > 40 {
             format!("{}...", &item.input_value[..37])
@@ -71,7 +67,7 @@ pub async fn run_queue_drain(
     queue_name: &str,
 ) -> Result<()> {
     // Recover any stale dispatching rows first
-    let (recovered, completed) = queue.queue_recover().await?;
+    let (recovered, completed) = queue.queue_recover(&[queue_name]).await?;
     if recovered > 0 || completed > 0 {
         info!(
             recovered,
@@ -94,6 +90,8 @@ pub async fn run_queue_drain(
                 continue; // someone else claimed it
             }
 
+            let label = crate::daemon::log_label(&item);
+
             // Convert to RunOpts and dispatch
             match dispatch_queue_item(&item, queue, registry, executor, config).await {
                 Ok(dispatch_id) => {
@@ -102,7 +100,7 @@ pub async fn run_queue_drain(
                     info!(
                         queue_id = %item.id,
                         dispatch_id = %dispatch_id,
-                        input = %item.input_value,
+                        input = %label,
                         "dispatched from queue"
                     );
                 }
@@ -112,7 +110,7 @@ pub async fn run_queue_drain(
                     failed += 1;
                     warn!(
                         queue_id = %item.id,
-                        input = %item.input_value,
+                        input = %label,
                         error = %err_msg,
                         "queue dispatch failed"
                     );
@@ -146,7 +144,12 @@ pub async fn dispatch_queue_item(
     let params: std::collections::HashMap<String, String> = row
         .params
         .as_ref()
-        .map(|p| serde_json::from_str(p).unwrap_or_default())
+        .map(|p| {
+            serde_json::from_str(p).unwrap_or_else(|e| {
+                warn!(queue_id = %row.id, error = %e, "failed to parse params JSON, using empty map");
+                std::collections::HashMap::new()
+            })
+        })
         .unwrap_or_default();
 
     // Determine if first word is "task" to force task resolver

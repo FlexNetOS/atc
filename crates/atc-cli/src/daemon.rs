@@ -8,7 +8,7 @@
 use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
-use atc_core::queue::DispatchQueue;
+use atc_core::queue::{DispatchQueue, QueueInputType, QueueRow};
 use atc_core::registry::{Registry, StatusFilter};
 use atc_core::source::SourceConfig;
 use atc_core::types::Status;
@@ -18,19 +18,30 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
+/// Timeout for git subprocess calls.
+const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Options for `atc daemon`.
 #[derive(Debug)]
 pub struct DaemonOpts {
     pub queues: Vec<String>,
     pub max_concurrent: usize,
     pub sources: Vec<String>,
-    pub detach: bool,
 }
 
 /// Daemon state.
 struct DaemonState {
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
+}
+
+/// Return a log-safe label for a queue item, redacting prompt content.
+pub fn log_label(item: &QueueRow) -> String {
+    if item.input_type == QueueInputType::Prompt {
+        format!("[queue:{}]", item.id)
+    } else {
+        item.input_value.clone()
+    }
 }
 
 /// Run the daemon.
@@ -46,13 +57,19 @@ pub async fn run_daemon(
         shutdown_notify: Arc::new(Notify::new()),
     };
 
-    // PID file
+    // PID file — use exclusive creation to prevent races
     let pid_file = config.daemon.resolved_pid_file();
-    write_pid_file(&pid_file)?;
+    acquire_pid_file(&pid_file)?;
     info!(pid_file = %pid_file.display(), "daemon starting");
 
     // Recover stale queue items
-    let (recovered, completed) = queue.queue_recover().await?;
+    let queues = if opts.queues.is_empty() {
+        vec!["default".to_string()]
+    } else {
+        opts.queues.clone()
+    };
+    let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
+    let (recovered, completed) = queue.queue_recover(&queue_refs).await?;
     if recovered > 0 || completed > 0 {
         info!(recovered, completed, "recovered stale queue items");
     }
@@ -89,12 +106,7 @@ pub async fn run_daemon(
     )
     .await;
 
-    let drain_interval = std::time::Duration::from_secs(config.daemon.drain_interval_secs);
-    let queues = if opts.queues.is_empty() {
-        vec!["default".to_string()]
-    } else {
-        opts.queues.clone()
-    };
+    let drain_interval = std::time::Duration::from_secs(config.daemon.drain_interval_secs.max(1));
 
     println!(
         "Daemon running (queues: {}, max_concurrent: {}, sources: {})",
@@ -109,26 +121,22 @@ pub async fn run_daemon(
 
     // Main drain loop
     while !state.shutdown.load(Ordering::SeqCst) {
-        // Health check running dispatches
+        // Check available capacity
         let running = registry
             .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
             .await
             .unwrap_or_default();
-        let active_count = running.len();
 
-        // Calculate available slots
-        let available_slots = opts.max_concurrent.saturating_sub(active_count);
-
-        if available_slots > 0 {
-            let mut remaining_slots: usize = available_slots;
-
+        if running.len() < opts.max_concurrent {
             // Drain from each queue
             for queue_name in &queues {
-                if state.shutdown.load(Ordering::SeqCst) || remaining_slots == 0 {
+                if state.shutdown.load(Ordering::SeqCst) {
                     break;
                 }
 
-                let items = match queue.queue_peek(queue_name, remaining_slots as u32).await {
+                let remaining_slots =
+                    opts.max_concurrent.saturating_sub(running.len()).max(1) as u32;
+                let items = match queue.queue_peek(queue_name, remaining_slots).await {
                     Ok(items) => items,
                     Err(e) => {
                         warn!(queue = %queue_name, error = %e, "failed to peek queue");
@@ -137,14 +145,24 @@ pub async fn run_daemon(
                 };
 
                 for item in items {
-                    if state.shutdown.load(Ordering::SeqCst) || remaining_slots == 0 {
+                    if state.shutdown.load(Ordering::SeqCst) {
                         break;
+                    }
+
+                    // Recheck available slots before each dispatch
+                    let running = registry
+                        .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
+                        .await
+                        .unwrap_or_default();
+                    if running.len() >= opts.max_concurrent {
+                        break; // At capacity, wait for next cycle
                     }
 
                     if !queue.queue_claim(&item.id).await.unwrap_or(false) {
                         continue;
                     }
 
+                    let label = log_label(&item);
                     match crate::queue_cmd::dispatch_queue_item(
                         &item,
                         queue.as_ref(),
@@ -164,11 +182,10 @@ pub async fn run_daemon(
                                     "failed to mark dispatched"
                                 );
                             }
-                            remaining_slots = remaining_slots.saturating_sub(1);
                             info!(
                                 queue_id = %item.id,
                                 dispatch_id = %dispatch_id,
-                                input = %item.input_value,
+                                input = %label,
                                 "dispatched from daemon"
                             );
                         }
@@ -177,7 +194,7 @@ pub async fn run_daemon(
                             let _ = queue.queue_mark_failed(&item.id, &err_msg).await;
                             warn!(
                                 queue_id = %item.id,
-                                input = %item.input_value,
+                                input = %label,
                                 error = %err_msg,
                                 "daemon dispatch failed"
                             );
@@ -306,6 +323,26 @@ async fn start_sources(
     handles
 }
 
+/// Run a git subprocess with timeout and kill_on_drop.
+async fn run_git_cmd(args: &[&str]) -> Result<std::process::Output> {
+    let output = tokio::time::timeout(
+        CMD_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "git {} timed out after {}s",
+            args.join(" "),
+            CMD_TIMEOUT.as_secs()
+        )
+    })??;
+    Ok(output)
+}
+
 /// Run a single iteration of a source.
 async fn run_source_iteration(
     name: &str,
@@ -315,17 +352,9 @@ async fn run_source_iteration(
 ) -> Result<()> {
     match config {
         SourceConfig::Ready(cfg) => {
-            let output = tokio::process::Command::new("git")
-                .args([
-                    "kb",
-                    "ready",
-                    "--limit",
-                    &cfg.limit.to_string(),
-                    "--format",
-                    "slugs",
-                ])
-                .output()
-                .await?;
+            let limit_str = cfg.limit.to_string();
+            let output =
+                run_git_cmd(&["kb", "ready", "--limit", &limit_str, "--format", "slugs"]).await?;
 
             if !output.status.success() {
                 anyhow::bail!(
@@ -350,37 +379,45 @@ async fn run_source_iteration(
             }
         }
         SourceConfig::Board(cfg) => {
-            let mut args = vec!["kb", "list", "--type", "task", "--format", "slugs"];
-            let status_args: Vec<String>;
-
-            if !cfg.filter_status.is_empty() {
-                status_args = cfg.filter_status.clone();
-                for s in &status_args {
+            let cmd = if let Some(ref view) = cfg.view {
+                vec!["kb", "list", "--view", view, "--format", "slugs"]
+            } else {
+                let mut args = vec!["kb", "list", "--type", "task", "--format", "slugs"];
+                // Forward all configured filters
+                for s in &cfg.filter_status {
                     args.push("--status");
                     args.push(s);
                 }
-            }
-            if cfg.require_unblocked {
-                args.push("--unblocked");
-            }
-            if cfg.require_unassigned {
-                args.push("--unassigned");
-            }
-
-            let cmd = if let Some(ref view) = cfg.view {
-                let mut v_args = vec!["kb", "view"];
-                v_args.push(view);
-                v_args.push("--format");
-                v_args.push("slugs");
-                v_args
-            } else {
+                if cfg.require_unblocked {
+                    args.push("--unblocked");
+                }
+                if cfg.require_unassigned {
+                    args.push("--unassigned");
+                }
+                for tag in &cfg.exclude_tags {
+                    args.push("--exclude-tag");
+                    args.push(tag);
+                }
+                if let Some(ref types) = cfg.filter_type {
+                    for t in types {
+                        args.push("--type");
+                        args.push(t);
+                    }
+                }
+                if let Some(ref priorities) = cfg.filter_priority {
+                    for p in priorities {
+                        args.push("--priority");
+                        args.push(p);
+                    }
+                }
+                if let Some(ref container) = cfg.filter_container {
+                    args.push("--container");
+                    args.push(container);
+                }
                 args
             };
 
-            let output = tokio::process::Command::new("git")
-                .args(&cmd)
-                .output()
-                .await?;
+            let output = run_git_cmd(&cmd).await?;
 
             if !output.status.success() {
                 anyhow::bail!(
@@ -405,17 +442,19 @@ async fn run_source_iteration(
             }
         }
         SourceConfig::Events(cfg) => {
-            // Subscribe to git kb events — one poll reads recent events
-            let mut args = vec!["kb", "events", "--format", "json", "--since", "10s"];
+            // Use poll_interval_secs as the --since window to avoid gaps
+            let since_secs = format!("{}s", cfg.poll_interval_secs);
+            let mut args = vec!["kb", "events", "--format", "json", "--since", &since_secs];
+            if let Some(ref filter) = cfg.filter {
+                args.push("--filter");
+                args.push(filter);
+            }
             if let Some(ref path) = cfg.path {
                 args.push("--path");
                 args.push(path);
             }
 
-            let output = tokio::process::Command::new("git")
-                .args(&args)
-                .output()
-                .await?;
+            let output = run_git_cmd(&args).await?;
 
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -443,10 +482,17 @@ async fn run_source_iteration(
             }
         }
         SourceConfig::Script(cfg) => {
-            let output = tokio::process::Command::new("sh")
-                .args(["-c", &cfg.command])
-                .output()
-                .await?;
+            let output = tokio::time::timeout(
+                CMD_TIMEOUT,
+                tokio::process::Command::new("sh")
+                    .args(["-c", &cfg.command])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("script source timed out after {}s", CMD_TIMEOUT.as_secs())
+            })??;
 
             if !output.status.success() {
                 anyhow::bail!(
@@ -487,8 +533,14 @@ async fn run_source_iteration(
     Ok(())
 }
 
-/// Write PID file (checking for duplicates).
-fn write_pid_file(path: &PathBuf) -> Result<()> {
+/// Acquire the PID file atomically using exclusive creation.
+/// This prevents TOCTOU races where two daemons could both pass the
+/// "is it alive?" check before either writes its PID.
+fn acquire_pid_file(path: &PathBuf) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     // Check for existing daemon
     if path.exists() {
         if let Ok(contents) = std::fs::read_to_string(path) {
@@ -507,10 +559,20 @@ fn write_pid_file(path: &PathBuf) -> Result<()> {
         let _ = std::fs::remove_file(path);
     }
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, format!("{}", std::process::id()))?;
+    // Write PID file with exclusive create to prevent races
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!("daemon already running (PID file appeared during startup)")
+            } else {
+                anyhow::anyhow!("failed to create PID file: {}", e)
+            }
+        })?;
+    write!(file, "{}", std::process::id())?;
     Ok(())
 }
 
@@ -532,8 +594,19 @@ pub fn stop_daemon(config: &AtcConfig) -> Result<()> {
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
     if result == 0 {
         println!("Sent SIGTERM to daemon (PID {}).", pid);
-        // Wait a moment and clean up
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Wait for the process to actually exit before removing PID file
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!("daemon PID {} did not exit within 10s after SIGTERM", pid);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let _ = std::fs::remove_file(&pid_file);
     } else {
         // Process doesn't exist — clean up stale PID file

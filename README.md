@@ -312,6 +312,7 @@ CREATE TABLE dispatch_queue (
     dispatch_id TEXT,                        -- FK to dispatches.id once dispatched
     enqueued_at TEXT NOT NULL,
     enqueued_by TEXT,
+    claimed_at  TEXT,
     dispatched_at TEXT,
     error       TEXT
 );
