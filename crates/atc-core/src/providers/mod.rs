@@ -23,6 +23,10 @@ pub struct DispatchContext {
     pub kb_root: PathBuf,
     pub log_dir: PathBuf,
     pub config: Arc<AtcConfig>,
+    /// Comment ID for targeted review (extracted from `--param comment=<url>`).
+    pub comment_id: Option<String>,
+    /// Comment type: "issue", "review_comment", or "review".
+    pub comment_type: Option<String>,
 }
 
 /// Output from a provider — merged into dispatch.
@@ -202,6 +206,8 @@ mod tests {
             kb_root: PathBuf::from("/tmp/kb"),
             log_dir: PathBuf::from("/tmp/logs"),
             config: Arc::new(AtcConfig::default()),
+            comment_id: None,
+            comment_type: None,
         }
     }
 

@@ -225,6 +225,7 @@ pub async fn run_retry(
         // a future schema migration (add `params_json TEXT` column).
         params: HashMap::new(),
         pr_url: record.pr_url.clone(),
+        repo: None,
         inline: false,
         force: false,
         dry_run: false,

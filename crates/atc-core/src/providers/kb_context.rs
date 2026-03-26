@@ -206,6 +206,8 @@ mod tests {
             kb_root: PathBuf::from("/tmp/kb"),
             log_dir: PathBuf::from("/tmp/logs"),
             config: Arc::new(AtcConfig::default()),
+            comment_id: None,
+            comment_type: None,
         }
     }
 

@@ -96,6 +96,148 @@ pub async fn resolve_gh_token() -> Result<String> {
     Ok(token)
 }
 
+/// Extract the head branch name from a GitHub PR URL via `gh pr view`.
+pub async fn extract_pr_head_branch(pr_url: &str) -> Result<String> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            pr_url,
+            "--json",
+            "headRefName",
+            "-q",
+            ".headRefName",
+        ])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh pr view --json headRefName failed (exit {:?}):\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let branch = String::from_utf8(output.stdout)?;
+    let branch = branch.trim().to_string();
+    if branch.is_empty() {
+        anyhow::bail!("gh pr view returned empty headRefName for {}", pr_url);
+    }
+    Ok(branch)
+}
+
+/// Resolve a GitHub PR URL to a local repo path within a meta workspace.
+///
+/// Extracts org/repo from the PR URL and searches `meta project list --recursive --json`
+/// for a matching remote URL. Returns the relative path (e.g., "open-source/atc").
+pub async fn resolve_pr_repo_path(
+    pr_url: &str,
+    meta_workspace_root: &Path,
+) -> Result<Option<String>> {
+    // Extract org/repo from PR URL: "https://github.com/harmony-labs/atc/pull/27" → "harmony-labs/atc"
+    let github_repo = pr_url
+        .strip_prefix("https://github.com/")
+        .and_then(|s| s.split("/pull/").next())
+        .ok_or_else(|| anyhow::anyhow!("cannot extract org/repo from PR URL: {}", pr_url))?;
+
+    let output = tokio::process::Command::new("meta")
+        .args(["project", "list", "--recursive", "--json"])
+        .current_dir(meta_workspace_root)
+        .output()
+        .await;
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            debug!(
+                "meta project list failed (exit {:?}), cannot resolve PR repo path",
+                o.status.code()
+            );
+            return Ok(None);
+        }
+        Err(e) => {
+            debug!("meta not available: {}, cannot resolve PR repo path", e);
+            return Ok(None);
+        }
+    };
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    fn find_repo(obj: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
+        let map = obj.as_object()?;
+        for (key, value) in map {
+            if key == "." {
+                continue;
+            }
+            let full = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{}/{}", prefix, key)
+            };
+            // Normalize remote URL
+            if let Some(repo_url) = value.get("repo").and_then(|v| v.as_str()) {
+                let normalized = repo_url
+                    .trim_start_matches("git@github.com:")
+                    .trim_start_matches("https://github.com/")
+                    .trim_end_matches(".git");
+                if normalized == target {
+                    return Some(full.trim_start_matches("./").to_string());
+                }
+            }
+            // Recurse into nested projects
+            if let Some(children) = value.get("projects") {
+                if let Some(found) = find_repo(children, &full, target) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    Ok(find_repo(&json, "", github_repo))
+}
+
+/// Parse a comment URL to extract the comment ID and type.
+///
+/// Returns `(comment_id, comment_type)` where comment_type is one of:
+/// "issue", "review_comment", "review", or empty string if unrecognized.
+pub fn parse_comment_url(comment_url: &str) -> (Option<String>, Option<String>) {
+    if let Some(fragment) = comment_url.split('#').nth(1) {
+        let id: String = fragment.chars().filter(|c| c.is_ascii_digit()).collect();
+        let ctype = if fragment.starts_with("issuecomment-") {
+            "issue"
+        } else if fragment.starts_with("discussion_r") {
+            "review_comment"
+        } else if fragment.starts_with("pullrequestreview-") {
+            "review"
+        } else {
+            return (None, None);
+        };
+
+        if id.is_empty() {
+            return (None, None);
+        }
+
+        (Some(id), Some(ctype.to_string()))
+    } else {
+        (None, None)
+    }
+}
+
+/// Derive a PR URL from a comment URL by stripping the fragment.
+///
+/// "https://github.com/org/repo/pull/42#issuecomment-123" → "https://github.com/org/repo/pull/42"
+pub fn derive_pr_url_from_comment(comment_url: &str) -> Option<String> {
+    let base = comment_url.split('#').next()?;
+    // Verify it looks like a PR URL
+    if base.contains("/pull/") {
+        Some(base.to_string())
+    } else {
+        None
+    }
+}
+
 /// Compute AGENT_ALLOWED_PATHS for agent sandbox.
 pub fn compute_allowed_paths(worktree_root: &Path, extra_paths: &[String]) -> String {
     let mut paths = vec![
@@ -479,5 +621,65 @@ mod tests {
     #[test]
     fn test_derive_branch_double_hyphen_invariant() {
         assert_eq!(derive_branch("tasks/a--b"), "tasks--a--b");
+    }
+
+    #[test]
+    fn test_parse_comment_url_issue_comment() {
+        let (id, ctype) =
+            parse_comment_url("https://github.com/org/repo/pull/42#issuecomment-123456");
+        assert_eq!(id.as_deref(), Some("123456"));
+        assert_eq!(ctype.as_deref(), Some("issue"));
+    }
+
+    #[test]
+    fn test_parse_comment_url_review_comment() {
+        let (id, ctype) =
+            parse_comment_url("https://github.com/org/repo/pull/42#discussion_r789012");
+        assert_eq!(id.as_deref(), Some("789012"));
+        assert_eq!(ctype.as_deref(), Some("review_comment"));
+    }
+
+    #[test]
+    fn test_parse_comment_url_review() {
+        let (id, ctype) =
+            parse_comment_url("https://github.com/org/repo/pull/42#pullrequestreview-456789");
+        assert_eq!(id.as_deref(), Some("456789"));
+        assert_eq!(ctype.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn test_parse_comment_url_no_fragment() {
+        let (id, ctype) = parse_comment_url("https://github.com/org/repo/pull/42");
+        assert!(id.is_none());
+        assert!(ctype.is_none());
+    }
+
+    #[test]
+    fn test_parse_comment_url_unknown_fragment() {
+        let (id, ctype) = parse_comment_url("https://github.com/org/repo/pull/42#unknown-fragment");
+        assert!(id.is_none());
+        assert!(ctype.is_none());
+    }
+
+    #[test]
+    fn test_derive_pr_url_from_comment() {
+        assert_eq!(
+            derive_pr_url_from_comment("https://github.com/org/repo/pull/42#issuecomment-123"),
+            Some("https://github.com/org/repo/pull/42".to_string())
+        );
+        assert_eq!(
+            derive_pr_url_from_comment("https://github.com/org/repo/pull/42#discussion_r789"),
+            Some("https://github.com/org/repo/pull/42".to_string())
+        );
+        // No fragment
+        assert_eq!(
+            derive_pr_url_from_comment("https://github.com/org/repo/pull/42"),
+            Some("https://github.com/org/repo/pull/42".to_string())
+        );
+        // Not a PR URL
+        assert_eq!(
+            derive_pr_url_from_comment("https://github.com/org/repo/issues/42#issuecomment-123"),
+            None
+        );
     }
 }

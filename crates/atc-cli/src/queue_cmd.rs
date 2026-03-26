@@ -197,6 +197,7 @@ pub async fn dispatch_queue_item(
         },
         params,
         pr_url: None,
+        repo: None,
         inline: false,
         force: false,
         dry_run: false,
