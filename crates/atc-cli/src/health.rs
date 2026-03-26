@@ -96,7 +96,7 @@ pub fn collect_auto_review_candidates(results: &[HealthResult]) -> Vec<&Dispatch
         .filter(|r| {
             r.changed
                 && r.record.status == Status::NeedsReview
-                && r.record.pr_url.is_some()
+                && !r.record.pr_urls.is_empty()
                 && r.record.task_slug.is_some()
                 // Don't dispatch a review-fix for a record that is itself a
                 // review-fix — that would loop.  Failed review-fixes should go
@@ -254,7 +254,7 @@ pub async fn run_health(
         done_records.extend(extra_done);
 
         for record in &done_records {
-            if let Some(ref url) = record.pr_url {
+            if let Some(url) = record.pr_urls.first() {
                 // Skip records whose worktree has already been cleaned up
                 if !record.worktree_path.exists() {
                     continue;
@@ -273,7 +273,7 @@ pub async fn run_health(
                 warn!(id = %record.id, "skipping auto review-fix: missing task_slug");
                 continue;
             };
-            let pr_url = record.pr_url.clone();
+            let pr_url = record.pr_urls.first().cloned();
             emit(
                 json,
                 &format!("Auto-triggering review-fix for {task_slug}..."),
@@ -282,7 +282,7 @@ pub async fn run_health(
                 input: format!("task {task_slug}"),
                 directive: Some(Directive::ReviewFix),
                 pr_url,
-                repo: None,
+                repos: vec![],
                 params: std::collections::HashMap::new(),
                 inline: false,
                 force: false,
@@ -384,7 +384,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
-            pr_url: None,
+            pr_urls: vec![],
             no_worktree: false,
             original_input: None,
             checks,
@@ -405,7 +405,7 @@ mod tests {
         cost_usd: Option<f64>,
     ) -> DispatchRecord {
         DispatchRecord {
-            pr_url,
+            pr_urls: pr_url.into_iter().collect(),
             cost_usd,
             ..make_record(status, checks)
         }

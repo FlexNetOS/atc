@@ -131,6 +131,9 @@ mod tests {
         async fn set_pr_url(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
+        async fn add_pr_url(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn increment_retries(
             &self,
             _: &str,
@@ -186,7 +189,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
-            pr_url: None,
+            pr_urls: vec![],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),

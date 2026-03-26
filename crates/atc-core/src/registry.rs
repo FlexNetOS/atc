@@ -47,6 +47,9 @@ pub trait Registry: Send + Sync {
         updated_at: DateTime<Utc>,
     ) -> Result<()>;
     async fn set_pr_url(&self, id: &str, url: &str) -> Result<()>;
+    /// Append a PR URL to the JSON array of tracked PR URLs.
+    /// Deduplicates: if the URL is already present, this is a no-op.
+    async fn add_pr_url(&self, id: &str, url: &str) -> Result<()>;
     async fn increment_retries(
         &self,
         id: &str,
@@ -86,6 +89,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   retries                   INTEGER NOT NULL DEFAULT 0,
   resolver                  TEXT NOT NULL,
   pr_url                    TEXT,
+  pr_urls                   TEXT NOT NULL DEFAULT '[]',
   no_worktree               INTEGER NOT NULL DEFAULT 0,
   original_input            TEXT,
   kb_root                   TEXT,
@@ -230,6 +234,24 @@ impl SqliteRegistry {
                     .await?;
             }
 
+            // Add pr_urls JSON array column if missing (multi-repo PR tracking migration)
+            let (has_pr_urls,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'pr_urls'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_pr_urls == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN pr_urls TEXT NOT NULL DEFAULT '[]'")
+                    .execute(pool)
+                    .await?;
+                // Backfill pr_urls from existing pr_url column
+                sqlx::query(
+                    "UPDATE dispatches SET pr_urls = CASE WHEN pr_url IS NOT NULL THEN json_array(pr_url) ELSE '[]' END",
+                )
+                .execute(pool)
+                .await?;
+            }
+
             // Rename mode → directive column (Mode→Directive migration)
             let (has_mode_col,): (i32,) = sqlx::query_as(
                 "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'mode'",
@@ -318,7 +340,10 @@ impl SqliteRegistry {
             retries: u32::try_from(row.get::<i32, _>("retries"))
                 .map_err(|_| anyhow::anyhow!("invalid retries value in database"))?,
             resolver: row.get("resolver"),
-            pr_url: row.get("pr_url"),
+            pr_urls: {
+                let json_str: String = row.get("pr_urls");
+                serde_json::from_str(&json_str).unwrap_or_default()
+            },
             no_worktree: row.get::<i32, _>("no_worktree") != 0,
             original_input: row.get("original_input"),
             checks: HealthChecks {
@@ -351,16 +376,18 @@ impl SqliteRegistry {
 #[async_trait]
 impl Registry for SqliteRegistry {
     async fn insert(&self, record: &DispatchRecord) -> Result<()> {
+        let pr_urls_json = serde_json::to_string(&record.pr_urls)?;
+        let pr_url_compat = record.pr_urls.first().cloned();
         sqlx::query(
             r#"INSERT INTO dispatches (
                 id, task_slug, branch, worktree_path, session, log_file, status, directive, retries,
-                resolver, pr_url, no_worktree, original_input, kb_root,
+                resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
                 check_agent_exited_clean, check_branch_pushed, check_pr_created,
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
                 cost_usd, num_turns, duration_ms, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
             )"#,
         )
         .bind(&record.id)
@@ -383,7 +410,8 @@ impl Registry for SqliteRegistry {
         .bind(record.directive.as_str())
         .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
         .bind(&record.resolver)
-        .bind(&record.pr_url)
+        .bind(&pr_url_compat)
+        .bind(&pr_urls_json)
         .bind(record.no_worktree as i32)
         .bind(&record.original_input)
         .bind(
@@ -544,18 +572,50 @@ impl Registry for SqliteRegistry {
     }
 
     async fn set_pr_url(&self, id: &str, url: &str) -> Result<()> {
+        // For backward compat, set_pr_url replaces the pr_urls array with a single URL
+        let pr_urls_json = serde_json::to_string(&vec![url])?;
         let now = Utc::now().to_rfc3339();
-        let result =
-            sqlx::query("UPDATE dispatches SET pr_url = ?1, updated_at = ?2 WHERE id = ?3")
-                .bind(url)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query(
+            "UPDATE dispatches SET pr_url = ?1, pr_urls = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(url)
+        .bind(&pr_urls_json)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
             "no dispatch record found for id: {id}"
         );
+        Ok(())
+    }
+
+    async fn add_pr_url(&self, id: &str, url: &str) -> Result<()> {
+        // Read current pr_urls, append if not already present, write back
+        let now = Utc::now().to_rfc3339();
+        let row: Option<(String,)> = sqlx::query_as("SELECT pr_urls FROM dispatches WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let (current_json,) =
+            row.ok_or_else(|| anyhow::anyhow!("no dispatch record found for id: {id}"))?;
+        let mut urls: Vec<String> = serde_json::from_str(&current_json).unwrap_or_default();
+        if !urls.contains(&url.to_string()) {
+            urls.push(url.to_string());
+        }
+        let new_json = serde_json::to_string(&urls)?;
+        // Also update pr_url compat column with the first URL
+        let pr_url_compat = urls.first().cloned();
+        sqlx::query(
+            "UPDATE dispatches SET pr_url = ?1, pr_urls = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(&pr_url_compat)
+        .bind(&new_json)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -598,6 +658,7 @@ impl Registry for SqliteRegistry {
                 check_reviews_approved = 0,
                 check_threads_resolved = 0,
                 pr_url = NULL,
+                pr_urls = '[]',
                 cost_usd = NULL,
                 num_turns = NULL,
                 duration_ms = NULL
@@ -642,8 +703,9 @@ impl Registry for SqliteRegistry {
     }
 
     async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>> {
+        // Search within the pr_urls JSON array using SQLite json_each
         let rows = sqlx::query(
-            "SELECT * FROM dispatches WHERE pr_url = ?1 ORDER BY dispatched_at DESC, id DESC",
+            "SELECT DISTINCT d.* FROM dispatches d, json_each(d.pr_urls) j WHERE j.value = ?1 ORDER BY d.dispatched_at DESC, d.id DESC",
         )
         .bind(pr_url)
         .fetch_all(&self.pool)
@@ -1038,7 +1100,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
-            pr_url: None,
+            pr_urls: vec![],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),
@@ -1160,10 +1222,7 @@ mod tests {
             .unwrap();
 
         let fetched = registry.get(id).await.unwrap().unwrap();
-        assert_eq!(
-            fetched.pr_url.as_deref(),
-            Some("https://github.com/org/repo/pull/1")
-        );
+        assert_eq!(fetched.pr_urls, vec!["https://github.com/org/repo/pull/1"]);
     }
 
     #[tokio::test]
@@ -1218,7 +1277,7 @@ mod tests {
     async fn test_round_trip_with_all_optional_fields() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let mut record = sample_record("full-test");
-        record.pr_url = Some("https://github.com/org/repo/pull/99".to_string());
+        record.pr_urls = vec!["https://github.com/org/repo/pull/99".to_string()];
         record.cost_usd = Some(4.56);
         record.num_turns = Some(42);
         record.duration_ms = Some(120_000);
@@ -1235,7 +1294,7 @@ mod tests {
         registry.insert(&record).await.unwrap();
 
         let fetched = registry.get("full-test").await.unwrap().unwrap();
-        assert_eq!(fetched.pr_url, record.pr_url);
+        assert_eq!(fetched.pr_urls, record.pr_urls);
         assert_eq!(fetched.cost_usd, record.cost_usd);
         assert_eq!(fetched.num_turns, record.num_turns);
         assert_eq!(fetched.duration_ms, record.duration_ms);
@@ -1420,11 +1479,11 @@ mod tests {
     async fn test_find_by_pr_url() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let mut r1 = sample_record("id-1");
-        r1.pr_url = Some("https://github.com/org/repo/pull/1".to_string());
+        r1.pr_urls = vec!["https://github.com/org/repo/pull/1".to_string()];
         let mut r2 = sample_record("id-2");
-        r2.pr_url = Some("https://github.com/org/repo/pull/1".to_string());
+        r2.pr_urls = vec!["https://github.com/org/repo/pull/1".to_string()];
         let mut r3 = sample_record("id-3");
-        r3.pr_url = None;
+        r3.pr_urls = vec![];
 
         for r in [&r1, &r2, &r3] {
             registry.insert(r).await.unwrap();
@@ -1435,6 +1494,184 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_add_pr_url_appends_to_json_array() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "multi-pr-test";
+        registry.insert(&sample_record(id)).await.unwrap();
+
+        // Add first PR URL
+        registry
+            .add_pr_url(id, "https://github.com/org/repo-a/pull/1")
+            .await
+            .unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.pr_urls,
+            vec!["https://github.com/org/repo-a/pull/1"]
+        );
+
+        // Add second PR URL
+        registry
+            .add_pr_url(id, "https://github.com/org/repo-b/pull/2")
+            .await
+            .unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.pr_urls,
+            vec![
+                "https://github.com/org/repo-a/pull/1",
+                "https://github.com/org/repo-b/pull/2",
+            ]
+        );
+
+        // Dedup: adding same URL again should be a no-op
+        registry
+            .add_pr_url(id, "https://github.com/org/repo-a/pull/1")
+            .await
+            .unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(fetched.pr_urls.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_pr_url_searches_json_array() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut r1 = sample_record("id-1");
+        r1.pr_urls = vec![
+            "https://github.com/org/core/pull/1".to_string(),
+            "https://github.com/org/api/pull/10".to_string(),
+        ];
+        registry.insert(&r1).await.unwrap();
+
+        // Should find by either URL in the array
+        let results = registry
+            .find_by_pr_url("https://github.com/org/core/pull/1")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
+
+        let results = registry
+            .find_by_pr_url("https://github.com/org/api/pull/10")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
+
+        // Should not find by URL not in the array
+        let results = registry
+            .find_by_pr_url("https://github.com/org/other/pull/99")
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_multi_pr_urls_round_trip() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut record = sample_record("multi-pr-rt");
+        record.pr_urls = vec![
+            "https://github.com/org/core/pull/62".to_string(),
+            "https://github.com/org/api/pull/136".to_string(),
+            "https://github.com/org/ui/pull/35".to_string(),
+        ];
+        registry.insert(&record).await.unwrap();
+
+        let fetched = registry.get("multi-pr-rt").await.unwrap().unwrap();
+        assert_eq!(fetched.pr_urls, record.pr_urls);
+    }
+
+    #[tokio::test]
+    async fn test_set_pr_url_replaces_pr_urls_array() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "replace-test";
+        let mut record = sample_record(id);
+        record.pr_urls = vec![
+            "https://github.com/org/a/pull/1".to_string(),
+            "https://github.com/org/b/pull/2".to_string(),
+        ];
+        registry.insert(&record).await.unwrap();
+
+        // set_pr_url replaces the entire array
+        registry
+            .set_pr_url(id, "https://github.com/org/c/pull/3")
+            .await
+            .unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(fetched.pr_urls, vec!["https://github.com/org/c/pull/3"]);
+    }
+
+    #[tokio::test]
+    async fn test_pr_urls_migration_backfill() {
+        // Test that migration from pr_url → pr_urls works correctly
+        // by simulating a legacy database with only pr_url column
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("migration-test.db");
+
+        // Create a database with the old schema (no pr_urls column)
+        {
+            let url = format!("sqlite:{}?mode=rwc", db_path.display());
+            let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+            sqlx::query("PRAGMA journal_mode=WAL")
+                .execute(&pool)
+                .await
+                .unwrap();
+            // Create dispatches table WITHOUT pr_urls column
+            sqlx::query(
+                r#"CREATE TABLE dispatches (
+                    id TEXT PRIMARY KEY,
+                    task_slug TEXT,
+                    branch TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    session TEXT NOT NULL,
+                    log_file TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    directive TEXT NOT NULL,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    resolver TEXT NOT NULL,
+                    pr_url TEXT,
+                    no_worktree INTEGER NOT NULL DEFAULT 0,
+                    original_input TEXT,
+                    kb_root TEXT,
+                    check_agent_exited_clean INTEGER NOT NULL DEFAULT 0,
+                    check_branch_pushed INTEGER NOT NULL DEFAULT 0,
+                    check_pr_created INTEGER NOT NULL DEFAULT 0,
+                    check_ci_passed INTEGER NOT NULL DEFAULT 0,
+                    check_reviews_approved INTEGER NOT NULL DEFAULT 0,
+                    check_threads_resolved INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL,
+                    num_turns INTEGER,
+                    duration_ms INTEGER,
+                    artifacts TEXT,
+                    dispatched_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            // Insert a record with a pr_url
+            sqlx::query(
+                r#"INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, directive, retries, resolver, pr_url, dispatched_at, updated_at)
+                   VALUES ('legacy-1', 'tasks/old', 'branch', '/tmp/wt', 'session', '/tmp/log', 'done', 'implement', 0, 'task', 'https://github.com/org/repo/pull/42', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Open with the new schema — migration should backfill pr_urls
+        let registry = SqliteRegistry::open(&db_path).await.unwrap();
+        let record = registry.get("legacy-1").await.unwrap().unwrap();
+        assert_eq!(
+            record.pr_urls,
+            vec!["https://github.com/org/repo/pull/42"],
+            "migration should backfill pr_urls from pr_url"
+        );
     }
 
     #[tokio::test]
@@ -1612,7 +1849,7 @@ mod tests {
         assert_eq!(fetched.status, Status::Running);
         assert_eq!(fetched.session, "new-session");
         assert!(!fetched.checks.agent_exited_clean);
-        assert_eq!(fetched.pr_url, None);
+        assert!(fetched.pr_urls.is_empty());
         assert_eq!(fetched.cost_usd, None);
     }
 

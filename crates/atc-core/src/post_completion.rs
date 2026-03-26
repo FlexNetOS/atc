@@ -112,14 +112,17 @@ pub async fn run_post_completion(
         registry.update_status(&input.dispatch_id, status).await?;
     }
 
-    // 8. Store PR URL (prefer extracted URL, fall back to registry record)
-    let extracted_pr_url = artifacts.pr_urls.first().cloned();
-    let pr_url = extracted_pr_url.clone().or_else(|| record.pr_url.clone());
-    if let Some(ref url) = extracted_pr_url {
-        if let Err(e) = registry.set_pr_url(&input.dispatch_id, url).await {
-            warn!(id = %input.dispatch_id, error = %e, "failed to set PR URL");
+    // 8. Store all discovered PR URLs (merge extracted with existing)
+    let mut all_pr_urls = record.pr_urls.clone();
+    for url in &artifacts.pr_urls {
+        if !all_pr_urls.contains(url) {
+            all_pr_urls.push(url.clone());
+            if let Err(e) = registry.add_pr_url(&input.dispatch_id, url).await {
+                warn!(id = %input.dispatch_id, error = %e, "failed to add PR URL");
+            }
         }
     }
+    let pr_url = all_pr_urls.first().cloned();
 
     // 9. Store artifacts as JSON blob (always store — artifacts are additive metadata)
     let json = serde_json::to_string(&artifacts)?;

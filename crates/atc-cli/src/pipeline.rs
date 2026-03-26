@@ -159,49 +159,59 @@ impl<'a> DispatchPipeline<'a> {
         // falling back to workspace_root for resolvers that don't set it.
         let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
 
-        let (worktree_path, wt_created, wt_is_meta, repo_for_context) = if opts.no_worktree {
+        let (worktree_path, wt_created, wt_is_meta, repos_for_context) = if opts.no_worktree {
             // Run in current directory, no worktree creation
-            (cwd.clone(), false, false, None::<String>)
+            (cwd.clone(), false, false, Vec::<String>::new())
         } else {
             // Repo resolution priority:
-            // 1. CLI --repo flag (explicit override, highest priority)
+            // 1. CLI --repo flag(s) (explicit override, highest priority)
             // 2. PR URL → resolve_pr_repo_path() (auto-resolved)
             // 3. Config dispatch.repo
             // 4. Meta discovery fallback
-            let repo = if let Some(ref cli_repo) = opts.repo {
-                Some(cli_repo.clone())
+            let repos: Vec<String> = if !opts.repos.is_empty() {
+                opts.repos.clone()
             } else if let Some(ref pr_url) = effective_pr_url {
                 match resolve_pr_repo_path(pr_url, &workspace_root).await {
                     Ok(Some(r)) => {
                         info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
-                        Some(r)
+                        vec![r]
                     }
                     Ok(None) => {
                         info!(pr_url = %pr_url, "could not resolve PR repo to local path, using config/discovery fallback");
                         match dispatch_cfg.resolved_repo() {
-                            Some(r) => Some(r.to_string()),
-                            None => meta.as_ref().map(|m| m.repo.clone()),
+                            Some(r) => vec![r.to_string()],
+                            None => meta
+                                .as_ref()
+                                .map(|m| vec![m.repo.clone()])
+                                .unwrap_or_default(),
                         }
                     }
                     Err(e) => {
                         warn!(pr_url = %pr_url, error = %e, "PR repo resolution failed, using config/discovery fallback");
                         match dispatch_cfg.resolved_repo() {
-                            Some(r) => Some(r.to_string()),
-                            None => meta.as_ref().map(|m| m.repo.clone()),
+                            Some(r) => vec![r.to_string()],
+                            None => meta
+                                .as_ref()
+                                .map(|m| vec![m.repo.clone()])
+                                .unwrap_or_default(),
                         }
                     }
                 }
             } else {
                 match dispatch_cfg.resolved_repo() {
-                    Some(r) => Some(r.to_string()),
-                    None => meta.as_ref().map(|m| m.repo.clone()),
+                    Some(r) => vec![r.to_string()],
+                    None => meta
+                        .as_ref()
+                        .map(|m| vec![m.repo.clone()])
+                        .unwrap_or_default(),
                 }
             };
 
             let worktree_base = dispatch_cfg.resolved_worktree_base();
+            let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
             let wt_opts = WorktreeOpts {
                 worktree_base: &worktree_base,
-                repo: repo.as_deref(),
+                repos: repo_refs,
                 branch: &resolved.branch,
                 meta_workspace_root: &workspace_root,
                 kb_root,
@@ -215,12 +225,7 @@ impl<'a> DispatchPipeline<'a> {
                     return Err(e);
                 }
             };
-            (
-                wt_result.path,
-                wt_result.created,
-                wt_result.is_meta,
-                repo.clone(),
-            )
+            (wt_result.path, wt_result.created, wt_result.is_meta, repos)
         };
 
         // 5b. Load per-project .dispatch/env (after worktree exists, before env setup)
@@ -456,14 +461,13 @@ impl<'a> DispatchPipeline<'a> {
             }
 
             // Inject meta workspace context for meta worktrees
-            if wt_is_meta {
-                if let Some(ref repo_rel) = repo_for_context {
-                    let context_line = format!(
-                        "\n**Meta worktree context:** The target repo is `{}` within the worktree at `{}`.\n",
-                        repo_rel, wt_path_str
-                    );
-                    rendered_prompt.push_str(&context_line);
-                }
+            if wt_is_meta && !repos_for_context.is_empty() {
+                let repos_display = repos_for_context.join("`, `");
+                let context_line = format!(
+                    "\n**Meta worktree context:** The target repo(s): `{}` within the worktree at `{}`.\n",
+                    repos_display, wt_path_str
+                );
+                rendered_prompt.push_str(&context_line);
             }
         }
 
@@ -564,7 +568,7 @@ impl<'a> DispatchPipeline<'a> {
             directive: resolved.directive.clone(),
             retries: opts.retries,
             resolver: resolver.name().to_string(),
-            pr_url: effective_pr_url.clone(),
+            pr_urls: effective_pr_url.iter().cloned().collect(),
             no_worktree: opts.no_worktree,
             original_input: Some(input.to_string()),
             checks: HealthChecks::default(),
@@ -676,7 +680,7 @@ impl<'a> DispatchPipeline<'a> {
             directive: resolved.directive.clone(),
             retries: opts.retries,
             resolver: resolver_name.to_string(),
-            pr_url: opts.pr_url.clone(),
+            pr_urls: opts.pr_url.iter().cloned().collect(),
             no_worktree: opts.no_worktree,
             original_input: None,
             checks: HealthChecks::default(),

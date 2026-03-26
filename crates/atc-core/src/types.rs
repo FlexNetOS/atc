@@ -18,7 +18,7 @@ pub struct DispatchRecord {
     pub retries: u32,
     /// Which InputResolver created this dispatch ("task", "template", "prompt").
     pub resolver: String,
-    pub pr_url: Option<String>,
+    pub pr_urls: Vec<String>,
     /// Whether the dispatch was created with `--no-worktree` (run in current directory).
     pub no_worktree: bool,
     /// The raw input string passed to the pipeline (slug, template name, or prompt).
@@ -178,9 +178,9 @@ pub struct RunOpts {
     pub params: std::collections::HashMap<String, String>,
     /// PR URL for review-fix / pr-comments directives.
     pub pr_url: Option<String>,
-    /// Target repo path within meta workspace (e.g., "open-source/atc").
+    /// Target repo path(s) within meta workspace (e.g., "open-source/atc").
     /// Overrides auto-discovered repo path from PR URL or config.
-    pub repo: Option<String>,
+    pub repos: Vec<String>,
     /// Run inline (synchronous, no tmux).
     pub inline: bool,
     /// Force dispatch even if worktree is in use.
