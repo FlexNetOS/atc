@@ -778,9 +778,16 @@ impl Default for DaemonConfig {
 
 impl DaemonConfig {
     /// Resolve effective PID file path.
-    pub fn resolved_pid_file(&self) -> PathBuf {
+    pub fn resolved_pid_file(&self, config_dir: Option<&Path>) -> PathBuf {
         if let Some(ref p) = self.pid_file {
-            return expand_tilde(p);
+            let p = expand_tilde(p);
+            return if p.is_absolute() {
+                p
+            } else if let Some(dir) = config_dir {
+                dir.join(p)
+            } else {
+                p
+            };
         }
         let root = std::env::var("ATC_ROOT")
             .map(|p| expand_tilde(Path::new(&p)))
@@ -1983,7 +1990,7 @@ pid_file = "/tmp/atc.pid"
     #[test]
     fn test_resolved_pid_file_default() {
         let cfg = DaemonConfig::default();
-        let resolved = cfg.resolved_pid_file();
+        let resolved = cfg.resolved_pid_file(None);
         assert!(
             resolved.to_string_lossy().ends_with("daemon.pid"),
             "unexpected path: {resolved:?}"
@@ -1996,7 +2003,10 @@ pid_file = "/tmp/atc.pid"
             pid_file: Some(PathBuf::from("/custom/daemon.pid")),
             ..Default::default()
         };
-        assert_eq!(cfg.resolved_pid_file(), PathBuf::from("/custom/daemon.pid"));
+        assert_eq!(
+            cfg.resolved_pid_file(None),
+            PathBuf::from("/custom/daemon.pid")
+        );
     }
 
     #[test]
@@ -2005,6 +2015,31 @@ pid_file = "/tmp/atc.pid"
             pid_file: Some(PathBuf::from("~/atc/daemon.pid")),
             ..Default::default()
         };
-        assert_eq!(cfg.resolved_pid_file(), home_dir().join("atc/daemon.pid"));
+        assert_eq!(
+            cfg.resolved_pid_file(None),
+            home_dir().join("atc/daemon.pid")
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_relative_with_config_dir() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("daemon.pid")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolved_pid_file(Some(Path::new("/project/root"))),
+            PathBuf::from("/project/root/daemon.pid")
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_relative_without_config_dir() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("daemon.pid")),
+            ..Default::default()
+        };
+        // Without config_dir, relative path stays relative
+        assert_eq!(cfg.resolved_pid_file(None), PathBuf::from("daemon.pid"));
     }
 }

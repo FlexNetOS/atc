@@ -58,7 +58,9 @@ pub async fn run_daemon(
     };
 
     // PID file — use exclusive creation to prevent races
-    let pid_file = config.daemon.resolved_pid_file();
+    let pid_file = config
+        .daemon
+        .resolved_pid_file(config.config_dir.as_deref());
     acquire_pid_file(&pid_file)?;
     info!(pid_file = %pid_file.display(), "daemon starting");
 
@@ -176,14 +178,18 @@ pub async fn run_daemon(
                         break; // At capacity, wait for next cycle
                     }
 
-                    if !queue.queue_claim(&item.id).await.unwrap_or(false) {
-                        continue;
-                    }
+                    let claim_token = match queue.queue_claim(&item.id).await {
+                        Ok(Some(token)) => token,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            warn!(queue_id = %item.id, error = %e, "failed to claim queue item");
+                            break;
+                        }
+                    };
 
                     let label = log_label(&item);
                     match crate::queue_cmd::dispatch_queue_item(
                         &item,
-                        queue.as_ref(),
                         queue.as_ref(), // Registry
                         executor.as_ref(),
                         config,
@@ -194,8 +200,9 @@ pub async fn run_daemon(
                             // Persist dispatch_id while still 'dispatching' so
                             // recovery can correlate even if we crash before the
                             // status flip.
-                            if let Err(e) =
-                                queue.queue_set_dispatch_id(&item.id, &dispatch_id).await
+                            if let Err(e) = queue
+                                .queue_set_dispatch_id(&item.id, &claim_token, &dispatch_id)
+                                .await
                             {
                                 warn!(
                                     queue_id = %item.id,
@@ -203,8 +210,9 @@ pub async fn run_daemon(
                                     "failed to persist dispatch_id for crash recovery"
                                 );
                             }
-                            if let Err(e) =
-                                queue.queue_mark_dispatched(&item.id, &dispatch_id).await
+                            if let Err(e) = queue
+                                .queue_mark_dispatched(&item.id, &claim_token, &dispatch_id)
+                                .await
                             {
                                 error!(
                                     queue_id = %item.id,
@@ -221,7 +229,16 @@ pub async fn run_daemon(
                         }
                         Err(e) => {
                             let err_msg = format!("{:#}", e);
-                            let _ = queue.queue_mark_failed(&item.id, &err_msg).await;
+                            if let Err(mark_err) = queue
+                                .queue_mark_failed(&item.id, &claim_token, &err_msg)
+                                .await
+                            {
+                                warn!(
+                                    queue_id = %item.id,
+                                    error = %mark_err,
+                                    "failed to mark queue item failed"
+                                );
+                            }
                             warn!(
                                 queue_id = %item.id,
                                 input = %label,
@@ -363,6 +380,9 @@ async fn start_sources(
                 .await
                 {
                     warn!(source = %name, error = %e, "source iteration failed");
+                }
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
                 }
                 // Wait for poll interval or shutdown signal
                 tokio::select! {
@@ -658,7 +678,9 @@ fn acquire_pid_file(path: &PathBuf) -> Result<()> {
 
 /// Stop a running daemon.
 pub async fn stop_daemon(config: &AtcConfig) -> Result<()> {
-    let pid_file = config.daemon.resolved_pid_file();
+    let pid_file = config
+        .daemon
+        .resolved_pid_file(config.config_dir.as_deref());
     if !pid_file.exists() {
         println!("No daemon running (PID file not found).");
         return Ok(());
@@ -703,7 +725,9 @@ pub async fn daemon_status(
     registry: &dyn Registry,
     queues: &[String],
 ) -> Result<()> {
-    let pid_file = config.daemon.resolved_pid_file();
+    let pid_file = config
+        .daemon
+        .resolved_pid_file(config.config_dir.as_deref());
     let daemon_running = if pid_file.exists() {
         if let Ok(contents) = std::fs::read_to_string(&pid_file) {
             if let Ok(pid) = contents.trim().parse::<u32>() {

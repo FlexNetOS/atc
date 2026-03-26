@@ -215,19 +215,32 @@ pub trait DispatchQueue: Send + Sync {
     async fn queue_peek(&self, queue_name: &str, limit: u32) -> Result<Vec<QueueRow>>;
 
     /// Atomically claim a pending item for dispatch (set status = 'dispatching').
-    /// Returns true if the claim succeeded (row was still pending).
-    async fn queue_claim(&self, id: &str) -> Result<bool>;
+    /// Returns `Some(claim_token)` if the claim succeeded, `None` if the row was
+    /// no longer pending. The claim token must be passed to subsequent writes
+    /// (`queue_set_dispatch_id`, `queue_mark_dispatched`, `queue_mark_failed`) so
+    /// they only affect this specific claim instance.
+    async fn queue_claim(&self, id: &str) -> Result<Option<String>>;
 
     /// Persist the dispatch_id on a 'dispatching' row before flipping status.
     /// This ensures recovery can correlate even if the process crashes before
     /// `queue_mark_dispatched` completes.
-    async fn queue_set_dispatch_id(&self, id: &str, dispatch_id: &str) -> Result<()>;
+    async fn queue_set_dispatch_id(
+        &self,
+        id: &str,
+        claim_token: &str,
+        dispatch_id: &str,
+    ) -> Result<()>;
 
     /// Mark a queue item as dispatched with the registry dispatch_id.
-    async fn queue_mark_dispatched(&self, id: &str, dispatch_id: &str) -> Result<()>;
+    async fn queue_mark_dispatched(
+        &self,
+        id: &str,
+        claim_token: &str,
+        dispatch_id: &str,
+    ) -> Result<()>;
 
     /// Mark a queue item as failed with an error message.
-    async fn queue_mark_failed(&self, id: &str, error: &str) -> Result<()>;
+    async fn queue_mark_failed(&self, id: &str, claim_token: &str, error: &str) -> Result<()>;
 
     /// Clear all pending items from a queue.
     async fn queue_clear(&self, queue_name: &str) -> Result<u64>;

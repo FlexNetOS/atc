@@ -89,24 +89,31 @@ pub async fn run_queue_drain(
 
         for item in items {
             // Claim
-            if !queue.queue_claim(&item.id).await? {
-                continue; // someone else claimed it
-            }
+            let claim_token = match queue.queue_claim(&item.id).await? {
+                Some(token) => token,
+                None => continue, // someone else claimed it
+            };
 
             let label = crate::daemon::log_label(&item);
 
             // Convert to RunOpts and dispatch
-            match dispatch_queue_item(&item, queue, registry, executor, config).await {
+            match dispatch_queue_item(&item, registry, executor, config).await {
                 Ok(dispatch_id) => {
                     // Persist dispatch_id while still 'dispatching' for crash recovery
-                    if let Err(e) = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await {
+                    if let Err(e) = queue
+                        .queue_set_dispatch_id(&item.id, &claim_token, &dispatch_id)
+                        .await
+                    {
                         warn!(
                             queue_id = %item.id,
                             error = %e,
                             "failed to persist dispatch_id for crash recovery"
                         );
                     }
-                    if let Err(e) = queue.queue_mark_dispatched(&item.id, &dispatch_id).await {
+                    if let Err(e) = queue
+                        .queue_mark_dispatched(&item.id, &claim_token, &dispatch_id)
+                        .await
+                    {
                         error!(
                             queue_id = %item.id,
                             error = %e,
@@ -123,7 +130,10 @@ pub async fn run_queue_drain(
                 }
                 Err(e) => {
                     let err_msg = format!("{:#}", e);
-                    if let Err(mark_err) = queue.queue_mark_failed(&item.id, &err_msg).await {
+                    if let Err(mark_err) = queue
+                        .queue_mark_failed(&item.id, &claim_token, &err_msg)
+                        .await
+                    {
                         warn!(
                             queue_id = %item.id,
                             error = %mark_err,
@@ -152,7 +162,6 @@ pub async fn run_queue_drain(
 /// Convert a queue row to RunOpts and dispatch through the pipeline.
 pub async fn dispatch_queue_item(
     row: &QueueRow,
-    _queue: &dyn DispatchQueue,
     registry: &dyn Registry,
     executor: &dyn AgentExecutor,
     config: &AtcConfig,
@@ -193,10 +202,14 @@ pub async fn dispatch_queue_item(
     // Build resolver chain
     let all_resolvers = crate::resolvers::build_resolvers(config);
     let resolvers_to_use = if force_task {
-        all_resolvers
+        let filtered: Vec<_> = all_resolvers
             .into_iter()
             .filter(|r| r.name() == "task")
-            .collect()
+            .collect();
+        if filtered.is_empty() {
+            anyhow::bail!("queue item requires task resolver but none is configured");
+        }
+        filtered
     } else {
         all_resolvers
     };

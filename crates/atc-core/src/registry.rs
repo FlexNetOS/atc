@@ -839,48 +839,63 @@ impl DispatchQueue for SqliteRegistry {
         rows.iter().map(Self::queue_row_from_sqlite).collect()
     }
 
-    async fn queue_claim(&self, id: &str) -> Result<bool> {
-        let now = Utc::now().to_rfc3339();
+    async fn queue_claim(&self, id: &str) -> Result<Option<String>> {
+        let claim_token = Utc::now().to_rfc3339();
         let result = sqlx::query(
             "UPDATE dispatch_queue SET status = 'dispatching', claimed_at = ?1 WHERE id = ?2 AND status = 'pending'",
         )
-        .bind(&now)
+        .bind(&claim_token)
         .bind(id)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        Ok((result.rows_affected() > 0).then_some(claim_token))
     }
 
-    async fn queue_set_dispatch_id(&self, id: &str, dispatch_id: &str) -> Result<()> {
+    async fn queue_set_dispatch_id(
+        &self,
+        id: &str,
+        claim_token: &str,
+        dispatch_id: &str,
+    ) -> Result<()> {
         sqlx::query(
-            "UPDATE dispatch_queue SET dispatch_id = ?1 WHERE id = ?2 AND status = 'dispatching'",
+            "UPDATE dispatch_queue SET dispatch_id = ?1 WHERE id = ?2 AND status = 'dispatching' AND claimed_at = ?3",
         )
         .bind(dispatch_id)
         .bind(id)
+        .bind(claim_token)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    async fn queue_mark_dispatched(&self, id: &str, dispatch_id: &str) -> Result<()> {
+    async fn queue_mark_dispatched(
+        &self,
+        id: &str,
+        claim_token: &str,
+        dispatch_id: &str,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "UPDATE dispatch_queue SET status = 'dispatched', dispatch_id = ?1, dispatched_at = ?2 WHERE id = ?3 AND status = 'dispatching'",
+            "UPDATE dispatch_queue SET status = 'dispatched', dispatch_id = ?1, dispatched_at = ?2 WHERE id = ?3 AND status = 'dispatching' AND claimed_at = ?4",
         )
         .bind(dispatch_id)
         .bind(&now)
         .bind(id)
+        .bind(claim_token)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    async fn queue_mark_failed(&self, id: &str, error: &str) -> Result<()> {
-        sqlx::query("UPDATE dispatch_queue SET status = 'failed', error = ?1 WHERE id = ?2")
-            .bind(error)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+    async fn queue_mark_failed(&self, id: &str, claim_token: &str, error: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE dispatch_queue SET status = 'failed', error = ?1 WHERE id = ?2 AND status = 'dispatching' AND claimed_at = ?3",
+        )
+        .bind(error)
+        .bind(id)
+        .bind(claim_token)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -955,7 +970,9 @@ impl DispatchQueue for SqliteRegistry {
                         .await?;
 
                 if exists > 0 {
-                    sqlx::query("UPDATE dispatch_queue SET status = 'dispatched' WHERE id = ?1 AND status = 'dispatching'")
+                    let now = Utc::now().to_rfc3339();
+                    sqlx::query("UPDATE dispatch_queue SET status = 'dispatched', dispatched_at = ?1 WHERE id = ?2 AND status = 'dispatching'")
+                        .bind(&now)
                         .bind(&id)
                         .execute(&self.pool)
                         .await?;
@@ -1827,13 +1844,17 @@ mod tests {
         };
 
         // Claim
-        assert!(registry.queue_claim(&id).await.unwrap());
+        let claim_token = registry
+            .queue_claim(&id)
+            .await
+            .unwrap()
+            .expect("claim should succeed");
         // Double claim should fail
-        assert!(!registry.queue_claim(&id).await.unwrap());
+        assert!(registry.queue_claim(&id).await.unwrap().is_none());
 
         // Mark dispatched
         registry
-            .queue_mark_dispatched(&id, "dispatch-123")
+            .queue_mark_dispatched(&id, &claim_token, "dispatch-123")
             .await
             .unwrap();
 
@@ -1920,7 +1941,11 @@ mod tests {
             EnqueueResult::Enqueued { id } => id,
             _ => panic!("expected Enqueued"),
         };
-        registry.queue_claim(&id).await.unwrap();
+        registry
+            .queue_claim(&id)
+            .await
+            .unwrap()
+            .expect("claim should succeed");
 
         // Back-date claimed_at so recovery considers it stale
         let old_time = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
@@ -1955,7 +1980,11 @@ mod tests {
             EnqueueResult::Enqueued { id } => id,
             _ => panic!("expected Enqueued"),
         };
-        registry.queue_claim(&id).await.unwrap();
+        registry
+            .queue_claim(&id)
+            .await
+            .unwrap()
+            .expect("claim should succeed");
 
         // Recent claim should NOT be recovered (staleness cutoff)
         let (recovered, completed) = registry.queue_recover(&["default"]).await.unwrap();
@@ -1998,9 +2027,13 @@ mod tests {
             _ => panic!("expected Enqueued"),
         };
 
-        registry.queue_claim(&id).await.unwrap();
+        let claim_token = registry
+            .queue_claim(&id)
+            .await
+            .unwrap()
+            .expect("claim should succeed");
         registry
-            .queue_mark_failed(&id, "pipeline error")
+            .queue_mark_failed(&id, &claim_token, "pipeline error")
             .await
             .unwrap();
 
