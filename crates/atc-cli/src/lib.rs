@@ -540,7 +540,7 @@ pub async fn run(
             max_concurrent,
             sources,
         } => match action {
-            Some(args::DaemonAction::Stop) => daemon::stop_daemon(config),
+            Some(args::DaemonAction::Stop) => daemon::stop_daemon(config).await,
             Some(args::DaemonAction::Status) => {
                 daemon::daemon_status(config, registry.as_ref(), registry.as_ref(), queues).await
             }

@@ -123,6 +123,10 @@ impl AtcConfig {
             "daemon.drain_interval_secs must be >= 1"
         );
         anyhow::ensure!(
+            cfg.daemon.max_concurrent > 0,
+            "daemon.max_concurrent must be >= 1"
+        );
+        anyhow::ensure!(
             cfg.watch.poll_interval_secs > 0,
             "watch.poll_interval_secs must be >= 1"
         );

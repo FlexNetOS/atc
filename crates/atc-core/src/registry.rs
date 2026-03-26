@@ -721,17 +721,19 @@ impl SqliteRegistry {
     }
 
     /// Generate a ULID-like ID for queue rows.
+    ///
+    /// Uses an atomic counter combined with the timestamp to guarantee
+    /// uniqueness even when called multiple times within the same millisecond.
     fn generate_queue_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let ts = Utc::now().timestamp_millis();
-        let rand: u64 = {
-            use std::time::SystemTime;
-            let nanos = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(0);
-            nanos ^ (std::process::id() as u64) ^ (ts as u64)
-        };
-        format!("{:013x}-{:08x}", ts, rand & 0xFFFF_FFFF)
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mix = count
+            .wrapping_mul(0x517cc1b727220a95) // stafford mix constant
+            ^ (std::process::id() as u64);
+        format!("{:013x}-{:08x}", ts, (mix & 0xFFFF_FFFF) as u32)
     }
 }
 

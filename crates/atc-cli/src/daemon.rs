@@ -577,7 +577,7 @@ fn acquire_pid_file(path: &PathBuf) -> Result<()> {
 }
 
 /// Stop a running daemon.
-pub fn stop_daemon(config: &AtcConfig) -> Result<()> {
+pub async fn stop_daemon(config: &AtcConfig) -> Result<()> {
     let pid_file = config.daemon.resolved_pid_file();
     if !pid_file.exists() {
         println!("No daemon running (PID file not found).");
@@ -605,7 +605,7 @@ pub fn stop_daemon(config: &AtcConfig) -> Result<()> {
                 warn!("daemon PID {} did not exit within 10s after SIGTERM", pid);
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         let _ = std::fs::remove_file(&pid_file);
     } else {
