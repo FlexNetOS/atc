@@ -125,55 +125,8 @@ impl AtcConfig {
             "health.cost_warning_threshold must be a finite non-negative number"
         );
         // Validate directive keys against known Directive variants + per-directive overrides
-        for key in cfg.directives.keys() {
-            key.parse::<crate::types::Directive>().map_err(|_| {
-                anyhow::anyhow!(
-                    "unknown directive '{}' in [directives.{}]; valid directives: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
-                    key, key,
-                )
-            })?;
-            let directive_cfg = cfg.directives.get(key).unwrap();
-            if let Some(components) = &directive_cfg.components {
-                anyhow::ensure!(
-                    !components.is_empty(),
-                    "directives.{}.components must contain at least one component name",
-                    key
-                );
-                for name in components {
-                    anyhow::ensure!(
-                        !name.trim().is_empty(),
-                        "directives.{}.components contains an empty component name",
-                        key
-                    );
-                    anyhow::ensure!(
-                        !name.contains('/') && !name.contains('\\') && !name.contains(".."),
-                        "directives.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
-                        key,
-                        name
-                    );
-                }
-            }
-            if let Some(budget) = directive_cfg.max_budget_usd {
-                anyhow::ensure!(
-                    budget > 0.0 && budget.is_finite(),
-                    "directives.{}.max_budget_usd must be a positive finite number",
-                    key
-                );
-            }
-            if let Some(turns) = directive_cfg.max_turns {
-                anyhow::ensure!(turns > 0, "directives.{}.max_turns must be >= 1", key);
-            }
-            if let Some(providers) = &directive_cfg.providers {
-                for name in providers {
-                    anyhow::ensure!(
-                        crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
-                        "unknown provider '{}' in directives.{}.providers; valid providers: {}",
-                        name,
-                        key,
-                        crate::providers::KNOWN_PROVIDERS.join(", ")
-                    );
-                }
-            }
+        for (key, directive_cfg) in &cfg.directives {
+            Self::validate_directive(key, directive_cfg)?;
         }
         // Validate resolver order — warn on unknown resolver names (typos)
         let known_resolvers = ["task", "template", "prompt"];
@@ -330,6 +283,59 @@ impl AtcConfig {
                 == Some(".atc")
     }
 
+    /// Validate a single directive entry (name + config).
+    /// Used by both `parse_and_validate` and `load_directive_files`.
+    fn validate_directive(key: &str, directive_cfg: &DirectiveConfig) -> anyhow::Result<()> {
+        key.parse::<crate::types::Directive>().map_err(|_| {
+            anyhow::anyhow!(
+                "unknown directive '{}' in [directives.{}]; valid directives: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
+                key, key,
+            )
+        })?;
+        if let Some(components) = &directive_cfg.components {
+            anyhow::ensure!(
+                !components.is_empty(),
+                "directives.{}.components must contain at least one component name",
+                key
+            );
+            for name in components {
+                anyhow::ensure!(
+                    !name.trim().is_empty(),
+                    "directives.{}.components contains an empty component name",
+                    key
+                );
+                anyhow::ensure!(
+                    !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+                    "directives.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
+                    key,
+                    name
+                );
+            }
+        }
+        if let Some(budget) = directive_cfg.max_budget_usd {
+            anyhow::ensure!(
+                budget > 0.0 && budget.is_finite(),
+                "directives.{}.max_budget_usd must be a positive finite number",
+                key
+            );
+        }
+        if let Some(turns) = directive_cfg.max_turns {
+            anyhow::ensure!(turns > 0, "directives.{}.max_turns must be >= 1", key);
+        }
+        if let Some(providers) = &directive_cfg.providers {
+            for name in providers {
+                anyhow::ensure!(
+                    crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
+                    "unknown provider '{}' in directives.{}.providers; valid providers: {}",
+                    name,
+                    key,
+                    crate::providers::KNOWN_PROVIDERS.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// When loaded from `.atc/config.toml`, apply `.atc/`-convention defaults
     /// for prompt directories if they haven't been explicitly set in the config file.
     fn apply_atc_dir_defaults(&mut self) {
@@ -374,6 +380,14 @@ impl AtcConfig {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => match toml::from_str::<DirectiveConfig>(&contents) {
                     Ok(dcfg) => {
+                        if let Err(e) = Self::validate_directive(&directive_name, &dcfg) {
+                            tracing::warn!(
+                                "Ignoring invalid directive file {}: {}",
+                                path.display(),
+                                e
+                            );
+                            continue;
+                        }
                         self.directives.insert(directive_name, dcfg);
                     }
                     Err(e) => {
@@ -705,11 +719,14 @@ impl Default for WatchConfig {
 
 /// `[paths]` section — search path for `.atc/` directory resolution.
 /// Project-local `.atc/` is always checked first; these paths provide fallbacks.
+///
+/// **Note:** `search_path` is parsed and persisted but not yet consumed at runtime.
+/// It is reserved for a future multi-directory lookup feature.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PathsConfig {
     /// Additional directories to search for components, templates, and directives.
     /// Project-local `.atc/` takes priority, then these paths in order.
-    /// Default: `["~/.config/atc"]`.
+    /// Default: empty (project-local `.atc/` only).
     #[serde(default)]
     pub search_path: Vec<String>,
 }
@@ -1796,6 +1813,47 @@ search_path = ["~/.config/atc", "/etc/atc"]
         let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
         // research should be loaded, implement should be skipped
         assert!(cfg.directives.contains_key("research"));
+        assert!(!cfg.directives.contains_key("implement"));
+    }
+
+    #[test]
+    fn test_directive_file_invalid_name_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        // Unknown directive name — should be skipped with a warning
+        std::fs::write(
+            atc_dir.join("directives/unknown-action.toml"),
+            "max_budget_usd = 5.0",
+        )
+        .unwrap();
+        // Valid directive file
+        std::fs::write(
+            atc_dir.join("directives/research.toml"),
+            "max_budget_usd = 5.0",
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
+        assert!(cfg.directives.contains_key("research"));
+        assert!(!cfg.directives.contains_key("unknown-action"));
+    }
+
+    #[test]
+    fn test_directive_file_invalid_budget_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let atc_dir = root.path().join(".atc");
+        std::fs::create_dir_all(atc_dir.join("directives")).unwrap();
+        std::fs::write(atc_dir.join("config.toml"), "").unwrap();
+        // Zero budget is invalid — should be skipped
+        std::fs::write(
+            atc_dir.join("directives/implement.toml"),
+            "max_budget_usd = 0.0",
+        )
+        .unwrap();
+
+        let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
         assert!(!cfg.directives.contains_key("implement"));
     }
 

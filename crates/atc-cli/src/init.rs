@@ -61,7 +61,9 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     copy_md_files(&templates_dir, &atc_dir.join("templates"), "templates")?;
 
     println!("\nInitialized .atc/ at {}", atc_dir.display());
-    println!("You can now remove atc.toml — ATC will use .atc/config.toml instead.");
+    if !config.atc_dir_mode && base.join("atc.toml").exists() {
+        println!("You can now remove atc.toml — ATC will use .atc/config.toml instead.");
+    }
 
     Ok(())
 }
@@ -85,9 +87,49 @@ fn build_config_toml(config: &AtcConfig) -> String {
         }
     }
 
-    if config.batch.max_concurrency != 3 {
+    if config.batch.max_concurrency != atc_core::config::BatchConfig::default().max_concurrency {
         if let Ok(s) = toml::to_string_pretty(&config.batch) {
             parts.push(format!("[batch]\n{s}"));
+        }
+    }
+
+    // Include health if non-default
+    let default_health = atc_core::config::HealthConfig::default();
+    if config.health.signal_timeout_secs != default_health.signal_timeout_secs
+        || config.health.auto_review != default_health.auto_review
+        || config.health.cost_warning_threshold != default_health.cost_warning_threshold
+    {
+        if let Ok(s) = toml::to_string_pretty(&config.health) {
+            parts.push(format!("[health]\n{s}"));
+        }
+    }
+
+    // Include watch if non-default
+    let default_watch = atc_core::config::WatchConfig::default();
+    if config.watch.poll_interval_secs != default_watch.poll_interval_secs
+        || config.watch.cost_threshold != default_watch.cost_threshold
+    {
+        if let Ok(s) = toml::to_string_pretty(&config.watch) {
+            parts.push(format!("[watch]\n{s}"));
+        }
+    }
+
+    // Include resolvers if non-default
+    let default_resolvers = atc_core::config::ResolversConfig::default();
+    if config.resolvers.order != default_resolvers.order
+        || config.resolvers.task.enabled != default_resolvers.task.enabled
+        || config.resolvers.template.enabled != default_resolvers.template.enabled
+        || config.resolvers.prompt.enabled != default_resolvers.prompt.enabled
+    {
+        if let Ok(s) = toml::to_string_pretty(&config.resolvers) {
+            parts.push(format!("[resolvers]\n{s}"));
+        }
+    }
+
+    // Include paths if non-default
+    if !config.paths.search_path.is_empty() {
+        if let Ok(s) = toml::to_string_pretty(&config.paths) {
+            parts.push(format!("[paths]\n{s}"));
         }
     }
 
