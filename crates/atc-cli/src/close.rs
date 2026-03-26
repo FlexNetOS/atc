@@ -31,7 +31,7 @@ pub async fn run_close(
 
     // 3. Set PR URL
     let effective_pr_url = if let Some(url) = pr_url {
-        registry.set_pr_url(id, url).await?;
+        registry.add_pr_url(id, url).await?;
         Some(url.to_string())
     } else {
         record.pr_urls.first().cloned()
@@ -301,8 +301,17 @@ mod tests {
             }
             anyhow::bail!("no dispatch record found for id: {id}")
         }
-        async fn add_pr_url(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
+        async fn add_pr_url(&self, id: &str, url: &str) -> Result<()> {
+            let mut records = self.records.lock().unwrap();
+            for r in records.iter_mut() {
+                if r.id == id {
+                    if !r.pr_urls.contains(&url.to_string()) {
+                        r.pr_urls.push(url.to_string());
+                    }
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("no dispatch record found for id: {id}")
         }
 
         async fn set_artifacts(&self, _: &str, _: &str) -> Result<()> {

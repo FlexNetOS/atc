@@ -117,9 +117,7 @@ pub async fn run_post_completion(
     for url in &artifacts.pr_urls {
         if !all_pr_urls.contains(url) {
             all_pr_urls.push(url.clone());
-            if let Err(e) = registry.add_pr_url(&input.dispatch_id, url).await {
-                warn!(id = %input.dispatch_id, error = %e, "failed to add PR URL");
-            }
+            registry.add_pr_url(&input.dispatch_id, url).await?;
         }
     }
     let pr_url = all_pr_urls.first().cloned();
