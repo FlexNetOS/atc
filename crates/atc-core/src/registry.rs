@@ -740,68 +740,82 @@ impl SqliteRegistry {
 #[async_trait]
 impl DispatchQueue for SqliteRegistry {
     async fn enqueue(&self, item: EnqueueItem) -> Result<EnqueueResult> {
-        // Use an IMMEDIATE transaction so the dedup check + insert are atomic.
-        // This prevents TOCTOU races when concurrent callers enqueue the same item.
-        let mut tx = sqlx::Acquire::begin(&self.pool).await?;
-        sqlx::query("SELECT 1").execute(&mut *tx).await.ok(); // upgrade to write lock
+        // Use a raw IMMEDIATE transaction so the dedup check + insert are atomic.
+        // sqlx's begin() opens DEFERRED which allows two concurrent enqueues to
+        // both pass the dedup SELECT before either writes. BEGIN IMMEDIATE acquires
+        // a write lock upfront, serializing the critical section.
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-        // Dedup: already pending/dispatching in this queue?
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM dispatch_queue WHERE queue_name = ?1 AND input_value = ?2 AND status IN ('pending', 'dispatching')",
-        )
-        .bind(&item.queue_name)
-        .bind(&item.input_value)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        if count > 0 {
-            tx.rollback().await?;
-            return Ok(EnqueueResult::Skipped(
-                "already pending in queue".to_string(),
-            ));
-        }
-
-        // Dedup: already running in registry?
-        if item.input_type == QueueInputType::Task {
-            let active_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
+        // Helper to rollback on any early return
+        let result: Result<EnqueueResult> = async {
+            // Dedup: already pending/dispatching in this queue?
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM dispatch_queue WHERE queue_name = ?1 AND input_value = ?2 AND status IN ('pending', 'dispatching')",
             )
+            .bind(&item.queue_name)
             .bind(&item.input_value)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
 
-            if active_count > 0 {
-                tx.rollback().await?;
+            if count > 0 {
                 return Ok(EnqueueResult::Skipped(
-                    "already running in registry".to_string(),
+                    "already pending in queue".to_string(),
                 ));
+            }
+
+            // Dedup: already running in registry?
+            if item.input_type == QueueInputType::Task {
+                let active_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
+                )
+                .bind(&item.input_value)
+                .fetch_one(&mut *conn)
+                .await?;
+
+                if active_count > 0 {
+                    return Ok(EnqueueResult::Skipped(
+                        "already running in registry".to_string(),
+                    ));
+                }
+            }
+
+            let id = Self::generate_queue_id();
+            let now = Utc::now().to_rfc3339();
+
+            sqlx::query(
+                r#"INSERT INTO dispatch_queue (
+                    id, queue_name, input_type, input_value, mode, priority, params,
+                    status, enqueued_at, enqueued_by
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+            )
+            .bind(&id)
+            .bind(&item.queue_name)
+            .bind(item.input_type.as_str())
+            .bind(&item.input_value)
+            .bind(&item.mode)
+            .bind(item.priority.as_i32())
+            .bind(&item.params)
+            .bind(QueueItemStatus::Pending.as_str())
+            .bind(&now)
+            .bind(&item.enqueued_by)
+            .execute(&mut *conn)
+            .await?;
+
+            Ok(EnqueueResult::Enqueued { id })
+        }
+        .await;
+
+        match &result {
+            Ok(EnqueueResult::Enqueued { .. }) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+            }
+            _ => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
             }
         }
 
-        let id = Self::generate_queue_id();
-        let now = Utc::now().to_rfc3339();
-
-        sqlx::query(
-            r#"INSERT INTO dispatch_queue (
-                id, queue_name, input_type, input_value, mode, priority, params,
-                status, enqueued_at, enqueued_by
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
-        )
-        .bind(&id)
-        .bind(&item.queue_name)
-        .bind(item.input_type.as_str())
-        .bind(&item.input_value)
-        .bind(&item.mode)
-        .bind(item.priority.as_i32())
-        .bind(&item.params)
-        .bind(QueueItemStatus::Pending.as_str())
-        .bind(&now)
-        .bind(&item.enqueued_by)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(EnqueueResult::Enqueued { id })
+        result
     }
 
     async fn queue_list(&self, queue_name: &str) -> Result<Vec<QueueRow>> {
@@ -913,7 +927,7 @@ impl DispatchQueue for SqliteRegistry {
         let placeholders: Vec<String> =
             (1..=queue_names.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
-            "SELECT * FROM dispatch_queue WHERE status = 'dispatching' AND queue_name IN ({}) AND claimed_at <= ?{}",
+            "SELECT * FROM dispatch_queue WHERE status = 'dispatching' AND queue_name IN ({}) AND (claimed_at <= ?{} OR claimed_at IS NULL)",
             placeholders.join(", "),
             queue_names.len() + 1,
         );

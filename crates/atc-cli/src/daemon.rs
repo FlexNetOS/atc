@@ -146,8 +146,7 @@ pub async fn run_daemon(
                     break;
                 }
 
-                let remaining_slots =
-                    opts.max_concurrent.saturating_sub(running.len()).max(1) as u32;
+                let remaining_slots = opts.max_concurrent.saturating_sub(running.len()) as u32;
                 let items = match queue.queue_peek(queue_name, remaining_slots).await {
                     Ok(items) => items,
                     Err(e) => {
@@ -246,15 +245,15 @@ pub async fn run_daemon(
     let timeout = std::time::Duration::from_secs(config.daemon.graceful_shutdown_timeout_secs);
     let start = std::time::Instant::now();
     loop {
-        let running = registry
-            .list(StatusFilter::by_status(Status::Running))
+        let active = registry
+            .list(StatusFilter::any(vec![Status::Running, Status::Retrying]))
             .await
             .unwrap_or_default();
-        if running.is_empty() || start.elapsed() >= timeout {
-            if !running.is_empty() {
+        if active.is_empty() || start.elapsed() >= timeout {
+            if !active.is_empty() {
                 warn!(
-                    count = running.len(),
-                    "shutdown timeout reached with running agents"
+                    count = active.len(),
+                    "shutdown timeout reached with active agents"
                 );
             }
             break;
@@ -330,13 +329,20 @@ async fn start_sources(
         let name = name.clone();
         let poll_interval = std::time::Duration::from_secs(source_config.poll_interval_secs());
         let source_queue = source_config.queue().to_string();
+        let workspace = config.config_dir.clone();
 
         let shutdown_notify = shutdown_notify.clone();
         let handle = tokio::spawn(async move {
             info!(source = %name, "source started");
             while !shutdown.load(Ordering::SeqCst) {
-                if let Err(e) =
-                    run_source_iteration(&name, &source_config, &source_queue, queue.as_ref()).await
+                if let Err(e) = run_source_iteration(
+                    &name,
+                    &source_config,
+                    &source_queue,
+                    queue.as_ref(),
+                    workspace.as_deref(),
+                )
+                .await
                 {
                     warn!(source = %name, error = %e, "source iteration failed");
                 }
@@ -355,22 +361,24 @@ async fn start_sources(
 }
 
 /// Run a git subprocess with timeout and kill_on_drop.
-async fn run_git_cmd(args: &[&str]) -> Result<std::process::Output> {
-    let output = tokio::time::timeout(
-        CMD_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "git {} timed out after {}s",
-            args.join(" "),
-            CMD_TIMEOUT.as_secs()
-        )
-    })??;
+async fn run_git_cmd(
+    args: &[&str],
+    workspace_root: Option<&std::path::Path>,
+) -> Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args).kill_on_drop(true);
+    if let Some(root) = workspace_root {
+        cmd.current_dir(root);
+    }
+    let output = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git {} timed out after {}s",
+                args.join(" "),
+                CMD_TIMEOUT.as_secs()
+            )
+        })??;
     Ok(output)
 }
 
@@ -380,12 +388,16 @@ async fn run_source_iteration(
     config: &SourceConfig,
     queue_name: &str,
     queue: &dyn DispatchQueue,
+    workspace_root: Option<&std::path::Path>,
 ) -> Result<()> {
     match config {
         SourceConfig::Ready(cfg) => {
             let limit_str = cfg.limit.to_string();
-            let output =
-                run_git_cmd(&["kb", "ready", "--limit", &limit_str, "--format", "slugs"]).await?;
+            let output = run_git_cmd(
+                &["kb", "ready", "--limit", &limit_str, "--format", "slugs"],
+                workspace_root,
+            )
+            .await?;
 
             if !output.status.success() {
                 anyhow::bail!(
@@ -448,7 +460,7 @@ async fn run_source_iteration(
                 args
             };
 
-            let output = run_git_cmd(&cmd).await?;
+            let output = run_git_cmd(&cmd, workspace_root).await?;
 
             if !output.status.success() {
                 anyhow::bail!(
@@ -485,7 +497,7 @@ async fn run_source_iteration(
                 args.push(path);
             }
 
-            let output = run_git_cmd(&args).await?;
+            let output = run_git_cmd(&args, workspace_root).await?;
 
             if !output.status.success() {
                 anyhow::bail!(

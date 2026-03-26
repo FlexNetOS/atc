@@ -6,7 +6,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::queue::{DispatchQueue, Priority, QueueInputType, QueueRow};
 use atc_core::registry::Registry;
 use atc_core::types::RunOpts;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Show queue contents.
 pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Result<()> {
@@ -100,7 +100,13 @@ pub async fn run_queue_drain(
                 Ok(dispatch_id) => {
                     // Persist dispatch_id while still 'dispatching' for crash recovery
                     let _ = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await;
-                    queue.queue_mark_dispatched(&item.id, &dispatch_id).await?;
+                    if let Err(e) = queue.queue_mark_dispatched(&item.id, &dispatch_id).await {
+                        error!(
+                            queue_id = %item.id,
+                            error = %e,
+                            "failed to mark dispatched"
+                        );
+                    }
                     dispatched += 1;
                     info!(
                         queue_id = %item.id,
@@ -111,7 +117,7 @@ pub async fn run_queue_drain(
                 }
                 Err(e) => {
                     let err_msg = format!("{:#}", e);
-                    queue.queue_mark_failed(&item.id, &err_msg).await?;
+                    let _ = queue.queue_mark_failed(&item.id, &err_msg).await;
                     failed += 1;
                     warn!(
                         queue_id = %item.id,
