@@ -1,3 +1,4 @@
+use crate::source::SourceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,12 @@ pub struct AtcConfig {
     /// Search path configuration for `.atc/` directory resolution.
     #[serde(default)]
     pub paths: PathsConfig,
+    /// Daemon configuration.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+    /// Named source configurations for daemon auto-feed.
+    #[serde(default)]
+    pub sources: HashMap<String, SourceConfig>,
 }
 
 /// `[resolvers]` section — controls resolver order and per-resolver settings.
@@ -713,6 +720,58 @@ pub struct PathsConfig {
     /// Default: empty (project-local `.atc/` only).
     #[serde(default)]
     pub search_path: Vec<String>,
+}
+
+/// `[daemon]` section
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DaemonConfig {
+    /// Queue drain interval in seconds. Default: 1.
+    #[serde(default = "default_drain_interval_secs")]
+    pub drain_interval_secs: u64,
+    /// Maximum concurrent dispatches across all queues. Default: 5.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Graceful shutdown timeout in seconds. Default: 300 (5 minutes).
+    #[serde(default = "default_graceful_shutdown_timeout_secs")]
+    pub graceful_shutdown_timeout_secs: u64,
+    /// PID file path. Default: ~/.local/share/atc/daemon.pid.
+    pub pid_file: Option<PathBuf>,
+}
+
+fn default_drain_interval_secs() -> u64 {
+    1
+}
+
+fn default_max_concurrent() -> usize {
+    5
+}
+
+fn default_graceful_shutdown_timeout_secs() -> u64 {
+    300
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            drain_interval_secs: default_drain_interval_secs(),
+            max_concurrent: default_max_concurrent(),
+            graceful_shutdown_timeout_secs: default_graceful_shutdown_timeout_secs(),
+            pid_file: None,
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Resolve effective PID file path.
+    pub fn resolved_pid_file(&self) -> PathBuf {
+        if let Some(ref p) = self.pid_file {
+            return expand_tilde(p);
+        }
+        let root = std::env::var("ATC_ROOT")
+            .map(|p| expand_tilde(Path::new(&p)))
+            .unwrap_or_else(|_| home_dir().join(".local/share/atc"));
+        root.join("daemon.pid")
+    }
 }
 
 /// Returns the user's home directory, falling back to `/tmp` if `HOME` is unset

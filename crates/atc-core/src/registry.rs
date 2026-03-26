@@ -1,3 +1,6 @@
+use crate::queue::{
+    DispatchQueue, EnqueueItem, EnqueueResult, QueueInputType, QueueItemStatus, QueueRow,
+};
 use crate::types::{DispatchRecord, HealthChecks, Status};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -109,6 +112,28 @@ const CREATE_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
 ];
 
+const CREATE_QUEUE_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS dispatch_queue (
+    id          TEXT PRIMARY KEY,
+    queue_name  TEXT NOT NULL DEFAULT 'default',
+    input_type  TEXT NOT NULL,
+    input_value TEXT NOT NULL,
+    mode        TEXT,
+    priority    INTEGER NOT NULL DEFAULT 50,
+    params      TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    dispatch_id TEXT,
+    enqueued_at TEXT NOT NULL,
+    enqueued_by TEXT,
+    dispatched_at TEXT,
+    error       TEXT
+);
+"#;
+
+const CREATE_QUEUE_INDEXES_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_queue_pending ON dispatch_queue(queue_name, status, priority, enqueued_at);",
+];
+
 impl SqliteRegistry {
     /// Apply DDL (create table + indexes) to the pool.
     async fn apply_ddl(pool: &sqlx::SqlitePool) -> Result<()> {
@@ -116,7 +141,17 @@ impl SqliteRegistry {
         for idx_sql in CREATE_INDEXES_SQL {
             sqlx::query(idx_sql).execute(pool).await?;
         }
+        // Queue table
+        sqlx::query(CREATE_QUEUE_TABLE_SQL).execute(pool).await?;
+        for idx_sql in CREATE_QUEUE_INDEXES_SQL {
+            sqlx::query(idx_sql).execute(pool).await?;
+        }
         Ok(())
+    }
+
+    /// Expose the pool for DispatchQueue impl.
+    pub fn pool(&self) -> &sqlx::SqlitePool {
+        &self.pool
     }
 
     /// Migrate from old schema (slug PK) to new schema (id PK).
@@ -654,6 +689,242 @@ impl Registry for SqliteRegistry {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(Self::row_to_record).collect()
+    }
+}
+
+impl SqliteRegistry {
+    fn queue_row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<QueueRow> {
+        use sqlx::Row;
+        let enqueued_at_str: String = row.get("enqueued_at");
+        let dispatched_at_str: Option<String> = row.get("dispatched_at");
+        let input_type_str: String = row.get("input_type");
+        let status_str: String = row.get("status");
+        Ok(QueueRow {
+            id: row.get("id"),
+            queue_name: row.get("queue_name"),
+            input_type: input_type_str.parse()?,
+            input_value: row.get("input_value"),
+            mode: row.get("mode"),
+            priority: row.get("priority"),
+            params: row.get("params"),
+            status: status_str.parse()?,
+            dispatch_id: row.get("dispatch_id"),
+            enqueued_at: DateTime::parse_from_rfc3339(&enqueued_at_str)?.with_timezone(&Utc),
+            enqueued_by: row.get("enqueued_by"),
+            dispatched_at: dispatched_at_str
+                .as_deref()
+                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+                .transpose()?,
+            error: row.get("error"),
+        })
+    }
+
+    /// Generate a ULID-like ID for queue rows.
+    fn generate_queue_id() -> String {
+        let ts = Utc::now().timestamp_millis();
+        let rand: u64 = {
+            use std::time::SystemTime;
+            let nanos = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            nanos ^ (std::process::id() as u64) ^ (ts as u64)
+        };
+        format!("{:013x}-{:08x}", ts, rand & 0xFFFF_FFFF)
+    }
+}
+
+#[async_trait]
+impl DispatchQueue for SqliteRegistry {
+    async fn enqueue(&self, item: EnqueueItem) -> Result<EnqueueResult> {
+        // Dedup: already pending/dispatching in this queue?
+        if self
+            .queue_has_pending(&item.queue_name, &item.input_value)
+            .await?
+        {
+            return Ok(EnqueueResult::Skipped(
+                "already pending in queue".to_string(),
+            ));
+        }
+
+        // Dedup: already running in registry?
+        if item.input_type == QueueInputType::Task {
+            let active: Vec<DispatchRecord> = {
+                let rows = sqlx::query(
+                    "SELECT * FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
+                )
+                .bind(&item.input_value)
+                .fetch_all(&self.pool)
+                .await?;
+                rows.iter()
+                    .map(Self::row_to_record)
+                    .collect::<Result<Vec<_>>>()?
+            };
+            if !active.is_empty() {
+                return Ok(EnqueueResult::Skipped(
+                    "already running in registry".to_string(),
+                ));
+            }
+        }
+
+        let id = Self::generate_queue_id();
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"INSERT INTO dispatch_queue (
+                id, queue_name, input_type, input_value, mode, priority, params,
+                status, enqueued_at, enqueued_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        )
+        .bind(&id)
+        .bind(&item.queue_name)
+        .bind(item.input_type.as_str())
+        .bind(&item.input_value)
+        .bind(&item.mode)
+        .bind(item.priority.as_i32())
+        .bind(&item.params)
+        .bind(QueueItemStatus::Pending.as_str())
+        .bind(&now)
+        .bind(&item.enqueued_by)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(EnqueueResult::Enqueued { id })
+    }
+
+    async fn queue_list(&self, queue_name: &str) -> Result<Vec<QueueRow>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatch_queue WHERE queue_name = ?1 AND status = 'pending' ORDER BY priority ASC, enqueued_at ASC",
+        )
+        .bind(queue_name)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::queue_row_from_sqlite).collect()
+    }
+
+    async fn queue_peek(&self, queue_name: &str, limit: u32) -> Result<Vec<QueueRow>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatch_queue WHERE queue_name = ?1 AND status = 'pending' ORDER BY priority ASC, enqueued_at ASC LIMIT ?2",
+        )
+        .bind(queue_name)
+        .bind(limit as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::queue_row_from_sqlite).collect()
+    }
+
+    async fn queue_claim(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE dispatch_queue SET status = 'dispatching' WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn queue_mark_dispatched(&self, id: &str, dispatch_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE dispatch_queue SET status = 'dispatched', dispatch_id = ?1, dispatched_at = ?2 WHERE id = ?3",
+        )
+        .bind(dispatch_id)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn queue_mark_failed(&self, id: &str, error: &str) -> Result<()> {
+        sqlx::query("UPDATE dispatch_queue SET status = 'failed', error = ?1 WHERE id = ?2")
+            .bind(error)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn queue_clear(&self, queue_name: &str) -> Result<u64> {
+        let result =
+            sqlx::query("DELETE FROM dispatch_queue WHERE queue_name = ?1 AND status = 'pending'")
+                .bind(queue_name)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn queue_pending_count(&self, queue_name: &str) -> Result<u64> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM dispatch_queue WHERE queue_name = ?1 AND status = 'pending'",
+        )
+        .bind(queue_name)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count as u64)
+    }
+
+    async fn queue_has_pending(&self, queue_name: &str, input_value: &str) -> Result<bool> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM dispatch_queue WHERE queue_name = ?1 AND input_value = ?2 AND status IN ('pending', 'dispatching')",
+        )
+        .bind(queue_name)
+        .bind(input_value)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    async fn queue_recover(&self) -> Result<(u64, u64)> {
+        // Check dispatching rows — if they have a matching dispatch_id in registry, mark dispatched.
+        // Otherwise, reset to pending.
+        let dispatching_rows =
+            sqlx::query("SELECT * FROM dispatch_queue WHERE status = 'dispatching'")
+                .fetch_all(&self.pool)
+                .await?;
+
+        let mut recovered = 0u64;
+        let mut completed = 0u64;
+
+        for row in &dispatching_rows {
+            use sqlx::Row;
+            let id: String = row.get("id");
+            let dispatch_id: Option<String> = row.get("dispatch_id");
+
+            if let Some(ref did) = dispatch_id {
+                // Check if dispatch exists in registry
+                let (exists,): (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM dispatches WHERE id = ?1")
+                        .bind(did)
+                        .fetch_one(&self.pool)
+                        .await?;
+
+                if exists > 0 {
+                    sqlx::query("UPDATE dispatch_queue SET status = 'dispatched' WHERE id = ?1")
+                        .bind(&id)
+                        .execute(&self.pool)
+                        .await?;
+                    completed += 1;
+                } else {
+                    sqlx::query(
+                        "UPDATE dispatch_queue SET status = 'pending', dispatch_id = NULL WHERE id = ?1",
+                    )
+                    .bind(&id)
+                    .execute(&self.pool)
+                    .await?;
+                    recovered += 1;
+                }
+            } else {
+                // No dispatch_id means it was never dispatched — reset to pending
+                sqlx::query("UPDATE dispatch_queue SET status = 'pending' WHERE id = ?1")
+                    .bind(&id)
+                    .execute(&self.pool)
+                    .await?;
+                recovered += 1;
+            }
+        }
+
+        Ok((recovered, completed))
     }
 }
 
@@ -1378,5 +1649,269 @@ mod tests {
             fetched.original_input, None,
             "original_input should default to None"
         );
+    }
+
+    // ========== Queue tests ==========
+
+    use crate::queue::{DispatchQueue, EnqueueItem, EnqueueResult, Priority, QueueInputType};
+
+    fn sample_enqueue_item(input_value: &str) -> EnqueueItem {
+        EnqueueItem {
+            queue_name: "default".to_string(),
+            input_type: QueueInputType::Task,
+            input_value: input_value.to_string(),
+            mode: None,
+            priority: Priority::Medium,
+            params: None,
+            enqueued_by: Some("test".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_and_list() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let result = registry
+            .enqueue(sample_enqueue_item("tasks/foo"))
+            .await
+            .unwrap();
+        assert!(result.is_enqueued());
+
+        let items = registry.queue_list("default").await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].input_value, "tasks/foo");
+        assert_eq!(items[0].input_type, QueueInputType::Task);
+        assert_eq!(items[0].priority, 50); // Medium
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_dedup_pending() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let r1 = registry
+            .enqueue(sample_enqueue_item("tasks/foo"))
+            .await
+            .unwrap();
+        assert!(r1.is_enqueued());
+
+        // Enqueue same item — should be skipped
+        let r2 = registry
+            .enqueue(sample_enqueue_item("tasks/foo"))
+            .await
+            .unwrap();
+        assert!(!r2.is_enqueued());
+        match r2 {
+            EnqueueResult::Skipped(reason) => assert!(reason.contains("already pending")),
+            _ => panic!("expected Skipped"),
+        }
+
+        // Different item should succeed
+        let r3 = registry
+            .enqueue(sample_enqueue_item("tasks/bar"))
+            .await
+            .unwrap();
+        assert!(r3.is_enqueued());
+
+        let items = registry.queue_list("default").await.unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_dedup_running_in_registry() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        // Insert a running dispatch for tasks/foo
+        let mut record = sample_record("running-foo");
+        record.task_slug = Some("tasks/foo".to_string());
+        record.status = Status::Running;
+        registry.insert(&record).await.unwrap();
+
+        // Enqueue the same task — should be skipped (already running)
+        let result = registry
+            .enqueue(sample_enqueue_item("tasks/foo"))
+            .await
+            .unwrap();
+        assert!(!result.is_enqueued());
+        match result {
+            EnqueueResult::Skipped(reason) => assert!(reason.contains("already running")),
+            _ => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_priority_ordering() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        // Enqueue in reverse priority order
+        let mut low = sample_enqueue_item("tasks/low");
+        low.priority = Priority::Low;
+        let mut critical = sample_enqueue_item("tasks/critical");
+        critical.priority = Priority::Critical;
+        let mut high = sample_enqueue_item("tasks/high");
+        high.priority = Priority::High;
+
+        registry.enqueue(low).await.unwrap();
+        registry.enqueue(critical).await.unwrap();
+        registry.enqueue(high).await.unwrap();
+
+        let items = registry.queue_list("default").await.unwrap();
+        assert_eq!(items.len(), 3);
+        // Should be ordered: critical (0) → high (25) → low (75)
+        assert_eq!(items[0].input_value, "tasks/critical");
+        assert_eq!(items[1].input_value, "tasks/high");
+        assert_eq!(items[2].input_value, "tasks/low");
+    }
+
+    #[tokio::test]
+    async fn test_queue_claim_and_mark() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let result = registry
+            .enqueue(sample_enqueue_item("tasks/foo"))
+            .await
+            .unwrap();
+        let id = match result {
+            EnqueueResult::Enqueued { id } => id,
+            _ => panic!("expected Enqueued"),
+        };
+
+        // Claim
+        assert!(registry.queue_claim(&id).await.unwrap());
+        // Double claim should fail
+        assert!(!registry.queue_claim(&id).await.unwrap());
+
+        // Mark dispatched
+        registry
+            .queue_mark_dispatched(&id, "dispatch-123")
+            .await
+            .unwrap();
+
+        // Should no longer appear in pending list
+        let items = registry.queue_list("default").await.unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_queue_clear() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        registry
+            .enqueue(sample_enqueue_item("tasks/a"))
+            .await
+            .unwrap();
+        registry
+            .enqueue(sample_enqueue_item("tasks/b"))
+            .await
+            .unwrap();
+        registry
+            .enqueue(sample_enqueue_item("tasks/c"))
+            .await
+            .unwrap();
+
+        let count = registry.queue_clear("default").await.unwrap();
+        assert_eq!(count, 3);
+
+        let items = registry.queue_list("default").await.unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_queue_pending_count() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        assert_eq!(registry.queue_pending_count("default").await.unwrap(), 0);
+
+        registry
+            .enqueue(sample_enqueue_item("tasks/a"))
+            .await
+            .unwrap();
+        registry
+            .enqueue(sample_enqueue_item("tasks/b"))
+            .await
+            .unwrap();
+        assert_eq!(registry.queue_pending_count("default").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_named_queues() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        let mut item_ci = sample_enqueue_item("tasks/ci-fix");
+        item_ci.queue_name = "ci-fixes".to_string();
+        registry.enqueue(item_ci).await.unwrap();
+
+        registry
+            .enqueue(sample_enqueue_item("tasks/default-work"))
+            .await
+            .unwrap();
+
+        // Default queue should have 1 item
+        assert_eq!(registry.queue_pending_count("default").await.unwrap(), 1);
+        // ci-fixes queue should have 1 item
+        assert_eq!(registry.queue_pending_count("ci-fixes").await.unwrap(), 1);
+
+        // List each queue
+        let default_items = registry.queue_list("default").await.unwrap();
+        assert_eq!(default_items[0].input_value, "tasks/default-work");
+
+        let ci_items = registry.queue_list("ci-fixes").await.unwrap();
+        assert_eq!(ci_items[0].input_value, "tasks/ci-fix");
+    }
+
+    #[tokio::test]
+    async fn test_queue_recover_stale_dispatching() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        // Enqueue and claim an item (simulating mid-dispatch crash)
+        let result = registry
+            .enqueue(sample_enqueue_item("tasks/crashed"))
+            .await
+            .unwrap();
+        let id = match result {
+            EnqueueResult::Enqueued { id } => id,
+            _ => panic!("expected Enqueued"),
+        };
+        registry.queue_claim(&id).await.unwrap();
+
+        // Recover should reset to pending (no dispatch_id means it never completed)
+        let (recovered, completed) = registry.queue_recover().await.unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(completed, 0);
+
+        // Should be back in pending
+        let items = registry.queue_list("default").await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].input_value, "tasks/crashed");
+    }
+
+    #[tokio::test]
+    async fn test_queue_peek_limit() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        for i in 0..5 {
+            registry
+                .enqueue(sample_enqueue_item(&format!("tasks/item-{}", i)))
+                .await
+                .unwrap();
+        }
+
+        let peeked = registry.queue_peek("default", 3).await.unwrap();
+        assert_eq!(peeked.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_queue_mark_failed() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let result = registry
+            .enqueue(sample_enqueue_item("tasks/will-fail"))
+            .await
+            .unwrap();
+        let id = match result {
+            EnqueueResult::Enqueued { id } => id,
+            _ => panic!("expected Enqueued"),
+        };
+
+        registry.queue_claim(&id).await.unwrap();
+        registry
+            .queue_mark_failed(&id, "pipeline error")
+            .await
+            .unwrap();
+
+        // Should not appear in pending list
+        let items = registry.queue_list("default").await.unwrap();
+        assert!(items.is_empty());
     }
 }
