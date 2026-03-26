@@ -151,14 +151,100 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | `atc close <slug>` | Verify task completion and close |
 | `atc post-complete` | Run post-completion (auto or manual recovery) |
 | `atc prompt <directive>` | Preview rendered system prompt |
+| `atc init` | Initialize `.atc/` project directory |
+| `atc init --force` | Re-initialize `.atc/`, overwriting all files |
+
+## `.atc/` Project Directory
+
+`atc init` scaffolds a per-project `.atc/` directory containing all dispatch configuration:
+
+```text
+.atc/
+├── config.toml              # Base config (registry, dispatch, batch, etc.)
+├── directives/
+│   ├── implement.toml       # Components, budget, providers for implement directive
+│   ├── review-fix.toml
+│   ├── research.toml
+│   └── ...
+├── templates/
+│   ├── pr-review.md         # Handlebars templates with frontmatter
+│   ├── swot.md
+│   └── ...
+└── components/
+    ├── base.md              # System prompt building blocks
+    ├── code-read.md
+    └── ...
+```
+
+**Re-init behavior:**
+
+| Scenario | `atc init` | `atc init --force` |
+|---|---|---|
+| No `.atc/` exists | Create everything | Create everything |
+| `.atc/` exists, no customizations | Skip existing files, add new only | Overwrite all |
+| `.atc/` exists, user customized files | Skip existing, add new files only | Overwrite all |
+| New ATC version adds new directives/templates | Add new files, don't touch existing | Overwrite all |
+
+## Templates
+
+Templates are Handlebars `.md` files with YAML frontmatter. They're the primary way to create reusable dispatch configurations.
+
+### Template Frontmatter Schema
+
+```yaml
+---
+description: Review and fix PR — iterative flywheel until confident
+directive: review-fix            # which directive to run under (singular)
+required_params: [pr]            # params that must be provided before dispatch
+---
+```
+
+Three fields:
+- `description` — human-readable description
+- `directive` — the directive name (maps to `.atc/directives/<name>.toml`)
+- `required_params` — param validation before rendering
+
+The directive file (`.atc/directives/review-fix.toml`) owns the component list and provider list. Templates do **not** redeclare components — they just specify which directive they run under.
+
+### Built-in Templates
+
+| Template | Directive | Required Params | Description |
+|---|---|---|---|
+| `pr-review` | `review-fix` | `pr` | Review and fix a PR |
+| `pr-comment` | `pr-comments` | `pr` | Resolve PR comments and threads |
+| `branch-review` | `review-fix` | — | Review all changes on current branch |
+| `close` | `close` | `task` | Verify task completion and close |
+| `push-branch` | `implement` | — | Implement and push branch |
+| `swot` | `research` | `competitor`, `name` | SWOT analysis of a competitor |
+
+### Usage
+
+```bash
+atc run pr-review --param pr=https://github.com/org/repo/pull/123
+atc run swot --param competitor=https://example.com --param name="Acme Corp"
+atc run close --param task=tasks/my-task
+atc run --list    # show available templates
+```
+
+## Multi-Repo Dispatch
+
+ATC supports dispatching to multiple repositories in a single command using the `--repo` flag:
+
+```bash
+# Dispatch to specific repos within a meta workspace
+atc run task tasks/cross-repo-fix --repo open-source/atc --repo open-source/kb
+```
+
+Each `--repo` gets its own worktree, agent session, and PR. The dispatch ID links them together.
 
 ## Configuration
 
 ATC loads config from (in priority order):
 1. `--config <path>` flag
 2. `ATC_CONFIG` environment variable
-3. `./atc.toml` (current directory)
-4. `~/.config/atc/config.toml`
+3. `.atc/config.toml` (project directory, created by `atc init`)
+4. `./atc.toml` (legacy, still supported)
+5. `~/.config/atc/config.toml`
 
 ```toml
 [registry]
@@ -186,8 +272,8 @@ macos = true
 # webhook_url = "https://..."
 
 [prompt]
-components_dir = ".claude/prompts/components"
-templates_dir = ".claude/prompts/templates"
+components_dir = ".atc/components"       # or ".claude/prompts/components" (legacy)
+templates_dir = ".atc/templates"         # or ".claude/prompts/templates" (legacy)
 partials_dir = ".claude/prompts/partials"
 
 # Per-directive configuration

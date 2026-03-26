@@ -10,6 +10,10 @@ use std::path::Path;
 /// - `.atc/directives/<name>.toml` — one file per `[directives.*]` entry
 /// - `.atc/components/` — copies component `.md` files from current components_dir
 /// - `.atc/templates/` — copies template `.md` files from current templates_dir
+///
+/// **Re-init behavior:**
+/// - Without `--force`: create files that don't exist, skip files that do.
+/// - With `--force`: overwrite everything.
 pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     let base = config
         .config_dir
@@ -17,12 +21,7 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
         .unwrap_or_else(|| Path::new("."));
     let atc_dir = base.join(".atc");
 
-    if atc_dir.exists() && !force {
-        anyhow::bail!(
-            ".atc/ directory already exists at {}. Use --force to overwrite.",
-            atc_dir.display()
-        );
-    }
+    let is_reinit = atc_dir.exists();
 
     // Create directory structure
     let dirs = [
@@ -37,34 +36,66 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     }
 
     // Write config.toml (without directives — those go in separate files)
+    let config_path = atc_dir.join("config.toml");
     let config_toml = build_config_toml(config);
-    std::fs::write(atc_dir.join("config.toml"), config_toml)
-        .context("failed to write .atc/config.toml")?;
-    println!("  Created .atc/config.toml");
+    write_file(&config_path, &config_toml, ".atc/config.toml", force)?;
 
     // Write directive files from [directives.*] sections
     for (name, dcfg) in &config.directives {
         let directive_toml = toml::to_string_pretty(dcfg)
             .with_context(|| format!("failed to serialize directive config '{name}'"))?;
         let path = atc_dir.join("directives").join(format!("{name}.toml"));
-        std::fs::write(&path, directive_toml)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        println!("  Created .atc/directives/{name}.toml");
+        let label = format!(".atc/directives/{name}.toml");
+        write_file(&path, &directive_toml, &label, force)?;
     }
 
     // Copy components
     let components_dir = resolve_dir(&config.prompt.components_dir, config.config_dir.as_deref());
-    copy_md_files(&components_dir, &atc_dir.join("components"), "components")?;
+    copy_md_files(
+        &components_dir,
+        &atc_dir.join("components"),
+        "components",
+        force,
+    )?;
 
     // Copy templates
     let templates_dir = resolve_dir(&config.prompt.templates_dir, config.config_dir.as_deref());
-    copy_md_files(&templates_dir, &atc_dir.join("templates"), "templates")?;
+    copy_md_files(
+        &templates_dir,
+        &atc_dir.join("templates"),
+        "templates",
+        force,
+    )?;
 
-    println!("\nInitialized .atc/ at {}", atc_dir.display());
+    if is_reinit && !force {
+        println!(
+            "\nRe-initialized .atc/ at {} (skipped existing files)",
+            atc_dir.display()
+        );
+    } else if is_reinit {
+        println!(
+            "\nRe-initialized .atc/ at {} (force overwrote existing files)",
+            atc_dir.display()
+        );
+    } else {
+        println!("\nInitialized .atc/ at {}", atc_dir.display());
+    }
     if !config.atc_dir_mode && base.join("atc.toml").exists() {
         println!("You can now remove atc.toml — ATC will use .atc/config.toml instead.");
     }
 
+    Ok(())
+}
+
+/// Write a file, respecting the `force` flag.
+/// If the file exists and `force` is false, print a skip message and return.
+fn write_file(path: &Path, content: &str, label: &str, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        println!("  Skipped (exists): {label}");
+        return Ok(());
+    }
+    std::fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    println!("  Created {label}");
     Ok(())
 }
 
@@ -157,6 +188,33 @@ fn build_config_toml(config: &AtcConfig) -> String {
         }
     }
 
+    // Include daemon if non-default
+    let default_daemon = atc_core::config::DaemonConfig::default();
+    if config.daemon.drain_interval_secs != default_daemon.drain_interval_secs
+        || config.daemon.max_concurrent != default_daemon.max_concurrent
+        || config.daemon.graceful_shutdown_timeout_secs
+            != default_daemon.graceful_shutdown_timeout_secs
+        || config.daemon.pid_file.is_some()
+    {
+        if let Ok(s) = toml::to_string_pretty(&config.daemon) {
+            parts.push(format!("[daemon]\n{s}"));
+        }
+    }
+
+    // Include sources if any are configured.
+    // Use a wrapper struct so entries serialize as [sources.<name>] tables.
+    if !config.sources.is_empty() {
+        #[derive(serde::Serialize)]
+        struct Wrapper<'a> {
+            sources: &'a std::collections::HashMap<String, atc_core::source::SourceConfig>,
+        }
+        if let Ok(s) = toml::to_string_pretty(&Wrapper {
+            sources: &config.sources,
+        }) {
+            parts.push(s);
+        }
+    }
+
     if parts.is_empty() {
         "# ATC configuration\n# Directives are in .atc/directives/*.toml\n# Components are in .atc/components/*.md\n# Templates are in .atc/templates/*.md\n".to_string()
     } else {
@@ -164,8 +222,16 @@ fn build_config_toml(config: &AtcConfig) -> String {
     }
 }
 
-/// Copy all `.md` files from `src` to `dst`.
-fn copy_md_files(src: &Path, dst: &Path, label: &str) -> Result<()> {
+/// Copy all `.md` files from `src` to `dst`, respecting the `force` flag.
+/// Skips when `src` and `dst` resolve to the same directory (e.g. during re-init).
+fn copy_md_files(src: &Path, dst: &Path, label: &str, force: bool) -> Result<()> {
+    // Guard: if src and dst are the same directory, copying is a no-op (or harmful).
+    if let (Ok(canon_src), Ok(canon_dst)) = (src.canonicalize(), dst.canonicalize()) {
+        if canon_src == canon_dst {
+            return Ok(());
+        }
+    }
+
     let entries = match std::fs::read_dir(src) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -181,20 +247,29 @@ fn copy_md_files(src: &Path, dst: &Path, label: &str) -> Result<()> {
         }
     };
 
-    let mut count = 0;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read entry in {label} directory {}",
+                src.display()
+            )
+        })?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("md") {
             if let Some(name) = path.file_name() {
                 let dest = dst.join(name);
-                std::fs::copy(&path, &dest).with_context(|| {
-                    format!("failed to copy {} to {}", path.display(), dest.display())
-                })?;
-                count += 1;
+                let name_str = name.to_string_lossy();
+                if dest.exists() && !force {
+                    println!("  Skipped (exists): .atc/{label}/{name_str}");
+                } else {
+                    std::fs::copy(&path, &dest).with_context(|| {
+                        format!("failed to copy {} to {}", path.display(), dest.display())
+                    })?;
+                    println!("  Created .atc/{label}/{name_str}");
+                }
             }
         }
     }
-    println!("  Copied {count} {label}");
     Ok(())
 }
 
@@ -289,6 +364,60 @@ mod tests {
         assert!(reparsed.resolvers.template.enabled);
     }
 
+    #[test]
+    fn test_build_config_toml_includes_daemon_when_non_default() {
+        let mut cfg = AtcConfig::default();
+        cfg.daemon.max_concurrent = 10;
+        let toml = build_config_toml(&cfg);
+        assert!(toml.contains("[daemon]"), "missing [daemon] section");
+        assert!(
+            toml.contains("max_concurrent = 10"),
+            "missing max_concurrent value"
+        );
+    }
+
+    #[test]
+    fn test_build_config_toml_includes_sources_when_present() {
+        let mut cfg = AtcConfig::default();
+        cfg.sources.insert(
+            "backlog".to_string(),
+            atc_core::source::SourceConfig::Ready(atc_core::source::ReadySourceConfig {
+                poll_interval_secs: 60,
+                limit: 5,
+                queue: "default".to_string(),
+            }),
+        );
+        let toml = build_config_toml(&cfg);
+        assert!(
+            toml.contains("[sources.backlog]"),
+            "missing [sources.backlog] section, got:\n{toml}"
+        );
+        assert!(
+            toml.contains("poll_interval_secs = 60"),
+            "missing poll_interval_secs"
+        );
+    }
+
+    #[test]
+    fn test_build_config_toml_omits_daemon_when_default() {
+        let cfg = AtcConfig::default();
+        let toml = build_config_toml(&cfg);
+        assert!(
+            !toml.contains("[daemon]"),
+            "default config should not include [daemon]"
+        );
+    }
+
+    #[test]
+    fn test_build_config_toml_omits_sources_when_empty() {
+        let cfg = AtcConfig::default();
+        let toml = build_config_toml(&cfg);
+        assert!(
+            !toml.contains("[sources"),
+            "default config should not include [sources]"
+        );
+    }
+
     #[tokio::test]
     async fn test_run_init_creates_atc_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -302,14 +431,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_init_fails_if_exists_without_force() {
+    async fn test_run_init_skips_existing_without_force() {
         let dir = tempfile::tempdir().unwrap();
         let atc_dir = dir.path().join(".atc");
         std::fs::create_dir_all(&atc_dir).unwrap();
+        // Write a pre-existing config.toml with custom content
+        std::fs::write(atc_dir.join("config.toml"), "# custom").unwrap();
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
-        let err = run_init(&cfg, false).await.unwrap_err();
-        assert!(err.to_string().contains("already exists"));
+        // Re-init without force should succeed (skip existing files)
+        run_init(&cfg, false).await.unwrap();
+        // Pre-existing file should be preserved
+        let contents = std::fs::read_to_string(atc_dir.join("config.toml")).unwrap();
+        assert_eq!(
+            contents, "# custom",
+            "existing config.toml should be preserved"
+        );
     }
 
     #[tokio::test]
@@ -317,10 +454,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let atc_dir = dir.path().join(".atc");
         std::fs::create_dir_all(&atc_dir).unwrap();
+        // Write a pre-existing config.toml with custom content
+        std::fs::write(atc_dir.join("config.toml"), "# custom").unwrap();
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
         run_init(&cfg, true).await.unwrap();
         assert!(dir.path().join(".atc/config.toml").exists());
+        // Force should have overwritten the custom content
+        let contents = std::fs::read_to_string(atc_dir.join("config.toml")).unwrap();
+        assert_ne!(
+            contents, "# custom",
+            "config.toml should be overwritten with --force"
+        );
     }
 
     #[tokio::test]
@@ -340,5 +485,115 @@ mod tests {
         assert!(directive_path.exists());
         let contents = std::fs::read_to_string(&directive_path).unwrap();
         assert!(contents.contains("15.0"));
+    }
+
+    #[tokio::test]
+    async fn test_run_init_reinit_adds_new_skips_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        cfg.directives.insert(
+            "implement".to_string(),
+            atc_core::config::DirectiveConfig {
+                max_budget_usd: Some(15.0),
+                ..Default::default()
+            },
+        );
+        // First init
+        run_init(&cfg, false).await.unwrap();
+        let impl_path = dir.path().join(".atc/directives/implement.toml");
+        assert!(impl_path.exists());
+        // Modify the file so we can verify it's preserved
+        std::fs::write(&impl_path, "# customized").unwrap();
+
+        // Add a new directive and re-init without force
+        cfg.directives.insert(
+            "research".to_string(),
+            atc_core::config::DirectiveConfig {
+                max_budget_usd: Some(7.0),
+                ..Default::default()
+            },
+        );
+        run_init(&cfg, false).await.unwrap();
+
+        // Old file should be preserved
+        let impl_contents = std::fs::read_to_string(&impl_path).unwrap();
+        assert_eq!(
+            impl_contents, "# customized",
+            "existing directive should be preserved"
+        );
+        // New file should be created
+        let research_path = dir.path().join(".atc/directives/research.toml");
+        assert!(research_path.exists(), "new directive should be created");
+        let research_contents = std::fs::read_to_string(&research_path).unwrap();
+        assert!(research_contents.contains("7.0"));
+    }
+
+    /// Regression test: force re-init when templates_dir already points to `.atc/templates`
+    /// should not corrupt files by copying them onto themselves.
+    #[tokio::test]
+    async fn test_force_reinit_same_src_dst_does_not_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+
+        // First init to create .atc/ scaffolding
+        run_init(&cfg, false).await.unwrap();
+
+        // Write a template directly into .atc/templates (simulates existing content)
+        let template_path = dir.path().join(".atc/templates/task.md");
+        let original = "---\ndirective: implement\n---\nDo the thing";
+        std::fs::write(&template_path, original).unwrap();
+
+        // Now set templates_dir to .atc/templates — same as destination
+        cfg.prompt.templates_dir = ".atc/templates".to_string();
+
+        // Force re-init: should not corrupt or error
+        run_init(&cfg, true).await.unwrap();
+
+        // File should still be intact
+        let contents = std::fs::read_to_string(&template_path).unwrap();
+        assert_eq!(
+            contents, original,
+            "template should not be corrupted by src==dst copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_init_copies_templates_with_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create source templates dir with one template
+        let src_templates = dir.path().join("templates");
+        std::fs::create_dir_all(&src_templates).unwrap();
+        std::fs::write(
+            src_templates.join("pr-review.md"),
+            "---\ndirective: review-fix\nrequired_params: [pr]\n---\nReview {{pr}}",
+        )
+        .unwrap();
+        std::fs::write(
+            src_templates.join("swot.md"),
+            "---\ndirective: research\nrequired_params: [competitor, name]\n---\nSWOT {{name}}",
+        )
+        .unwrap();
+
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        cfg.prompt.templates_dir = "templates".to_string();
+        // First init
+        run_init(&cfg, false).await.unwrap();
+        assert!(dir.path().join(".atc/templates/pr-review.md").exists());
+        assert!(dir.path().join(".atc/templates/swot.md").exists());
+
+        // Modify pr-review and re-init
+        std::fs::write(
+            dir.path().join(".atc/templates/pr-review.md"),
+            "# customized",
+        )
+        .unwrap();
+        run_init(&cfg, false).await.unwrap();
+        // Existing template should be preserved
+        let contents =
+            std::fs::read_to_string(dir.path().join(".atc/templates/pr-review.md")).unwrap();
+        assert_eq!(contents, "# customized");
     }
 }

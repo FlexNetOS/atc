@@ -109,12 +109,13 @@ pub fn deferred_placeholder(var: &str) -> String {
 /// after rendering. These are rendered as sentinel placeholders so Handlebars
 /// strict mode doesn't reject them. The pipeline substitutes them later.
 ///
-/// Returns the rendered body and the list of directives from the frontmatter.
+/// Returns the rendered body and directive metadata from the frontmatter.
 /// Template files have the format:
 /// ```text
 /// ---
 /// description: "..."
-/// directives: [component1, component2]
+/// directive: review-fix
+/// required_params: [pr]
 /// ---
 /// Template body with {{variable}} and {{> partial}} tags
 /// ```

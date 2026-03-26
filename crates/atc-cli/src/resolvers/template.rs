@@ -39,8 +39,9 @@ fn is_ref_safe(s: &str) -> bool {
 /// Resolver for template-based dispatches.
 ///
 /// Templates are `.md` files in the configured templates directory. The template
-/// name is the file stem (e.g. "review" matches "review.md"). Templates can
-/// include YAML frontmatter with `directives:` to specify components/mode.
+/// name is the file stem (e.g. "review" matches "review.md"). Templates use
+/// YAML frontmatter with `directive:` (singular) to specify the execution
+/// directive, and `required_params:` to validate params before rendering.
 pub struct TemplateResolver;
 
 impl TemplateResolver {
@@ -472,7 +473,7 @@ mod tests {
 
         std::fs::write(
             tmpl_dir.join("review.md"),
-            "---\ndirectives: [review-fix]\n---\nReview PR: {{pr_url}}",
+            "---\ndirective: review-fix\n---\nReview PR: {{pr_url}}",
         )
         .unwrap();
 
@@ -550,7 +551,7 @@ mod tests {
         // Template that references both a user param and a provider-injected var
         std::fs::write(
             tmpl_dir.join("pr-review.md"),
-            "---\ndirectives: [review-fix]\n---\nPR: {{pr}}\n\n{{prefetch}}",
+            "---\ndirective: review-fix\nrequired_params: [pr]\n---\nPR: {{pr}}\n\n{{prefetch}}",
         )
         .unwrap();
 
