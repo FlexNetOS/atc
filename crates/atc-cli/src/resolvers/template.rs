@@ -140,25 +140,16 @@ impl InputResolver for TemplateResolver {
 
         // Pre-render: read frontmatter to validate required_params before rendering.
         // We do a lightweight parse of the raw file first.
-        let resolved_path = if Path::new(&template_name).is_relative() {
-            atc_core::prompt_engine::resolve_dir(
-                &config.prompt.templates_dir,
-                config.config_dir.as_deref(),
-            )
-            .join(&template_name)
-        } else {
-            std::path::PathBuf::from(&template_name)
-        };
-        let raw_content = tokio::fs::read_to_string(&resolved_path)
+        let raw_content = tokio::fs::read_to_string(&template_path)
             .await
             .with_context(|| {
-                format!("failed to read template file '{}'", resolved_path.display())
+                format!("failed to read template file '{}'", template_path.display())
             })?;
         // Quick frontmatter parse just to check required_params
         let quick_fm = prompt_engine::parse_template_frontmatter(&raw_content)?;
         if let Some(ref required) = quick_fm.required_params {
             for param in required {
-                if !params.contains_key(param.as_str()) {
+                if !params.get(param.as_str()).is_some_and(|v| !v.is_empty()) {
                     anyhow::bail!("template '{}' requires --param {}=<value>", input, param);
                 }
             }
