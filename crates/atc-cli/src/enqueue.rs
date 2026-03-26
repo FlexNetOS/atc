@@ -123,7 +123,7 @@ pub async fn run_enqueue(
 /// Parse a single input line into (type, value).
 fn parse_input_line(line: &str) -> (QueueInputType, String) {
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
-    match parts.first().map(|s| *s) {
+    match parts.first().copied() {
         Some("task") if parts.len() > 1 => (QueueInputType::Task, parts[1].to_string()),
         Some("prompt") if parts.len() > 1 => (QueueInputType::Prompt, parts[1].to_string()),
         _ => {

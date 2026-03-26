@@ -22,8 +22,8 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
         items.len()
     );
     println!(
-        "{:<24} {:<10} {:<10} {:<8} {}",
-        "ID", "TYPE", "PRIORITY", "STATUS", "INPUT"
+        "{:<24} {:<10} {:<10} {:<8} INPUT",
+        "ID", "TYPE", "PRIORITY", "STATUS"
     );
     println!("{}", "-".repeat(80));
     for item in &items {
@@ -150,8 +150,8 @@ pub async fn dispatch_queue_item(
         .unwrap_or_default();
 
     // Determine if first word is "task" to force task resolver
-    let (raw_input, force_task) = if input.starts_with("task ") {
-        (input["task ".len()..].to_string(), true)
+    let (raw_input, force_task) = if let Some(rest) = input.strip_prefix("task ") {
+        (rest.to_string(), true)
     } else {
         (input.clone(), false)
     };

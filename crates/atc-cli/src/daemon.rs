@@ -447,16 +447,10 @@ async fn run_source_iteration(
                     continue;
                 }
 
-                let (input_type, input_value) = if trimmed.starts_with("task ") {
-                    (
-                        atc_core::queue::QueueInputType::Task,
-                        trimmed["task ".len()..].to_string(),
-                    )
-                } else if trimmed.starts_with("prompt ") {
-                    (
-                        atc_core::queue::QueueInputType::Prompt,
-                        trimmed["prompt ".len()..].to_string(),
-                    )
+                let (input_type, input_value) = if let Some(rest) = trimmed.strip_prefix("task ") {
+                    (atc_core::queue::QueueInputType::Task, rest.to_string())
+                } else if let Some(rest) = trimmed.strip_prefix("prompt ") {
+                    (atc_core::queue::QueueInputType::Prompt, rest.to_string())
                 } else {
                     (atc_core::queue::QueueInputType::Task, trimmed.to_string())
                 };
