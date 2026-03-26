@@ -24,6 +24,11 @@ pub struct ResolvedInput {
     /// Discovered KB root path (for task-based dispatches where the KB root
     /// may differ from the workspace root, e.g. multi-KB discovery).
     pub kb_root: Option<PathBuf>,
+    /// True when the dispatch originates from a template file.
+    pub is_template: bool,
+    /// Rendered template content to be used as user prompt / stdin
+    /// (only set for template dispatches).
+    pub template_body: Option<String>,
 }
 
 /// Trait defining how an input string is resolved into dispatch parameters.

@@ -484,6 +484,8 @@ impl InputResolver for TaskResolver {
             dispatch_id,
             env_overrides,
             kb_root: Some(kb_root),
+            is_template: false,
+            template_body: None,
         })
     }
 

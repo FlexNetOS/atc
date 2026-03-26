@@ -11,6 +11,10 @@ use crate::types::Directive;
 pub struct TemplateOutput {
     pub body: String,
     pub directives: Vec<String>,
+    /// Explicit directive name from frontmatter `directive:` field (singular).
+    pub directive: Option<String>,
+    /// Required parameter names from frontmatter `required_params:` field.
+    pub required_params: Option<Vec<String>>,
 }
 
 /// Assemble a system prompt from component `.md` files listed in the directive config.
@@ -161,6 +165,8 @@ pub async fn render_template_with_deferred(
     Ok(TemplateOutput {
         body: rendered,
         directives: frontmatter.directives,
+        directive: frontmatter.directive,
+        required_params: frontmatter.required_params,
     })
 }
 
@@ -254,6 +260,10 @@ struct Frontmatter {
     #[allow(dead_code)]
     description: Option<String>,
     directives: Vec<String>,
+    /// Explicit directive name from `directive:` (singular) frontmatter field.
+    directive: Option<String>,
+    /// Required parameter names from `required_params:` frontmatter field.
+    required_params: Option<Vec<String>>,
 }
 
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
@@ -315,13 +325,46 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
         })
         .unwrap_or_default();
 
+    let directive = yaml
+        .get("directive")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let required_params = yaml
+        .get("required_params")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+
     Ok((
         Frontmatter {
             description,
             directives,
+            directive,
+            required_params,
         },
         body,
     ))
+}
+
+/// Public view of parsed template frontmatter (for pre-render validation).
+#[derive(Debug, Default)]
+pub struct TemplateFrontmatter {
+    pub directive: Option<String>,
+    pub required_params: Option<Vec<String>>,
+}
+
+/// Parse only the frontmatter of a raw template string, without rendering.
+/// Used by the template resolver to validate `required_params` before rendering.
+pub fn parse_template_frontmatter(raw: &str) -> Result<TemplateFrontmatter> {
+    let (fm, _body) = split_frontmatter(raw)?;
+    Ok(TemplateFrontmatter {
+        directive: fm.directive,
+        required_params: fm.required_params,
+    })
 }
 
 // --- Partial resolution ---
@@ -1342,5 +1385,91 @@ Working on PR: {{pr}}
             .unwrap();
         // Should NOT escape HTML
         assert_eq!(output.body, "Code: <div>Hello & World</div>");
+    }
+
+    // --- directive (singular) frontmatter field tests ---
+
+    #[test]
+    fn test_split_frontmatter_directive_singular() {
+        let raw = "---\ndirective: review-fix\nrequired_params: [pr]\n---\nBody.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.directive.as_deref(), Some("review-fix"));
+        assert_eq!(fm.required_params, Some(vec!["pr".to_string()]));
+        assert_eq!(body, "Body.");
+    }
+
+    #[test]
+    fn test_split_frontmatter_directive_and_directives_coexist() {
+        let raw = "---\ndirective: review-fix\ndirectives: [code-read]\nrequired_params: [pr, task]\n---\nBody.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.directive.as_deref(), Some("review-fix"));
+        assert_eq!(fm.directives, vec!["code-read"]);
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["pr".to_string(), "task".to_string()])
+        );
+        assert_eq!(body, "Body.");
+    }
+
+    #[test]
+    fn test_split_frontmatter_no_required_params() {
+        let raw = "---\ndirective: implement\n---\nBody.";
+        let (fm, _body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.directive.as_deref(), Some("implement"));
+        assert!(fm.required_params.is_none());
+    }
+
+    #[test]
+    fn test_parse_template_frontmatter() {
+        let raw = "---\ndirective: close\nrequired_params: [task]\n---\nClose task {{task}}.";
+        let fm = parse_template_frontmatter(raw).unwrap();
+        assert_eq!(fm.directive.as_deref(), Some("close"));
+        assert_eq!(fm.required_params, Some(vec!["task".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_template_frontmatter_no_frontmatter() {
+        let raw = "Just body, no frontmatter.";
+        let fm = parse_template_frontmatter(raw).unwrap();
+        assert!(fm.directive.is_none());
+        assert!(fm.required_params.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_render_template_returns_directive_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmpl_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        std::fs::write(
+            tmpl_dir.join("test.md"),
+            "---\ndirective: research\nrequired_params: [topic]\n---\nResearch: {{topic}}",
+        )
+        .unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+                components_dir: "components".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert("topic".to_string(), "AI safety".to_string());
+
+        let output = render_template(std::path::Path::new("test.md"), &params, &config, None)
+            .await
+            .unwrap();
+
+        assert_eq!(output.directive.as_deref(), Some("research"));
+        assert_eq!(output.required_params, Some(vec!["topic".to_string()]));
+        assert_eq!(output.body, "Research: AI safety");
     }
 }

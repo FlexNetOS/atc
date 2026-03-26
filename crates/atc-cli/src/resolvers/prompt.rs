@@ -65,6 +65,8 @@ impl InputResolver for PromptResolver {
             dispatch_id,
             env_overrides: HashMap::new(),
             kb_root: None,
+            is_template: false,
+            template_body: None,
         })
     }
 

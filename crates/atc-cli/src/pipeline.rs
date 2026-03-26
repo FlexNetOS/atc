@@ -94,12 +94,24 @@ impl<'a> DispatchPipeline<'a> {
         // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
         //    when dry_run is set), so we can return immediately.
         if opts.dry_run {
+            // Compute providers for display
+            let mut dry_providers =
+                atc_core::providers::providers_for_directive(self.config, &resolved.directive);
+            if (opts.params.iter().any(|(k, _)| k == "pr") || effective_pr_url.is_some())
+                && !dry_providers.iter().any(|p| p.name() == "pr-context")
+            {
+                if let Some(p) = atc_core::providers::make_provider("pr-context") {
+                    dry_providers.insert(0, p);
+                }
+            }
+            let provider_names: Vec<&str> = dry_providers.iter().map(|p| p.name()).collect();
             return self.dry_run(
                 &resolved,
                 effective_pr_url.as_deref(),
                 budget,
                 turns,
                 resolver.name(),
+                &provider_names,
             );
         }
 
@@ -248,9 +260,46 @@ impl<'a> DispatchPipeline<'a> {
         write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
 
         // 7b. Run context providers (non-fatal errors logged, dispatch continues)
-        let providers =
+        let mut providers =
             atc_core::providers::providers_for_directive(self.config, &resolved.directive);
-        let mut rendered_prompt = resolved.system_prompt.clone();
+
+        // Unconditional pr-context: if `pr` param exists or --pr-url is set,
+        // ensure pr-context provider runs regardless of directive config.
+        if (opts.params.iter().any(|(k, _)| k == "pr") || effective_pr_url.is_some())
+            && !providers.iter().any(|p| p.name() == "pr-context")
+        {
+            if let Some(p) = atc_core::providers::make_provider("pr-context") {
+                providers.insert(0, p);
+            }
+        }
+
+        // For template dispatches, assemble system prompt from directive components
+        // (same as task dispatches). The rendered template becomes stdin/user prompt.
+        let mut rendered_prompt = if resolved.is_template {
+            let slug_for_prompt = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
+            match atc_core::prompt_engine::assemble_system_prompt(
+                &resolved.directive,
+                slug_for_prompt,
+                "",
+                self.config,
+                Some(&worktree_path),
+            )
+            .await
+            {
+                Ok(prompt) => prompt,
+                Err(e) => {
+                    // Fall back to empty prompt if directive has no components configured
+                    tracing::warn!(
+                        directive = %resolved.directive.as_str(),
+                        error = %e,
+                        "failed to assemble system prompt from directive components, using empty prompt"
+                    );
+                    String::new()
+                }
+            }
+        } else {
+            resolved.system_prompt.clone()
+        };
         if !providers.is_empty() {
             let dispatch_ctx = atc_core::providers::DispatchContext {
                 dispatch_id: resolved.dispatch_id.clone(),
@@ -358,10 +407,11 @@ impl<'a> DispatchPipeline<'a> {
         // prompt as stdin content so the executor doesn't call `git kb show`.
         let stdin_content = if resolved.task_slug.is_some() {
             None // task dispatches: executor fetches from git-kb
+        } else if let Some(ref template_body) = resolved.template_body {
+            // Template dispatches: rendered template as user prompt / stdin
+            Some(template_body.clone())
         } else {
-            // Non-task dispatches: provide a short context marker as stdin
-            // instead of duplicating the rendered system prompt (which is
-            // already passed via --append-system-prompt-file).
+            // Non-task, non-template dispatches (raw prompts): short context marker
             Some(format!(
                 "Non-task dispatch ({}). All instructions are in the system prompt.",
                 resolved.branch
@@ -547,6 +597,7 @@ impl<'a> DispatchPipeline<'a> {
         budget: f64,
         turns: u32,
         resolver_name: &str,
+        providers: &[&str],
     ) -> Result<DispatchOutcome> {
         println!("=== DRY RUN ===");
         println!(
@@ -560,6 +611,10 @@ impl<'a> DispatchPipeline<'a> {
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
+        println!("Providers:   {:?}", providers);
+        if resolved.is_template {
+            println!("Template:    yes (system prompt from directive components)");
+        }
         Ok(DispatchOutcome {
             id: resolved.dispatch_id.clone(),
             session: resolved.dispatch_id.clone(),
