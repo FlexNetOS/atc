@@ -126,6 +126,17 @@ fn build_config_toml(config: &AtcConfig) -> String {
         }
     }
 
+    // Include prompt if non-default
+    let default_prompt = atc_core::config::PromptConfig::default();
+    if config.prompt.components_dir != default_prompt.components_dir
+        || config.prompt.templates_dir != default_prompt.templates_dir
+        || config.prompt.partials_dir != default_prompt.partials_dir
+    {
+        if let Ok(s) = toml::to_string_pretty(&config.prompt) {
+            parts.push(format!("[prompt]\n{s}"));
+        }
+    }
+
     // Include paths if non-default
     if !config.paths.search_path.is_empty() {
         if let Ok(s) = toml::to_string_pretty(&config.paths) {
