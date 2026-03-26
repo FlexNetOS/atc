@@ -740,11 +740,22 @@ impl SqliteRegistry {
 #[async_trait]
 impl DispatchQueue for SqliteRegistry {
     async fn enqueue(&self, item: EnqueueItem) -> Result<EnqueueResult> {
+        // Use an IMMEDIATE transaction so the dedup check + insert are atomic.
+        // This prevents TOCTOU races when concurrent callers enqueue the same item.
+        let mut tx = sqlx::Acquire::begin(&self.pool).await?;
+        sqlx::query("SELECT 1").execute(&mut *tx).await.ok(); // upgrade to write lock
+
         // Dedup: already pending/dispatching in this queue?
-        if self
-            .queue_has_pending(&item.queue_name, &item.input_value)
-            .await?
-        {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dispatch_queue WHERE queue_name = ?1 AND input_value = ?2 AND status IN ('pending', 'dispatching')",
+        )
+        .bind(&item.queue_name)
+        .bind(&item.input_value)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if count > 0 {
+            tx.rollback().await?;
             return Ok(EnqueueResult::Skipped(
                 "already pending in queue".to_string(),
             ));
@@ -752,18 +763,15 @@ impl DispatchQueue for SqliteRegistry {
 
         // Dedup: already running in registry?
         if item.input_type == QueueInputType::Task {
-            let active: Vec<DispatchRecord> = {
-                let rows = sqlx::query(
-                    "SELECT * FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
-                )
-                .bind(&item.input_value)
-                .fetch_all(&self.pool)
-                .await?;
-                rows.iter()
-                    .map(Self::row_to_record)
-                    .collect::<Result<Vec<_>>>()?
-            };
-            if !active.is_empty() {
+            let active_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
+            )
+            .bind(&item.input_value)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if active_count > 0 {
+                tx.rollback().await?;
                 return Ok(EnqueueResult::Skipped(
                     "already running in registry".to_string(),
                 ));
@@ -789,9 +797,10 @@ impl DispatchQueue for SqliteRegistry {
         .bind(QueueItemStatus::Pending.as_str())
         .bind(&now)
         .bind(&item.enqueued_by)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(EnqueueResult::Enqueued { id })
     }
 
