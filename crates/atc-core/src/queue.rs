@@ -89,10 +89,11 @@ impl std::fmt::Display for QueueItemStatus {
 }
 
 /// Priority levels for dispatch ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Priority {
     Critical = 0,
     High = 25,
+    #[default]
     Medium = 50,
     Low = 75,
 }
@@ -109,12 +110,6 @@ impl Priority {
             Priority::Medium => "medium",
             Priority::Low => "low",
         }
-    }
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Medium
     }
 }
 
