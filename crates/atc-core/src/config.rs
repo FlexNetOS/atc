@@ -144,7 +144,7 @@ impl AtcConfig {
     /// Load config using resolution order:
     /// 1. `--config <path>` CLI flag (passed as argument)
     /// 2. `ATC_CONFIG` environment variable
-    /// 3. Walk up from CWD looking for `atc.toml` (project-level discovery)
+    /// 3. Walk up from CWD looking for `.atc/config.toml` or `atc.toml` (project-level discovery)
     /// 4. `~/.config/atc/config.toml` (XDG user config)
     ///
     /// Returns default config if no file is found.
@@ -154,20 +154,7 @@ impl AtcConfig {
             let path = expand_tilde(path);
             let contents = std::fs::read_to_string(&path)?;
             let mut cfg = Self::parse_and_validate(&contents)?;
-            let is_atc_dir = Self::is_atc_dir_config(&path);
-            cfg.config_dir = if is_atc_dir {
-                // .atc/config.toml → config_dir is project root (parent of .atc/)
-                path.parent()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.to_path_buf())
-            } else {
-                path.parent().map(|p| p.to_path_buf())
-            };
-            cfg.atc_dir_mode = is_atc_dir;
-            if is_atc_dir {
-                cfg.apply_atc_dir_defaults();
-                cfg.load_directive_files();
-            }
+            cfg.apply_file_context(&path);
             return Ok(cfg);
         }
 
@@ -182,19 +169,7 @@ impl AtcConfig {
                 )
             })?;
             let mut cfg = Self::parse_and_validate(&contents)?;
-            let is_atc_dir = Self::is_atc_dir_config(&path);
-            cfg.config_dir = if is_atc_dir {
-                path.parent()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.to_path_buf())
-            } else {
-                path.parent().map(|p| p.to_path_buf())
-            };
-            cfg.atc_dir_mode = is_atc_dir;
-            if is_atc_dir {
-                cfg.apply_atc_dir_defaults();
-                cfg.load_directive_files();
-            }
+            cfg.apply_file_context(&path);
             return Ok(cfg);
         }
 
@@ -228,25 +203,11 @@ impl AtcConfig {
         let mut dir = Some(start.to_path_buf());
         while let Some(d) = dir {
             // Try .atc/config.toml first, then atc.toml
-            for (candidate, is_atc_dir) in [
-                (d.join(".atc/config.toml"), true),
-                (d.join("atc.toml"), false),
-            ] {
+            for candidate in [d.join(".atc/config.toml"), d.join("atc.toml")] {
                 match std::fs::read_to_string(&candidate) {
                     Ok(contents) => match Self::parse_and_validate(&contents) {
                         Ok(mut cfg) => {
-                            cfg.config_dir = if is_atc_dir {
-                                // For .atc/config.toml, config_dir is the parent of .atc/
-                                // (the project root), not .atc/ itself
-                                Some(d.clone())
-                            } else {
-                                candidate.parent().map(|p| p.to_path_buf())
-                            };
-                            cfg.atc_dir_mode = is_atc_dir;
-                            if is_atc_dir {
-                                cfg.apply_atc_dir_defaults();
-                                cfg.load_directive_files();
-                            }
+                            cfg.apply_file_context(&candidate);
                             return Some(cfg);
                         }
                         Err(e) => {
@@ -281,6 +242,29 @@ impl AtcConfig {
                 .and_then(|p| p.file_name())
                 .and_then(|f| f.to_str())
                 == Some(".atc")
+    }
+
+    /// Apply `.atc/` directory post-processing to a freshly-parsed config.
+    ///
+    /// Sets `config_dir` (project root for `.atc/config.toml`, parent dir for
+    /// legacy `atc.toml`), `atc_dir_mode`, and loads directive files + defaults
+    /// when in `.atc/` mode. Call this after `parse_and_validate` for any config
+    /// loaded from a file path.
+    fn apply_file_context(&mut self, path: &Path) {
+        let is_atc_dir = Self::is_atc_dir_config(path);
+        self.config_dir = if is_atc_dir {
+            // .atc/config.toml → config_dir is project root (parent of .atc/)
+            path.parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+        } else {
+            path.parent().map(|p| p.to_path_buf())
+        };
+        self.atc_dir_mode = is_atc_dir;
+        if is_atc_dir {
+            self.apply_atc_dir_defaults();
+            self.load_directive_files();
+        }
     }
 
     /// Validate a single directive entry (name + config).
