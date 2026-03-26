@@ -13,6 +13,7 @@ pub mod close;
 pub mod dispatch;
 pub mod health;
 pub mod info;
+pub mod init;
 pub mod kb;
 pub mod logs;
 pub mod pipeline;
@@ -175,6 +176,12 @@ mod args {
             /// Path to stream-json log file (resolved from registry if not provided)
             #[arg(long)]
             log: Option<std::path::PathBuf>,
+        },
+        /// Initialize .atc/ directory from current config
+        Init {
+            /// Force overwrite existing .atc/ directory
+            #[arg(long)]
+            force: bool,
         },
         /// Watch running agent sessions and emit structured events
         Watch {
@@ -360,6 +367,7 @@ pub async fn run(
             )
             .await
         }
+        Commands::Init { force } => init::run_init(config, *force).await,
         Commands::Watch {
             id,
             all_running,

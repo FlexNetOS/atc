@@ -110,6 +110,7 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
