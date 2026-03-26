@@ -18,8 +18,7 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
-/// Timeout for git subprocess calls.
-const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+use crate::enqueue::{run_git_cmd, CMD_TIMEOUT};
 
 /// Options for `atc daemon`.
 #[derive(Debug)]
@@ -398,28 +397,6 @@ async fn start_sources(
     Ok(handles)
 }
 
-/// Run a git subprocess with timeout and kill_on_drop.
-async fn run_git_cmd(
-    args: &[&str],
-    workspace_root: Option<&std::path::Path>,
-) -> Result<std::process::Output> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args).kill_on_drop(true);
-    if let Some(root) = workspace_root {
-        cmd.current_dir(root);
-    }
-    let output = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "git {} timed out after {}s",
-                args.join(" "),
-                CMD_TIMEOUT.as_secs()
-            )
-        })??;
-    Ok(output)
-}
-
 /// Run a single iteration of a source.
 ///
 /// `since_secs` is the number of seconds to look back for the events source.
@@ -584,17 +561,16 @@ async fn run_source_iteration(
             }
         }
         SourceConfig::Script(cfg) => {
-            let output = tokio::time::timeout(
-                CMD_TIMEOUT,
-                tokio::process::Command::new("sh")
-                    .args(["-c", &cfg.command])
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("script source timed out after {}s", CMD_TIMEOUT.as_secs())
-            })??;
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.args(["-c", &cfg.command]).kill_on_drop(true);
+            if let Some(root) = workspace_root {
+                cmd.current_dir(root);
+            }
+            let output = tokio::time::timeout(CMD_TIMEOUT, cmd.output())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("script source timed out after {}s", CMD_TIMEOUT.as_secs())
+                })??;
 
             if !output.status.success() {
                 anyhow::bail!(
@@ -649,13 +625,16 @@ fn acquire_pid_file(path: &PathBuf) -> Result<()> {
     if path.exists() {
         if let Ok(contents) = std::fs::read_to_string(path) {
             if let Ok(pid) = contents.trim().parse::<u32>() {
-                // Check if process is alive
-                let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
-                if alive {
-                    anyhow::bail!(
-                        "daemon already running (PID {}). Use 'atc daemon stop' first.",
-                        pid
-                    );
+                // PID 0 would target the calling process's process group via
+                // kill(0, 0) — skip and treat as stale.
+                if pid > 0 {
+                    let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+                    if alive {
+                        anyhow::bail!(
+                            "daemon already running (PID {}). Use 'atc daemon stop' first.",
+                            pid
+                        );
+                    }
                 }
             }
         }
@@ -696,6 +675,17 @@ pub async fn stop_daemon(config: &AtcConfig) -> Result<()> {
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid PID in {}", pid_file.display()))?;
 
+    // Validate PID — negative values target process groups (-1 targets ALL
+    // processes), and 0 targets the calling process's group. Both are dangerous.
+    if pid <= 0 {
+        let _ = std::fs::remove_file(&pid_file);
+        anyhow::bail!(
+            "invalid PID {} in {}; cleaned up stale PID file",
+            pid,
+            pid_file.display()
+        );
+    }
+
     // Send SIGTERM
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
     if result == 0 {
@@ -732,29 +722,25 @@ pub async fn daemon_status(
     let pid_file = config
         .daemon
         .resolved_pid_file(config.config_dir.as_deref());
-    let daemon_running = if pid_file.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                unsafe { libc::kill(pid as i32, 0) == 0 }
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    // Read PID file once to avoid TOCTOU between reads.
+    let running_pid: Option<u32> = pid_file
+        .exists()
+        .then(|| std::fs::read_to_string(&pid_file).ok())
+        .flatten()
+        .and_then(|contents| contents.trim().parse::<u32>().ok())
+        .filter(|&pid| pid > 0 && unsafe { libc::kill(pid as i32, 0) == 0 });
 
     println!(
         "Daemon: {}",
-        if daemon_running { "running" } else { "stopped" }
+        if running_pid.is_some() {
+            "running"
+        } else {
+            "stopped"
+        }
     );
 
-    if daemon_running {
-        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
-            println!("PID:    {}", contents.trim());
-        }
+    if let Some(pid) = running_pid {
+        println!("PID:    {}", pid);
     }
 
     // Queue depths
