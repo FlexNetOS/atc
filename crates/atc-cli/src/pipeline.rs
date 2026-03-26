@@ -29,7 +29,7 @@ impl<'a> DispatchPipeline<'a> {
         info!(resolver = resolver.name(), "selected resolver");
 
         // 2. Resolve → ResolvedInput
-        let resolved = resolver.resolve(input, opts, self.config).await?;
+        let mut resolved = resolver.resolve(input, opts, self.config).await?;
 
         // 3. Validate
         // PR URL can come from --pr-url or from template --param pr=<url>
@@ -317,16 +317,28 @@ impl<'a> DispatchPipeline<'a> {
             let provider_output =
                 atc_core::providers::run_providers(&providers, &dispatch_ctx).await;
 
-            // Apply template_vars to rendered prompt. Provider vars were rendered
-            // as deferred placeholders (__ATC_DEFER_<var>__) by the template
-            // engine; replace those now. Also replace raw {{var}} for backward
-            // compatibility with non-template dispatches.
+            // Apply template_vars to rendered prompt AND template_body. Provider
+            // vars were rendered as deferred placeholders (__ATC_DEFER_<var>__)
+            // by the template engine; replace those now. Also replace raw
+            // {{var}} for backward compatibility with non-template dispatches.
             for (key, value) in &provider_output.template_vars {
                 let deferred = atc_core::prompt_engine::deferred_placeholder(key);
                 rendered_prompt = rendered_prompt.replace(&deferred, value);
                 // Backward compat: also replace raw {{key}} (e.g. component-assembled prompts)
                 let raw_placeholder = format!("{{{{{}}}}}", key);
                 rendered_prompt = rendered_prompt.replace(&raw_placeholder, value);
+            }
+
+            // Substitute deferred placeholders in template_body too — for
+            // template dispatches, provider vars like {{prefetch}} appear in the
+            // rendered template body which becomes stdin/user prompt.
+            if let Some(ref mut body) = resolved.template_body {
+                for (key, value) in &provider_output.template_vars {
+                    let deferred = atc_core::prompt_engine::deferred_placeholder(key);
+                    *body = body.replace(&deferred, value);
+                    let raw_placeholder = format!("{{{{{}}}}}", key);
+                    *body = body.replace(&raw_placeholder, value);
+                }
             }
 
             // Write provider output files to worktree
