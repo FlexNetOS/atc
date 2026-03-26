@@ -31,10 +31,10 @@ pub async fn run_close(
 
     // 3. Set PR URL
     let effective_pr_url = if let Some(url) = pr_url {
-        registry.set_pr_url(id, url).await?;
+        registry.add_pr_url(id, url).await?;
         Some(url.to_string())
     } else {
-        record.pr_url.clone()
+        record.pr_urls.first().cloned()
     };
 
     // 4. Kill any lingering tmux session (non-fatal)
@@ -295,7 +295,19 @@ mod tests {
             let mut records = self.records.lock().unwrap();
             for r in records.iter_mut() {
                 if r.id == id {
-                    r.pr_url = Some(url.to_string());
+                    r.pr_urls = vec![url.to_string()];
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("no dispatch record found for id: {id}")
+        }
+        async fn add_pr_url(&self, id: &str, url: &str) -> Result<()> {
+            let mut records = self.records.lock().unwrap();
+            for r in records.iter_mut() {
+                if r.id == id {
+                    if !r.pr_urls.contains(&url.to_string()) {
+                        r.pr_urls.push(url.to_string());
+                    }
                     return Ok(());
                 }
             }
@@ -376,7 +388,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
-            pr_url: None,
+            pr_urls: vec![],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),
@@ -446,7 +458,7 @@ mod tests {
 
         let r = registry.get("test-id-1").await.unwrap().unwrap();
         assert_eq!(
-            r.pr_url.as_deref(),
+            r.pr_urls.first().map(|s| s.as_str()),
             Some("https://github.com/org/repo/pull/1")
         );
     }

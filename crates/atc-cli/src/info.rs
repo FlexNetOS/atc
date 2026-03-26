@@ -33,8 +33,8 @@ pub fn format_info(record: &DispatchRecord) -> String {
 
     add_line(&mut lines, "session", &record.session);
 
-    if let Some(ref url) = record.pr_url {
-        add_line(&mut lines, "pr_url", url);
+    if !record.pr_urls.is_empty() {
+        add_line(&mut lines, "pr_urls", &record.pr_urls.join(", "));
     }
 
     if let Some(cost) = record.cost_usd {
@@ -122,7 +122,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 1,
             resolver: "task".to_string(),
-            pr_url: Some("https://github.com/harmony-labs/gitkb-core/pull/275".to_string()),
+            pr_urls: vec!["https://github.com/harmony-labs/gitkb-core/pull/275".to_string()],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks {
@@ -160,7 +160,7 @@ mod tests {
         assert!(output.contains("resolver:"));
         assert!(output.contains("task"));
         assert!(output.contains("branch:"));
-        assert!(output.contains("pr_url:"));
+        assert!(output.contains("pr_urls:"));
         assert!(output.contains("pull/275"));
         assert!(output.contains("cost_usd:"));
         assert!(output.contains("$8.59"));
@@ -172,7 +172,7 @@ mod tests {
     fn test_format_info_omits_none_fields() {
         let mut record = full_record();
         record.task_slug = None;
-        record.pr_url = None;
+        record.pr_urls = vec![];
         record.cost_usd = None;
         record.num_turns = None;
         record.duration_ms = None;
@@ -180,7 +180,7 @@ mod tests {
 
         let output = format_info(&record);
         assert!(!output.contains("task_slug:"));
-        assert!(!output.contains("pr_url:"));
+        assert!(!output.contains("pr_urls:"));
         assert!(!output.contains("cost_usd:"));
         assert!(output.contains("id:"));
         assert!(output.contains("checks:"));

@@ -224,8 +224,10 @@ pub async fn run_retry(
         // DispatchRecord, so retries re-render with empty bindings. Track in
         // a future schema migration (add `params_json TEXT` column).
         params: HashMap::new(),
-        pr_url: record.pr_url.clone(),
-        repo: None,
+        pr_url: record.pr_urls.first().cloned(),
+        // TODO: Multi-repo repos paths are not yet persisted in DispatchRecord,
+        // so retries fall back to auto-discovery. See multi-repo retry tracking issue.
+        repos: vec![],
         inline: false,
         force: false,
         dry_run: false,
@@ -379,6 +381,9 @@ mod tests {
         async fn set_pr_url(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
+        async fn add_pr_url(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn set_artifacts(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
@@ -450,7 +455,7 @@ mod tests {
             directive: Directive::Implement,
             retries,
             resolver: "task".to_string(),
-            pr_url: None,
+            pr_urls: vec![],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),

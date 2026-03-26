@@ -107,7 +107,7 @@ mod tests {
             directive: Some(Directive::Implement),
             params: HashMap::new(),
             pr_url: None,
-            repo: None,
+            repos: vec![],
             inline: true,
             force: false,
             dry_run: false,
@@ -140,7 +140,7 @@ mod tests {
             directive: None, // Should default to Implement
             params: HashMap::new(),
             pr_url: None,
-            repo: None,
+            repos: vec![],
             inline: true,
             force: false,
             dry_run: false,

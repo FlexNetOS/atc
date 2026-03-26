@@ -289,11 +289,12 @@ impl HealthChecker {
         }
     }
 
-    /// Signal 3: Check if PR exists for the branch. Updates pr_url in registry if discovered.
+    /// Signal 3: Check if PR exists for the branch. Updates pr_urls in registry if discovered.
+    /// For multi-repo dispatches, discovers PRs across all repos in the worktree set.
     async fn eval_signal_3(&self, record: &mut DispatchRecord) -> SignalResult {
-        // If pr_url already known, skip the gh call
-        if record.pr_url.is_some() {
-            debug!(id = %record.id, "signal 3: pr_url already known, skipping gh call");
+        // If pr_urls already known, skip the gh call
+        if !record.pr_urls.is_empty() {
+            debug!(id = %record.id, count = record.pr_urls.len(), "signal 3: pr_urls already known, skipping gh call");
             return SignalResult::True;
         }
 
@@ -310,7 +311,7 @@ impl HealthChecker {
                 "--json",
                 "number,url",
                 "--jq",
-                ".[0]",
+                ".[].url",
             ])
             .current_dir(&record.worktree_path)
             .stderr(std::process::Stdio::null());
@@ -325,24 +326,28 @@ impl HealthChecker {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 if trimmed.is_empty() || trimmed == "null" {
-                    // gh succeeded but returned no results — definitively no PR
                     debug!(id = %record.id, "signal 3: no PR found");
                     return SignalResult::False;
                 }
-                // Parse JSON to extract url
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    if let Some(url) = json.get("url").and_then(|v| v.as_str()) {
-                        info!(id = %record.id, url = %url, "signal 3: PR discovered");
-                        // Store in registry
-                        if let Err(e) = self.registry.set_pr_url(&record.id, url).await {
-                            warn!(id = %record.id, error = %e, "signal 3: failed to store pr_url");
-                        }
-                        record.pr_url = Some(url.to_string());
-                        return SignalResult::True;
+                // Each line is a PR URL (jq .[].url outputs one per line)
+                let urls: Vec<String> = trimmed
+                    .lines()
+                    .map(|l| l.trim().trim_matches('"').to_string())
+                    .filter(|u| !u.is_empty())
+                    .collect();
+                if urls.is_empty() {
+                    debug!(id = %record.id, "signal 3: no PR found");
+                    return SignalResult::False;
+                }
+                info!(id = %record.id, count = urls.len(), "signal 3: PR(s) discovered");
+                // Store all discovered PR URLs in registry
+                for url in &urls {
+                    if let Err(e) = self.registry.add_pr_url(&record.id, url).await {
+                        warn!(id = %record.id, error = %e, "signal 3: failed to store pr_url");
                     }
                 }
-                warn!(id = %record.id, output = %trimmed, "signal 3: could not parse PR URL from gh output");
-                SignalResult::Error
+                record.pr_urls = urls;
+                SignalResult::True
             }
             Ok(Err(e)) => {
                 warn!(id = %record.id, error = %e, "signal 3: gh pr list command failed");
@@ -355,21 +360,36 @@ impl HealthChecker {
         }
     }
 
-    /// Signal 4: Check if all CI checks passed on the PR.
+    /// Signal 4: Check if all CI checks passed on ALL tracked PRs.
     /// Only counts genuinely failed states (FAILURE, TIMED_OUT, CANCELLED,
     /// ACTION_REQUIRED). SKIPPED and NEUTRAL are not considered failures.
     ///
-    /// **Note:** If the repository has no CI checks configured, `gh pr checks`
-    /// returns an empty list. The jq filter then evaluates to `0` (zero failures),
-    /// so this signal returns `True`. This is intentional: repos without CI
-    /// should not block the Done transition. If CI is later added and fails,
-    /// the next health check cycle will catch it.
+    /// For multi-repo dispatches, ALL PRs must have passing CI for this signal
+    /// to return True. Any single failure causes the whole signal to fail.
     async fn eval_signal_4(&self, record: &DispatchRecord) -> SignalResult {
-        let pr_url = match &record.pr_url {
-            Some(url) => url,
-            None => return SignalResult::False,
-        };
+        if record.pr_urls.is_empty() {
+            return SignalResult::False;
+        }
+        for pr_url in &record.pr_urls {
+            match self
+                .check_ci_for_pr(&record.id, pr_url, &record.worktree_path)
+                .await
+            {
+                SignalResult::True => continue,
+                other => return other,
+            }
+        }
+        debug!(id = %record.id, "signal 4: all CI checks passed across all PRs");
+        SignalResult::True
+    }
 
+    /// Check CI for a single PR URL.
+    async fn check_ci_for_pr(
+        &self,
+        dispatch_id: &str,
+        pr_url: &str,
+        worktree_path: &std::path::Path,
+    ) -> SignalResult {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
         let mut cmd = tokio::process::Command::new(&self.gh_bin);
         cmd.kill_on_drop(true)
@@ -382,51 +402,66 @@ impl HealthChecker {
                 "--jq",
                 "[.[] | select(.state == \"FAILURE\" or .state == \"TIMED_OUT\" or .state == \"CANCELLED\" or .state == \"ACTION_REQUIRED\")] | length",
             ])
-            .current_dir(&record.worktree_path)
+            .current_dir(worktree_path)
             .stderr(std::process::Stdio::null());
         let result = tokio::time::timeout(timeout, cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %record.id, "signal 4: gh pr checks failed");
+                    warn!(id = %dispatch_id, pr = %pr_url, "signal 4: gh pr checks failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 match trimmed.parse::<u64>() {
-                    Ok(0) => {
-                        debug!(id = %record.id, "signal 4: all CI checks passed");
-                        SignalResult::True
-                    }
+                    Ok(0) => SignalResult::True,
                     Ok(n) => {
-                        debug!(id = %record.id, failing = n, "signal 4: CI checks failing");
+                        debug!(id = %dispatch_id, pr = %pr_url, failing = n, "signal 4: CI checks failing");
                         SignalResult::False
                     }
                     Err(_) => {
-                        warn!(id = %record.id, output = %trimmed, "signal 4: could not parse gh pr checks output");
+                        warn!(id = %dispatch_id, pr = %pr_url, output = %trimmed, "signal 4: could not parse gh pr checks output");
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %record.id, error = %e, "signal 4: gh pr checks command failed");
+                warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 4: gh pr checks command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %record.id, "signal 4: gh pr checks timed out");
+                warn!(id = %dispatch_id, pr = %pr_url, "signal 4: gh pr checks timed out");
                 SignalResult::Error
             }
         }
     }
 
-    /// Signal 5: Check if PR reviews are approved.
+    /// Signal 5: Check if PR reviews are approved on ALL tracked PRs.
     async fn eval_signal_5(&self, record: &DispatchRecord) -> SignalResult {
-        let pr_url = match &record.pr_url {
-            Some(url) => url,
-            None => return SignalResult::False,
-        };
+        if record.pr_urls.is_empty() {
+            return SignalResult::False;
+        }
+        for pr_url in &record.pr_urls {
+            match self
+                .check_reviews_for_pr(&record.id, pr_url, &record.worktree_path)
+                .await
+            {
+                SignalResult::True => continue,
+                other => return other,
+            }
+        }
+        debug!(id = %record.id, "signal 5: reviews approved across all PRs");
+        SignalResult::True
+    }
 
+    /// Check review status for a single PR URL.
+    async fn check_reviews_for_pr(
+        &self,
+        dispatch_id: &str,
+        pr_url: &str,
+        worktree_path: &std::path::Path,
+    ) -> SignalResult {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
         let mut cmd = tokio::process::Command::new(&self.gh_bin);
         cmd.kill_on_drop(true)
@@ -439,69 +474,61 @@ impl HealthChecker {
                 "--jq",
                 ".reviewDecision",
             ])
-            .current_dir(&record.worktree_path)
+            .current_dir(worktree_path)
             .stderr(std::process::Stdio::null());
         let result = tokio::time::timeout(timeout, cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %record.id, "signal 5: gh pr view failed");
+                    warn!(id = %dispatch_id, pr = %pr_url, "signal 5: gh pr view failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 match trimmed {
-                    "APPROVED" => {
-                        debug!(id = %record.id, "signal 5: reviews approved");
-                        SignalResult::True
-                    }
-                    "" | "null" => {
-                        // Empty or "null" reviewDecision means the repo either has no
-                        // branch protection rules requiring reviews, or the PR has not
-                        // yet received any reviews.  We treat this as approved because:
-                        //   1. Most agent-created PRs target repos without mandatory review.
-                        //   2. Blocking on a review that may never come would strand the
-                        //      record permanently in NeedsReview.
-                        // If the repo does require reviews, this signal will flip to
-                        // CHANGES_REQUESTED or REVIEW_REQUIRED once a reviewer acts,
-                        // and the next health check cycle will pick up the change.
-                        debug!(id = %record.id, "signal 5: no review policy or no reviews yet, treating as approved");
-                        SignalResult::True
-                    }
+                    "APPROVED" | "" | "null" => SignalResult::True,
                     other => {
-                        debug!(id = %record.id, decision = %other, "signal 5: reviews not approved");
+                        debug!(id = %dispatch_id, pr = %pr_url, decision = %other, "signal 5: reviews not approved");
                         SignalResult::False
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %record.id, error = %e, "signal 5: gh pr view command failed");
+                warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 5: gh pr view command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %record.id, "signal 5: gh pr view timed out");
+                warn!(id = %dispatch_id, pr = %pr_url, "signal 5: gh pr view timed out");
                 SignalResult::Error
             }
         }
     }
 
-    /// Signal 6: Check if all review threads are resolved.
-    /// Uses the GraphQL API because `gh pr view --json reviewThreads` is not
-    /// a supported JSON field in the GitHub CLI. Includes `pageInfo` to detect
-    /// truncated results (>100 threads) and treats them conservatively as unresolved.
+    /// Signal 6: Check if all review threads are resolved on ALL tracked PRs.
+    /// Uses the GraphQL API. ALL PRs must have resolved threads for this signal to pass.
     async fn eval_signal_6(&self, record: &DispatchRecord) -> SignalResult {
-        let pr_url = match &record.pr_url {
-            Some(url) => url,
-            None => return SignalResult::False,
-        };
+        if record.pr_urls.is_empty() {
+            return SignalResult::False;
+        }
+        for pr_url in &record.pr_urls {
+            match self.check_threads_for_pr(&record.id, pr_url).await {
+                SignalResult::True => continue,
+                other => return other,
+            }
+        }
+        debug!(id = %record.id, "signal 6: all threads resolved across all PRs");
+        SignalResult::True
+    }
 
+    /// Check thread resolution for a single PR URL.
+    async fn check_threads_for_pr(&self, dispatch_id: &str, pr_url: &str) -> SignalResult {
         // Parse owner, repo, and PR number from the URL
         // Expected format: https://github.com/{owner}/{repo}/pull/{number}
         let (owner, repo, number) = match Self::parse_pr_url(pr_url) {
             Some(parts) => parts,
             None => {
-                warn!(id = %record.id, url = %pr_url, "signal 6: could not parse PR URL");
+                warn!(id = %dispatch_id, url = %pr_url, "signal 6: could not parse PR URL");
                 return SignalResult::Error;
             }
         };
@@ -531,30 +558,26 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %record.id, "signal 6: gh api graphql failed");
+                    warn!(id = %dispatch_id, pr = %pr_url, "signal 6: gh api graphql failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                // Parse the GraphQL response to count unresolved threads
                 match serde_json::from_str::<serde_json::Value>(&stdout) {
                     Ok(json) => {
-                        // Check for GraphQL-level errors
                         if json.get("errors").is_some() {
-                            warn!(id = %record.id, "signal 6: GraphQL response contains errors");
+                            warn!(id = %dispatch_id, pr = %pr_url, "signal 6: GraphQL response contains errors");
                             return SignalResult::Error;
                         }
 
                         let threads_obj =
                             json.pointer("/data/repository/pullRequest/reviewThreads");
 
-                        // Check pagination — if there are more pages, we can't
-                        // confirm all threads are resolved
                         if let Some(has_next) = threads_obj
                             .and_then(|t| t.pointer("/pageInfo/hasNextPage"))
                             .and_then(|v| v.as_bool())
                         {
                             if has_next {
-                                warn!(id = %record.id, "signal 6: >100 review threads, result truncated — treating as unresolved");
+                                warn!(id = %dispatch_id, pr = %pr_url, "signal 6: >100 review threads, result truncated — treating as unresolved");
                                 return SignalResult::False;
                             }
                         }
@@ -572,33 +595,30 @@ impl HealthChecker {
                                     })
                                     .count();
                                 if unresolved == 0 {
-                                    debug!(id = %record.id, "signal 6: all threads resolved");
                                     SignalResult::True
                                 } else {
-                                    debug!(id = %record.id, unresolved = unresolved, "signal 6: unresolved threads remain");
+                                    debug!(id = %dispatch_id, pr = %pr_url, unresolved = unresolved, "signal 6: unresolved threads remain");
                                     SignalResult::False
                                 }
                             }
                             None => {
-                                // nodes is null or missing — could be a field-level
-                                // GraphQL error, treat as error rather than resolved
-                                warn!(id = %record.id, "signal 6: reviewThreads nodes is null/missing");
+                                warn!(id = %dispatch_id, pr = %pr_url, "signal 6: reviewThreads nodes is null/missing");
                                 SignalResult::Error
                             }
                         }
                     }
                     Err(e) => {
-                        warn!(id = %record.id, error = %e, "signal 6: could not parse GraphQL response");
+                        warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 6: could not parse GraphQL response");
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %record.id, error = %e, "signal 6: gh api graphql command failed");
+                warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 6: gh api graphql command failed");
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %record.id, "signal 6: gh api graphql timed out");
+                warn!(id = %dispatch_id, pr = %pr_url, "signal 6: gh api graphql timed out");
                 SignalResult::Error
             }
         }

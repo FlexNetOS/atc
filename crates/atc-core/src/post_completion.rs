@@ -112,14 +112,15 @@ pub async fn run_post_completion(
         registry.update_status(&input.dispatch_id, status).await?;
     }
 
-    // 8. Store PR URL (prefer extracted URL, fall back to registry record)
-    let extracted_pr_url = artifacts.pr_urls.first().cloned();
-    let pr_url = extracted_pr_url.clone().or_else(|| record.pr_url.clone());
-    if let Some(ref url) = extracted_pr_url {
-        if let Err(e) = registry.set_pr_url(&input.dispatch_id, url).await {
-            warn!(id = %input.dispatch_id, error = %e, "failed to set PR URL");
+    // 8. Store all discovered PR URLs (merge extracted with existing)
+    let mut all_pr_urls = record.pr_urls.clone();
+    for url in &artifacts.pr_urls {
+        if !all_pr_urls.contains(url) {
+            all_pr_urls.push(url.clone());
+            registry.add_pr_url(&input.dispatch_id, url).await?;
         }
     }
+    let pr_url = all_pr_urls.first().cloned();
 
     // 9. Store artifacts as JSON blob (always store — artifacts are additive metadata)
     let json = serde_json::to_string(&artifacts)?;
@@ -169,11 +170,15 @@ pub async fn run_post_completion(
         }
     }
 
-    // 13. Worktree cleanup if PR merged/closed
-    if !input.skip_cleanup {
-        if let Some(ref url) = pr_url {
-            let worktree_base = config.dispatch.resolved_worktree_base();
-            cleanup_if_pr_done(url, &record.worktree_path, &worktree_base).await;
+    // 13. Worktree cleanup if ALL tracked PRs are merged/closed
+    if !input.skip_cleanup && !all_pr_urls.is_empty() {
+        let worktree_base = config.dispatch.resolved_worktree_base();
+        let all_done = futures::future::join_all(all_pr_urls.iter().map(|url| is_pr_done(url)))
+            .await
+            .into_iter()
+            .all(|done| done);
+        if all_done {
+            cleanup_worktree(&record.worktree_path, &worktree_base).await;
         }
     }
 
@@ -329,14 +334,18 @@ fn send_webhook(
         .spawn(); // fire and forget
 }
 
+/// Returns true if the PR is merged or closed (i.e. terminal).
+/// Returns false if the PR is still open or the state can't be determined.
+pub async fn is_pr_done(pr_url: &str) -> bool {
+    match get_pr_state(pr_url).await {
+        Some(state) => state == "MERGED" || state == "CLOSED",
+        None => false,
+    }
+}
+
 /// Check PR state and clean up worktree if merged or closed.
 pub async fn cleanup_if_pr_done(pr_url: &str, worktree_path: &Path, worktree_base: &Path) {
-    let state = match get_pr_state(pr_url).await {
-        Some(s) => s,
-        None => return,
-    };
-
-    if state == "MERGED" || state == "CLOSED" {
+    if is_pr_done(pr_url).await {
         cleanup_worktree(worktree_path, worktree_base).await;
     }
 }

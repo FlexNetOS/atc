@@ -47,6 +47,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
         "status",
         "task",
         "directive",
+        "pr_urls",
         "cost",
         "turns",
         "duration",
@@ -63,6 +64,28 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
             task.to_string()
         };
         let directive_str = r.directive.as_str().to_string();
+        // Format PR URLs as compact "owner/repo#N" references
+        let pr_urls_display = if r.pr_urls.is_empty() {
+            "-".to_string()
+        } else {
+            r.pr_urls
+                .iter()
+                .map(|url| {
+                    // "https://github.com/org/repo/pull/42" → "repo#42"
+                    url.strip_prefix("https://github.com/")
+                        .and_then(|path| {
+                            let parts: Vec<&str> = path.split('/').collect();
+                            if parts.len() >= 4 && parts[2] == "pull" {
+                                Some(format!("{}#{}", parts[1], parts[3]))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| url.clone())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let cost = r
             .cost_usd
             .map(|c| format!("${:.2}", c))
@@ -87,6 +110,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
             status,
             task_display,
             directive_str,
+            pr_urls_display,
             cost,
             turns,
             duration,
@@ -210,7 +234,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 0,
             resolver: "task".to_string(),
-            pr_url: None,
+            pr_urls: vec![],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks::default(),

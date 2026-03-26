@@ -60,9 +60,9 @@ mod args {
             /// PR URL (required for review-fix and pr-comments modes)
             #[arg(long)]
             pr_url: Option<String>,
-            /// Target repo path within meta workspace (e.g., open-source/atc)
-            #[arg(long)]
-            repo: Option<String>,
+            /// Target repo path(s) within meta workspace (e.g., open-source/atc). Repeatable.
+            #[arg(long = "repo", action = clap::ArgAction::Append)]
+            repos: Vec<String>,
             /// Run inline (synchronous, no tmux). Auto-enabled when ATC_CI=true.
             #[arg(long)]
             inline: bool,
@@ -311,7 +311,7 @@ pub async fn run(
             directive,
             param,
             pr_url,
-            repo,
+            repos,
             inline,
             force,
             dry_run,
@@ -366,7 +366,7 @@ pub async fn run(
                 directive: directive.clone(),
                 params,
                 pr_url: pr_url.clone(),
-                repo: repo.clone(),
+                repos: repos.clone(),
                 inline: is_inline,
                 force: *force,
                 dry_run: *dry_run,

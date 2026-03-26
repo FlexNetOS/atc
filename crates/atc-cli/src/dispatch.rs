@@ -408,7 +408,9 @@ async fn check_worktree_collision(
 /// Parameters for worktree creation/reuse.
 pub struct WorktreeOpts<'a> {
     pub worktree_base: &'a Path,
-    pub repo: Option<&'a str>,
+    /// Target repo path(s). Empty = no meta worktree, single = current behavior,
+    /// multiple = multi-repo worktree set.
+    pub repos: Vec<&'a str>,
     pub branch: &'a str,
     pub meta_workspace_root: &'a Path,
     /// Root path for KB operations. Passed as GITKB_ROOT to meta worktree commands.
@@ -433,7 +435,7 @@ pub async fn ensure_worktree(
     registry: &dyn Registry,
 ) -> Result<WorktreeResult> {
     let worktree_base = opts.worktree_base;
-    let repo = opts.repo;
+    let repos = &opts.repos;
     let branch = opts.branch;
     let meta_workspace_root = opts.meta_workspace_root;
     let kb_root = opts.kb_root;
@@ -442,7 +444,9 @@ pub async fn ensure_worktree(
     // Use branch name as the worktree directory name so each dispatch gets a
     // unique path. Previously this used kb_basename, which caused every
     // dispatch to collide on the same worktree name.
-    let worktree_path = match repo {
+    // For multi-repo, use the first (primary) repo for the path.
+    let primary_repo = repos.first().copied();
+    let worktree_path = match primary_repo {
         Some(r) => worktree_base.join(branch).join(r),
         None => worktree_base.join(branch),
     };
@@ -452,7 +456,7 @@ pub async fn ensure_worktree(
     check_worktree_collision(&running, &worktree_path, registry, force).await?;
 
     // Check if worktree already exists for this branch.
-    let probe_dir = match repo {
+    let probe_dir = match primary_repo {
         Some(r) => {
             let repo_dir = meta_workspace_root.join(r);
             if repo_dir.exists() {
@@ -500,7 +504,7 @@ pub async fn ensure_worktree(
                         return Ok(WorktreeResult {
                             path: reused_path,
                             created: false,
-                            is_meta: repo.is_some(),
+                            is_meta: !repos.is_empty(),
                         });
                     }
                 }
@@ -511,11 +515,16 @@ pub async fn ensure_worktree(
     }
 
     // No existing worktree — create a new one
-    if let Some(repo_alias) = repo {
+    if !repos.is_empty() {
+        let mut args = vec!["git", "worktree", "create", branch];
+        for r in repos {
+            args.push("--repo");
+            args.push(r);
+        }
+        args.extend(["--branch", branch]);
+
         let output = tokio::process::Command::new("meta")
-            .args([
-                "git", "worktree", "create", branch, "--repo", repo_alias, "--branch", branch,
-            ])
+            .args(&args)
             .env("META_WORKTREES", worktree_base)
             .env("GITKB_ROOT", kb_root)
             .current_dir(meta_workspace_root)
@@ -565,7 +574,7 @@ pub async fn ensure_worktree(
     Ok(WorktreeResult {
         path: worktree_path,
         created: true,
-        is_meta: repo.is_some(),
+        is_meta: !repos.is_empty(),
     })
 }
 
