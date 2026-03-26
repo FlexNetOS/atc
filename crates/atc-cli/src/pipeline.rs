@@ -620,7 +620,7 @@ impl<'a> DispatchPipeline<'a> {
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
         println!("Providers:   {:?}", providers);
         if resolved.is_template {
-            println!("Template:    yes (system prompt from directive components)");
+            println!("Template:    yes (system prompt from directive config)");
         }
         Ok(DispatchOutcome {
             id: resolved.dispatch_id.clone(),
