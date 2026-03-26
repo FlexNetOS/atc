@@ -865,7 +865,7 @@ impl DispatchQueue for SqliteRegistry {
     async fn queue_mark_dispatched(&self, id: &str, dispatch_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "UPDATE dispatch_queue SET status = 'dispatched', dispatch_id = ?1, dispatched_at = ?2 WHERE id = ?3",
+            "UPDATE dispatch_queue SET status = 'dispatched', dispatch_id = ?1, dispatched_at = ?2 WHERE id = ?3 AND status = 'dispatching'",
         )
         .bind(dispatch_id)
         .bind(&now)
@@ -955,14 +955,14 @@ impl DispatchQueue for SqliteRegistry {
                         .await?;
 
                 if exists > 0 {
-                    sqlx::query("UPDATE dispatch_queue SET status = 'dispatched' WHERE id = ?1")
+                    sqlx::query("UPDATE dispatch_queue SET status = 'dispatched' WHERE id = ?1 AND status = 'dispatching'")
                         .bind(&id)
                         .execute(&self.pool)
                         .await?;
                     completed += 1;
                 } else {
                     sqlx::query(
-                        "UPDATE dispatch_queue SET status = 'pending', dispatch_id = NULL WHERE id = ?1",
+                        "UPDATE dispatch_queue SET status = 'pending', dispatch_id = NULL, claimed_at = NULL WHERE id = ?1 AND status = 'dispatching'",
                     )
                     .bind(&id)
                     .execute(&self.pool)
@@ -971,7 +971,7 @@ impl DispatchQueue for SqliteRegistry {
                 }
             } else {
                 // No dispatch_id means it was never dispatched — reset to pending
-                sqlx::query("UPDATE dispatch_queue SET status = 'pending' WHERE id = ?1")
+                sqlx::query("UPDATE dispatch_queue SET status = 'pending', claimed_at = NULL WHERE id = ?1 AND status = 'dispatching'")
                     .bind(&id)
                     .execute(&self.pool)
                     .await?;

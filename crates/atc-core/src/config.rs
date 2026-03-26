@@ -139,6 +139,13 @@ impl AtcConfig {
                 && cfg.health.cost_warning_threshold >= 0.0,
             "health.cost_warning_threshold must be a finite non-negative number"
         );
+        // Validate source poll intervals
+        for (name, source) in &cfg.sources {
+            anyhow::ensure!(
+                source.poll_interval_secs() > 0,
+                "sources.{name}.poll_interval_secs must be >= 1"
+            );
+        }
         // Validate directive keys against known Directive variants + per-directive overrides
         for (key, directive_cfg) in &cfg.directives {
             Self::validate_directive(key, directive_cfg)?;

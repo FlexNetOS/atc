@@ -194,7 +194,15 @@ pub async fn run_daemon(
                             // Persist dispatch_id while still 'dispatching' so
                             // recovery can correlate even if we crash before the
                             // status flip.
-                            let _ = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await;
+                            if let Err(e) =
+                                queue.queue_set_dispatch_id(&item.id, &dispatch_id).await
+                            {
+                                warn!(
+                                    queue_id = %item.id,
+                                    error = %e,
+                                    "failed to persist dispatch_id for crash recovery"
+                                );
+                            }
                             if let Err(e) =
                                 queue.queue_mark_dispatched(&item.id, &dispatch_id).await
                             {
@@ -433,7 +441,9 @@ async fn run_source_iteration(
                     params: None,
                     enqueued_by: Some(format!("source:{}", name)),
                 };
-                let _ = queue.enqueue(item).await;
+                if let Err(e) = queue.enqueue(item).await {
+                    warn!(source = %name, error = %e, "failed to enqueue item");
+                }
             }
         }
         SourceConfig::Board(cfg) => {
@@ -496,7 +506,9 @@ async fn run_source_iteration(
                     params: None,
                     enqueued_by: Some(format!("source:{}", name)),
                 };
-                let _ = queue.enqueue(item).await;
+                if let Err(e) = queue.enqueue(item).await {
+                    warn!(source = %name, error = %e, "failed to enqueue item");
+                }
             }
         }
         SourceConfig::Events(cfg) => {
@@ -539,7 +551,9 @@ async fn run_source_iteration(
                                 params: None,
                                 enqueued_by: Some(format!("source:{}", name)),
                             };
-                            let _ = queue.enqueue(item).await;
+                            if let Err(e) = queue.enqueue(item).await {
+                                warn!(source = %name, error = %e, "failed to enqueue item");
+                            }
                         }
                     }
                 }
@@ -589,7 +603,9 @@ async fn run_source_iteration(
                     params: None,
                     enqueued_by: Some(format!("source:{}", name)),
                 };
-                let _ = queue.enqueue(item).await;
+                if let Err(e) = queue.enqueue(item).await {
+                    warn!(source = %name, error = %e, "failed to enqueue item");
+                }
             }
         }
     }

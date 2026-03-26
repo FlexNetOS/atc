@@ -99,7 +99,13 @@ pub async fn run_queue_drain(
             match dispatch_queue_item(&item, queue, registry, executor, config).await {
                 Ok(dispatch_id) => {
                     // Persist dispatch_id while still 'dispatching' for crash recovery
-                    let _ = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await;
+                    if let Err(e) = queue.queue_set_dispatch_id(&item.id, &dispatch_id).await {
+                        warn!(
+                            queue_id = %item.id,
+                            error = %e,
+                            "failed to persist dispatch_id for crash recovery"
+                        );
+                    }
                     if let Err(e) = queue.queue_mark_dispatched(&item.id, &dispatch_id).await {
                         error!(
                             queue_id = %item.id,
