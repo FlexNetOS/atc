@@ -117,7 +117,13 @@ pub async fn run_queue_drain(
                 }
                 Err(e) => {
                     let err_msg = format!("{:#}", e);
-                    let _ = queue.queue_mark_failed(&item.id, &err_msg).await;
+                    if let Err(mark_err) = queue.queue_mark_failed(&item.id, &err_msg).await {
+                        warn!(
+                            queue_id = %item.id,
+                            error = %mark_err,
+                            "failed to mark item as failed in queue"
+                        );
+                    }
                     failed += 1;
                     warn!(
                         queue_id = %item.id,

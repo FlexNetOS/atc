@@ -367,7 +367,7 @@ CREATE TABLE dispatches (
 );
 ```
 
-## Competitive Comparison
+## Competitive Comparison (as of March 2026)
 
 | Capability | **ATC** | **Symphony** | **Composio AO** | **Gastown** | **Overstory** | **Vibe Kanban** |
 |---|---|---|---|---|---|---|

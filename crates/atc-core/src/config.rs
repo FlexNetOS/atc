@@ -1920,4 +1920,84 @@ search_path = ["~/.config/atc", "/etc/atc"]
         let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
         assert!(cfg.directives.is_empty());
     }
+
+    // --- DaemonConfig tests ---
+
+    #[test]
+    fn test_daemon_config_defaults() {
+        let cfg = DaemonConfig::default();
+        assert_eq!(cfg.drain_interval_secs, 1);
+        assert_eq!(cfg.max_concurrent, 5);
+        assert_eq!(cfg.graceful_shutdown_timeout_secs, 300);
+        assert!(cfg.pid_file.is_none());
+    }
+
+    #[test]
+    fn test_daemon_config_from_toml() {
+        let toml = r#"
+[daemon]
+drain_interval_secs = 10
+max_concurrent = 3
+graceful_shutdown_timeout_secs = 60
+pid_file = "/tmp/atc.pid"
+"#;
+        let cfg = AtcConfig::parse_and_validate(toml).unwrap();
+        assert_eq!(cfg.daemon.drain_interval_secs, 10);
+        assert_eq!(cfg.daemon.max_concurrent, 3);
+        assert_eq!(cfg.daemon.graceful_shutdown_timeout_secs, 60);
+        assert_eq!(
+            cfg.daemon.pid_file.as_deref(),
+            Some(Path::new("/tmp/atc.pid"))
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_drain_interval() {
+        let toml = "[daemon]\ndrain_interval_secs = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("daemon.drain_interval_secs must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_max_concurrent() {
+        let toml = "[daemon]\nmax_concurrent = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("daemon.max_concurrent must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_default() {
+        let cfg = DaemonConfig::default();
+        let resolved = cfg.resolved_pid_file();
+        assert!(
+            resolved.to_string_lossy().ends_with("daemon.pid"),
+            "unexpected path: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_pid_file_explicit() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("/custom/daemon.pid")),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_pid_file(), PathBuf::from("/custom/daemon.pid"));
+    }
+
+    #[test]
+    fn test_resolved_pid_file_tilde() {
+        let cfg = DaemonConfig {
+            pid_file: Some(PathBuf::from("~/atc/daemon.pid")),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_pid_file(), home_dir().join("atc/daemon.pid"));
+    }
 }

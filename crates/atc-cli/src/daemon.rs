@@ -334,13 +334,23 @@ async fn start_sources(
         let shutdown_notify = shutdown_notify.clone();
         let handle = tokio::spawn(async move {
             info!(source = %name, "source started");
+            let mut last_poll_start: Option<std::time::Instant> = None;
             while !shutdown.load(Ordering::SeqCst) {
+                // For events sources, compute --since from actual elapsed time
+                // rather than the fixed poll_interval to avoid gaps when
+                // iterations run late.
+                let since_secs = last_poll_start
+                    .map(|t| t.elapsed().as_secs().max(1))
+                    .unwrap_or(source_config.poll_interval_secs());
+                last_poll_start = Some(std::time::Instant::now());
+
                 if let Err(e) = run_source_iteration(
                     &name,
                     &source_config,
                     &source_queue,
                     queue.as_ref(),
                     workspace.as_deref(),
+                    since_secs,
                 )
                 .await
                 {
@@ -383,12 +393,17 @@ async fn run_git_cmd(
 }
 
 /// Run a single iteration of a source.
+///
+/// `since_secs` is the number of seconds to look back for the events source.
+/// This is computed from actual elapsed time between polls to avoid gaps when
+/// iterations run late.
 async fn run_source_iteration(
     name: &str,
     config: &SourceConfig,
     queue_name: &str,
     queue: &dyn DispatchQueue,
     workspace_root: Option<&std::path::Path>,
+    since_secs: u64,
 ) -> Result<()> {
     match config {
         SourceConfig::Ready(cfg) => {
@@ -485,9 +500,10 @@ async fn run_source_iteration(
             }
         }
         SourceConfig::Events(cfg) => {
-            // Use poll_interval_secs as the --since window to avoid gaps
-            let since_secs = format!("{}s", cfg.poll_interval_secs);
-            let mut args = vec!["kb", "events", "--format", "json", "--since", &since_secs];
+            // Use actual elapsed time since last poll to avoid gaps when iterations
+            // run late. The caller tracks wall-clock time between polls.
+            let since_str = format!("{}s", since_secs);
+            let mut args = vec!["kb", "events", "--format", "json", "--since", &since_str];
             if let Some(ref filter) = cfg.filter {
                 args.push("--filter");
                 args.push(filter);
