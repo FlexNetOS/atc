@@ -183,30 +183,30 @@ pub async fn resolve_pr_repo_path(
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
-    fn find_repo(obj: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
-        let map = obj.as_object()?;
-        for (key, value) in map {
-            if key == "." {
-                continue;
-            }
-            let full = if prefix.is_empty() {
-                key.clone()
+    fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
+        let projects = value.get("projects").and_then(|p| p.as_array())?;
+
+        for project in projects {
+            let path = project.get("path").and_then(|p| p.as_str())?;
+            let full = if prefix.is_empty() || prefix == "." {
+                path.to_string()
             } else {
-                format!("{}/{}", prefix, key)
+                format!("{}/{}", prefix, path)
             };
-            // Normalize remote URL
-            if let Some(repo_url) = value.get("repo").and_then(|v| v.as_str()) {
+
+            if let Some(repo_url) = project.get("repo").and_then(|v| v.as_str()) {
                 let normalized = repo_url
                     .trim_start_matches("git@github.com:")
                     .trim_start_matches("https://github.com/")
                     .trim_end_matches(".git");
                 if normalized == target {
-                    return Some(full.trim_start_matches("./").to_string());
+                    return Some(full);
                 }
             }
+
             // Recurse into nested projects
-            if let Some(children) = value.get("projects") {
-                if let Some(found) = find_repo(children, &full, target) {
+            if project.get("projects").is_some() {
+                if let Some(found) = find_repo(project, &full, target) {
                     return Some(found);
                 }
             }
@@ -649,6 +649,151 @@ mod tests {
     #[test]
     fn test_derive_branch_double_hyphen_invariant() {
         assert_eq!(derive_branch("tasks/a--b"), "tasks--a--b");
+    }
+
+    #[test]
+    fn test_find_repo_nested_meta_workspace() {
+        // Simulates the output of `meta project list --recursive --json`
+        let json: serde_json::Value = serde_json::json!({
+            "path": ".",
+            "repo": "git@github.com:harmony-labs/harmony.git",
+            "projects": [
+                {
+                    "name": "clients",
+                    "path": "clients",
+                    "repo": "git@github.com:harmony-labs/harmony-clients.git",
+                    "is_meta": true,
+                    "projects": [
+                        {
+                            "name": "desktop",
+                            "path": "desktop",
+                            "repo": "git@github.com:harmony-labs/harmony-desktop.git"
+                        },
+                        {
+                            "name": "mobile",
+                            "path": "mobile",
+                            "repo": "https://github.com/harmony-labs/harmony-mobile.git"
+                        }
+                    ]
+                },
+                {
+                    "name": "open-source",
+                    "path": "open-source",
+                    "repo": "git@github.com:harmony-labs/harmony-oss.git",
+                    "is_meta": true,
+                    "projects": [
+                        {
+                            "name": "atc",
+                            "path": "atc",
+                            "repo": "git@github.com:harmony-labs/atc.git"
+                        },
+                        {
+                            "name": "gitkb",
+                            "path": "gitkb",
+                            "repo": "git@github.com:harmony-labs/harmony-gitkb.git",
+                            "is_meta": true,
+                            "projects": [
+                                {
+                                    "name": "core",
+                                    "path": "core",
+                                    "repo": "git@github.com:harmony-labs/gitkb-core.git"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name": "platform",
+                    "path": "platform",
+                    "repo": "git@github.com:harmony-labs/harmony-platform.git",
+                    "is_meta": true,
+                    "projects": [
+                        {
+                            "name": "api",
+                            "path": "api",
+                            "repo": "https://github.com/harmony-labs/harmony-api"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        // Nested child: clients/desktop
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-desktop"),
+            Some("clients/desktop".to_string())
+        );
+
+        // Nested child: open-source/atc
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/atc"),
+            Some("open-source/atc".to_string())
+        );
+
+        // Nested child: platform/api (https URL, no .git suffix)
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-api"),
+            Some("platform/api".to_string())
+        );
+
+        // Deep nesting: open-source/gitkb/core
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/gitkb-core"),
+            Some("open-source/gitkb/core".to_string())
+        );
+
+        // HTTPS URL with .git suffix
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-mobile"),
+            Some("clients/mobile".to_string())
+        );
+
+        // Non-existent repo
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/nonexistent"),
+            None
+        );
+
+        // Top-level group (not a leaf repo match)
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-clients"),
+            Some("clients".to_string())
+        );
+    }
+
+    /// Synchronous helper that calls the inner find_repo for testing.
+    fn resolve_pr_repo_path_sync(json: &serde_json::Value, target: &str) -> Option<String> {
+        fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
+            let projects = value.get("projects").and_then(|p| p.as_array())?;
+
+            for project in projects {
+                let path = project.get("path").and_then(|p| p.as_str())?;
+                let full = if prefix.is_empty() || prefix == "." {
+                    path.to_string()
+                } else {
+                    format!("{}/{}", prefix, path)
+                };
+
+                if let Some(repo_url) = project.get("repo").and_then(|v| v.as_str()) {
+                    let normalized = repo_url
+                        .trim_start_matches("git@github.com:")
+                        .trim_start_matches("https://github.com/")
+                        .trim_end_matches(".git");
+                    if normalized == target {
+                        return Some(full);
+                    }
+                }
+
+                if project.get("projects").is_some() {
+                    if let Some(found) = find_repo(project, &full, target) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        find_repo(json, "", target)
     }
 
     #[test]

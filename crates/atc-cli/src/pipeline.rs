@@ -165,11 +165,26 @@ impl<'a> DispatchPipeline<'a> {
         } else {
             // Repo resolution priority:
             // 1. CLI --repo flag(s) (explicit override, highest priority)
-            // 2. PR URL → resolve_pr_repo_path() (auto-resolved)
-            // 3. Config dispatch.repo
-            // 4. Meta discovery fallback
+            // 2. DISPATCH_WORKTREE_REPO env var (dispatch.sh compat)
+            // 3. PR URL → resolve_pr_repo_path() (auto-resolved)
+            // 4. Config dispatch.repo
+            // 5. Meta discovery fallback
             let repos: Vec<String> = if !opts.repos.is_empty() {
                 opts.repos.clone()
+            } else if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
+                let env_repo = env_repo.trim().to_string();
+                if env_repo.is_empty() {
+                    // Fall through to PR URL resolution below
+                    Vec::new()
+                } else {
+                    info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
+                    vec![env_repo]
+                }
+            } else {
+                Vec::new()
+            };
+            let repos: Vec<String> = if !repos.is_empty() {
+                repos
             } else if let Some(ref pr_url) = effective_pr_url {
                 match resolve_pr_repo_path(pr_url, &workspace_root).await {
                     Ok(Some(r)) => {
