@@ -135,6 +135,55 @@ pub async fn extract_pr_head_branch(pr_url: &str) -> Result<String> {
     Ok(branch)
 }
 
+/// Search a `meta project list --recursive --json` tree for the project whose
+/// `repo` URL matches `target` (an `org/repo` string). Returns the relative
+/// path from the workspace root (e.g. `"open-source/atc"`).
+fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
+    let projects = value.get("projects").and_then(|p| p.as_array())?;
+
+    for project in projects {
+        let Some(path) = project.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let rel = std::path::Path::new(path);
+        if rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            warn!(path = %rel.display(), "skipping unsafe meta project path");
+            continue;
+        }
+
+        let full = if prefix.is_empty() || prefix == "." {
+            path.to_string()
+        } else {
+            format!("{}/{}", prefix, path)
+        };
+
+        if let Some(repo_url) = project.get("repo").and_then(|v| v.as_str()) {
+            let normalized = repo_url
+                .trim_start_matches("git@github.com:")
+                .trim_start_matches("https://github.com/")
+                .trim_end_matches(".git");
+            if normalized == target {
+                return Some(full);
+            }
+        }
+
+        // Recurse into nested projects
+        if project.get("projects").is_some() {
+            if let Some(found) = find_repo(project, &full, target) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Resolve a GitHub PR URL to a local repo path within a meta workspace.
 ///
 /// Extracts org/repo from the PR URL and searches `meta project list --recursive --json`
@@ -182,37 +231,6 @@ pub async fn resolve_pr_repo_path(
     };
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-
-    fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
-        let projects = value.get("projects").and_then(|p| p.as_array())?;
-
-        for project in projects {
-            let path = project.get("path").and_then(|p| p.as_str())?;
-            let full = if prefix.is_empty() || prefix == "." {
-                path.to_string()
-            } else {
-                format!("{}/{}", prefix, path)
-            };
-
-            if let Some(repo_url) = project.get("repo").and_then(|v| v.as_str()) {
-                let normalized = repo_url
-                    .trim_start_matches("git@github.com:")
-                    .trim_start_matches("https://github.com/")
-                    .trim_end_matches(".git");
-                if normalized == target {
-                    return Some(full);
-                }
-            }
-
-            // Recurse into nested projects
-            if project.get("projects").is_some() {
-                if let Some(found) = find_repo(project, &full, target) {
-                    return Some(found);
-                }
-            }
-        }
-        None
-    }
 
     Ok(find_repo(&json, "", github_repo))
 }
@@ -761,39 +779,9 @@ mod tests {
         );
     }
 
-    /// Synchronous helper that calls the inner find_repo for testing.
+    /// Synchronous helper that delegates to the module-level `find_repo`.
     fn resolve_pr_repo_path_sync(json: &serde_json::Value, target: &str) -> Option<String> {
-        fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<String> {
-            let projects = value.get("projects").and_then(|p| p.as_array())?;
-
-            for project in projects {
-                let path = project.get("path").and_then(|p| p.as_str())?;
-                let full = if prefix.is_empty() || prefix == "." {
-                    path.to_string()
-                } else {
-                    format!("{}/{}", prefix, path)
-                };
-
-                if let Some(repo_url) = project.get("repo").and_then(|v| v.as_str()) {
-                    let normalized = repo_url
-                        .trim_start_matches("git@github.com:")
-                        .trim_start_matches("https://github.com/")
-                        .trim_end_matches(".git");
-                    if normalized == target {
-                        return Some(full);
-                    }
-                }
-
-                if project.get("projects").is_some() {
-                    if let Some(found) = find_repo(project, &full, target) {
-                        return Some(found);
-                    }
-                }
-            }
-            None
-        }
-
-        find_repo(json, "", target)
+        super::find_repo(json, "", target)
     }
 
     #[test]
