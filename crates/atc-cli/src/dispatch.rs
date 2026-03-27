@@ -785,6 +785,52 @@ mod tests {
     }
 
     #[test]
+    fn test_find_repo_skips_missing_path_and_unsafe_entries() {
+        let json: serde_json::Value = serde_json::json!({
+            "projects": [
+                {
+                    "name": "no-path",
+                    "repo": "git@github.com:org/no-path.git"
+                },
+                {
+                    "name": "traversal",
+                    "path": "../escaped",
+                    "repo": "git@github.com:org/escaped.git"
+                },
+                {
+                    "name": "absolute",
+                    "path": "/etc/passwd",
+                    "repo": "git@github.com:org/absolute.git"
+                },
+                {
+                    "name": "dot",
+                    "path": ".",
+                    "repo": "git@github.com:org/dot.git"
+                },
+                {
+                    "name": "valid",
+                    "path": "valid-repo",
+                    "repo": "git@github.com:org/valid.git"
+                }
+            ]
+        });
+
+        // Missing path → skipped, doesn't abort
+        assert_eq!(resolve_pr_repo_path_sync(&json, "org/no-path"), None);
+        // Path traversal → skipped
+        assert_eq!(resolve_pr_repo_path_sync(&json, "org/escaped"), None);
+        // Absolute path → skipped
+        assert_eq!(resolve_pr_repo_path_sync(&json, "org/absolute"), None);
+        // CurDir path → skipped
+        assert_eq!(resolve_pr_repo_path_sync(&json, "org/dot"), None);
+        // Valid entry after all bad ones → found
+        assert_eq!(
+            resolve_pr_repo_path_sync(&json, "org/valid"),
+            Some("valid-repo".to_string())
+        );
+    }
+
+    #[test]
     fn test_parse_comment_url_issue_comment() {
         let (id, ctype) =
             parse_comment_url("https://github.com/org/repo/pull/42#issuecomment-123456");
