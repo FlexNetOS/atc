@@ -28,8 +28,8 @@ If the directive is `review-fix`:
 2. Fetch reviews: `gh api repos/{owner}/{repo}/pulls/{number}/reviews`
 3. Fix every issue raised
 4. Resolve every thread
-5. Push and verify CI
-6. Exit when: all CI green, all threads resolved, no pending changes_requested
+5. Push and post a summary comment on the PR
+6. Exit when: final summary posted, all threads resolved. Do NOT poll or wait for CI checks or external review bots (CodeRabbit, Greptile, etc.) — you already ran lint + tests locally.
 
 If the directive is `pr-comments`:
 - Same as review-fix but scoped to comment resolution only — no proactive fixes
