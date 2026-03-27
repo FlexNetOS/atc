@@ -493,6 +493,7 @@ mod tests {
         assert!(dir.path().join(".atc/directives").is_dir());
         assert!(dir.path().join(".atc/templates").is_dir());
         assert!(dir.path().join(".atc/components").is_dir());
+        assert!(dir.path().join(".atc/partials").is_dir());
     }
 
     #[tokio::test]
@@ -545,6 +546,14 @@ mod tests {
             contents.contains("Agent"),
             "component should have agent content"
         );
+
+        // Verify embedded partial files are written with content
+        for (name, _) in DEFAULT_PARTIALS {
+            let path = dir.path().join(".atc/partials").join(name);
+            assert!(path.exists(), "partial {name} should exist");
+            let partial = std::fs::read_to_string(&path).unwrap();
+            assert!(!partial.is_empty(), "partial {name} should not be empty");
+        }
     }
 
     #[tokio::test]

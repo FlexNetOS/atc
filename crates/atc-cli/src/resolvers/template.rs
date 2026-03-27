@@ -128,6 +128,12 @@ impl InputResolver for TemplateResolver {
             params.insert(k.clone(), v.clone());
         }
 
+        // Ensure optional params used in {{#if}}/{{#unless}} conditionals
+        // have a default empty value so Handlebars strict mode doesn't reject them.
+        params
+            .entry("comment".to_string())
+            .or_insert_with(String::new);
+
         // Render template — pass just the filename so render_template resolves
         // it against templates_dir internally, avoiding double-resolution when
         // templates_dir is relative and config_dir is None.
