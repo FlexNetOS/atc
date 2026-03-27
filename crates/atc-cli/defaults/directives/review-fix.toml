@@ -1,0 +1,4 @@
+max_budget_usd = 25.0
+max_turns = 10000
+components = ["base", "constraints", "code-read", "code-write", "git", "github", "review"]
+providers = ["pr-context", "kb-context", "rebase"]

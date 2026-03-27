@@ -1,0 +1,4 @@
+max_budget_usd = 5.0
+max_turns = 2000
+components = ["base", "constraints", "code-read", "git", "kb-read", "kb-write"]
+providers = ["kb-context"]
