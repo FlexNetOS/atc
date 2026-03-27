@@ -249,7 +249,7 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
 
     // Show orphan dispatches (no work unit) as individual rows
     for r in &orphan_records {
-        let task = r.task_slug.as_deref().unwrap_or("(none)");
+        let task = r.task_slug.as_deref().unwrap_or(r.id.as_str());
         let prs = format_pr_list(&r.pr_urls);
         let cost_str = r
             .cost_usd

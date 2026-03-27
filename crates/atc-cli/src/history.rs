@@ -42,7 +42,12 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
         "pr_urls",
     ]);
 
-    let total_cost: f64 = dispatches.iter().filter_map(|r| r.cost_usd).sum();
+    let (total_cost, has_cost) = dispatches
+        .iter()
+        .fold((0.0f64, false), |(sum, seen), r| match r.cost_usd {
+            Some(cost) => (sum + cost, true),
+            None => (sum, seen),
+        });
 
     for r in dispatches {
         let dispatched = r.dispatched_at.format("%Y-%m-%d %H:%M").to_string();
@@ -62,9 +67,14 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
     }
 
     out.push_str(&table.to_string());
+    let total_cost_display = if has_cost {
+        format!("${:.2}", total_cost)
+    } else {
+        "-".to_string()
+    };
     out.push_str(&format!(
-        "\nTotal: ${:.2} across {} dispatch{}",
-        total_cost,
+        "\nTotal: {} across {} dispatch{}",
+        total_cost_display,
         dispatches.len(),
         if dispatches.len() == 1 { "" } else { "es" }
     ));
@@ -199,6 +209,27 @@ mod tests {
         assert!(table.contains("$3.50"));
         assert!(table.contains("1 dispatch"));
         assert!(!table.contains("dispatches"));
+    }
+
+    #[test]
+    fn test_build_history_table_no_cost_data() {
+        let unit = sample_work_unit();
+        let dispatches = vec![
+            sample_dispatch(Directive::Implement, None),
+            sample_dispatch(Directive::ReviewFix, None),
+        ];
+        let table = build_history_table(&unit, &dispatches);
+        // Footer should show "-" not "$0.00" when all costs are missing
+        assert!(table.contains("Total: - across 2 dispatches"));
+    }
+
+    #[test]
+    fn test_build_history_table_zero_cost() {
+        let unit = sample_work_unit();
+        let dispatches = vec![sample_dispatch(Directive::Implement, Some(0.0))];
+        let table = build_history_table(&unit, &dispatches);
+        // Real $0.00 should show as "$0.00", not "-"
+        assert!(table.contains("Total: $0.00 across 1 dispatch"));
     }
 
     #[test]

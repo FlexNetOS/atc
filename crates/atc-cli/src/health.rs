@@ -282,12 +282,6 @@ pub async fn run_health(
                 continue;
             }
 
-            // Don't close a work unit while non-terminal dispatches are still attached
-            let wu_dispatches = registry.list_dispatches_for_work_unit(&wu.id).await?;
-            if wu_dispatches.iter().any(|d| !d.status.is_terminal()) {
-                continue;
-            }
-
             // Check each PR's state individually to distinguish merged vs closed
             let pr_states = futures::future::join_all(
                 wu.pr_urls
@@ -319,17 +313,26 @@ pub async fn run_health(
             } else {
                 WorkUnitStatus::Closed
             };
-            if let Err(e) = registry.update_work_unit_status(&wu.id, new_status).await {
-                warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to {}", new_status.as_str());
-            } else {
-                emit(
-                    json,
-                    &format!(
-                        "Work unit {} → {} (all PRs done)",
-                        wu.task_slug.as_deref().unwrap_or(&wu.id),
-                        new_status.as_str()
-                    ),
-                );
+            match registry
+                .update_work_unit_status_if_idle(&wu.id, new_status)
+                .await
+            {
+                Ok(true) => {
+                    emit(
+                        json,
+                        &format!(
+                            "Work unit {} → {} (all PRs done)",
+                            wu.task_slug.as_deref().unwrap_or(&wu.id),
+                            new_status.as_str()
+                        ),
+                    );
+                }
+                Ok(false) => {
+                    // A non-terminal dispatch is still attached — skip transition
+                }
+                Err(e) => {
+                    warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to {}", new_status.as_str());
+                }
             }
         }
     }

@@ -92,6 +92,15 @@ pub trait Registry: Send + Sync {
     ) -> Result<()> {
         anyhow::bail!("work units not implemented for this registry backend")
     }
+    /// Atomically update work unit status only if no non-terminal dispatches exist.
+    /// Returns Ok(true) if status was updated, Ok(false) if a live dispatch blocked it.
+    async fn update_work_unit_status_if_idle(
+        &self,
+        _id: &str,
+        _status: crate::types::WorkUnitStatus,
+    ) -> Result<bool> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
     async fn add_work_unit_pr(&self, _id: &str, _pr_url: &str) -> Result<()> {
         anyhow::bail!("work units not implemented for this registry backend")
     }
@@ -960,7 +969,7 @@ impl Registry for SqliteRegistry {
         task_slug: &str,
     ) -> Result<Option<crate::types::WorkUnit>> {
         let row = sqlx::query(
-            "SELECT * FROM work_units WHERE task_slug = ?1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM work_units WHERE task_slug = ?1 AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .bind(task_slug)
         .fetch_optional(&self.pool)
@@ -973,7 +982,7 @@ impl Registry for SqliteRegistry {
         branch: &str,
     ) -> Result<Option<crate::types::WorkUnit>> {
         let row = sqlx::query(
-            "SELECT * FROM work_units WHERE branch = ?1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM work_units WHERE branch = ?1 AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .bind(branch)
         .fetch_optional(&self.pool)
@@ -983,7 +992,7 @@ impl Registry for SqliteRegistry {
 
     async fn find_work_unit_by_pr(&self, pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
         let row = sqlx::query(
-            "SELECT w.* FROM work_units w, json_each(w.pr_urls) je WHERE je.value = ?1 ORDER BY w.updated_at DESC LIMIT 1",
+            "SELECT w.* FROM work_units w, json_each(w.pr_urls) je WHERE je.value = ?1 ORDER BY w.created_at DESC, w.id DESC LIMIT 1",
         )
         .bind(pr_url)
         .fetch_optional(&self.pool)
@@ -1009,6 +1018,50 @@ impl Registry for SqliteRegistry {
             "no work unit found for id: {id}"
         );
         Ok(())
+    }
+
+    async fn update_work_unit_status_if_idle(
+        &self,
+        id: &str,
+        status: crate::types::WorkUnitStatus,
+    ) -> Result<bool> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result: Result<bool> = async {
+            // Check for non-terminal dispatches under the write lock
+            let terminal_statuses = ["done", "failed", "stopped", "needs-human", "needs-review"];
+            let has_live: (i64,) =
+                sqlx::query_as(&format!(
+                "SELECT COUNT(*) FROM dispatches WHERE work_unit_id = ?1 AND status NOT IN ({})",
+                terminal_statuses.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
+            ))
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await?;
+            if has_live.0 > 0 {
+                return Ok(false);
+            }
+            let now = Utc::now().to_rfc3339();
+            let r = sqlx::query("UPDATE work_units SET status = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            anyhow::ensure!(r.rows_affected() > 0, "no work unit found for id: {id}");
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(updated) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(updated)
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
     }
 
     async fn add_work_unit_pr(&self, id: &str, pr_url: &str) -> Result<()> {
@@ -1089,12 +1142,29 @@ impl Registry for SqliteRegistry {
                 .bind(&now)
                 .bind(id)
                 .execute(&self.pool)
-                .await?;
-        anyhow::ensure!(
-            result.rows_affected() > 0,
-            "no work unit found for id: {id}"
-        );
-        Ok(())
+                .await;
+        match result {
+            Ok(r) => {
+                anyhow::ensure!(r.rows_affected() > 0, "no work unit found for id: {id}");
+                Ok(())
+            }
+            Err(e) => {
+                // If the update hits the unique partial index (another dispatch
+                // already created an active work unit for this task_slug), that's
+                // fine — the winning row exists. Treat as success.
+                let msg = e.to_string();
+                if msg.contains("UNIQUE constraint failed") || msg.contains("unique") {
+                    tracing::debug!(
+                        work_unit = %id,
+                        task_slug = %task_slug,
+                        "task-slug promotion hit unique constraint — another active unit exists, treating as success"
+                    );
+                    Ok(())
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
@@ -1118,7 +1188,7 @@ impl Registry for SqliteRegistry {
         task_slug: &str,
     ) -> Result<Option<crate::types::WorkUnit>> {
         let row = sqlx::query(
-            "SELECT * FROM work_units WHERE task_slug = ?1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM work_units WHERE task_slug = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .bind(task_slug)
         .fetch_optional(&self.pool)
@@ -1131,7 +1201,7 @@ impl Registry for SqliteRegistry {
         branch: &str,
     ) -> Result<Option<crate::types::WorkUnit>> {
         let row = sqlx::query(
-            "SELECT * FROM work_units WHERE branch = ?1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM work_units WHERE branch = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .bind(branch)
         .fetch_optional(&self.pool)
