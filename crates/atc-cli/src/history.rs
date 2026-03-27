@@ -41,7 +41,7 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
         "pr_urls",
     ]);
 
-    let mut total_cost = 0.0f64;
+    let total_cost: f64 = dispatches.iter().filter_map(|r| r.cost_usd).sum();
 
     for r in dispatches {
         let dispatched = r.dispatched_at.format("%Y-%m-%d %H:%M").to_string();
@@ -49,10 +49,7 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
         let status = r.status.as_str().to_string();
         let cost = r
             .cost_usd
-            .map(|c| {
-                total_cost += c;
-                format!("${:.2}", c)
-            })
+            .map(|c| format!("${:.2}", c))
             .unwrap_or_else(|| "-".to_string());
         let duration = r
             .duration_ms
@@ -106,7 +103,9 @@ pub async fn run_history(
         if json {
             println!(
                 "{}",
-                serde_json::json!({ "work_unit": null, "dispatches": [] })
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "work_unit": null, "dispatches": [] })
+                )?
             );
         } else {
             println!("No work unit found for: {}", target);

@@ -295,6 +295,16 @@ pub async fn run_health(
                     .map(|u| post_completion::get_pr_state_public(u)),
             )
             .await;
+            // If any PR state lookup failed (None), log and skip — don't leave
+            // the unit stuck in active forever, but also don't wrongly transition.
+            if pr_states.iter().any(|s| s.is_none()) {
+                warn!(
+                    work_unit = %wu.id,
+                    pr_urls = ?wu.pr_urls,
+                    "PR state lookup returned None for one or more PRs — skipping work unit transition (transient failure?)"
+                );
+                continue;
+            }
             let all_terminal = pr_states
                 .iter()
                 .all(|s| matches!(s.as_deref(), Some("MERGED") | Some("CLOSED")));

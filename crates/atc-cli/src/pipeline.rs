@@ -843,7 +843,15 @@ async fn resolve_work_unit(
     }
 
     // 2. Try branch
-    if let Some(unit) = registry.find_work_unit_by_branch(branch).await? {
+    if let Some(mut unit) = registry.find_work_unit_by_branch(branch).await? {
+        // Promote branch-only unit to task-associated if we now know the task slug.
+        // Without this, find_work_unit_by_task* lookups would miss this unit.
+        if unit.task_slug.is_none() {
+            if let Some(slug) = effective_task {
+                registry.update_work_unit_task_slug(&unit.id, slug).await?;
+                unit.task_slug = Some(slug.to_string());
+            }
+        }
         return Ok(unit);
     }
 

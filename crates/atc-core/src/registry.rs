@@ -98,6 +98,11 @@ pub trait Registry: Send + Sync {
     async fn add_work_unit_repo(&self, _id: &str, _repo_path: &str) -> Result<()> {
         anyhow::bail!("work units not implemented for this registry backend")
     }
+    /// Promote a work unit by setting its task_slug (e.g., when a branch-only unit
+    /// is later associated with a task).
+    async fn update_work_unit_task_slug(&self, _id: &str, _task_slug: &str) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
     async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
         Ok(Vec::new())
     }
@@ -1076,6 +1081,22 @@ impl Registry for SqliteRegistry {
                 Err(e)
             }
         }
+    }
+
+    async fn update_work_unit_task_slug(&self, id: &str, task_slug: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE work_units SET task_slug = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(task_slug)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no work unit found for id: {id}"
+        );
+        Ok(())
     }
 
     async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
