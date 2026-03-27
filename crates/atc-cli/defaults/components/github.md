@@ -37,6 +37,6 @@ If the directive is `pr-comments`:
 ## Extracting owner/repo from PR URL
 
 ```bash
-PR_REPO=$(echo "$PR_URL" | sed 's|https://github.com/||; s|/pull/.*||')
-PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's|^https://github.com/([^/]+/[^/]+)/pull/.*$|\1|')
+PR_NUMBER=$(printf '%s\n' "$PR_URL" | sed -E 's|^https://github.com/[^/]+/[^/]+/pull/([0-9]+).*$|\1|')
 ```

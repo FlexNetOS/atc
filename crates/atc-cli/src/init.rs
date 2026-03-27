@@ -140,8 +140,9 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     // Also write any extra directives from [directives.*] config sections
     // that don't have a matching embedded default
     for (name, dcfg) in &config.directives {
-        let path = atc_dir.join("directives").join(format!("{name}.toml"));
-        if !path.exists() {
+        let is_default = DEFAULT_DIRECTIVES.iter().any(|(n, _)| *n == name.as_str());
+        if !is_default {
+            let path = atc_dir.join("directives").join(format!("{name}.toml"));
             let directive_toml = toml::to_string_pretty(dcfg)
                 .with_context(|| format!("failed to serialize directive config '{name}'"))?;
             let label = format!(".atc/directives/{name}.toml");
@@ -495,16 +496,20 @@ mod tests {
             "directive should have components"
         );
 
-        // Verify embedded template files are written with content
+        // Verify embedded template files are written with valid frontmatter
         let pr_review = dir.path().join(".atc/templates/pr-review.md");
         assert!(pr_review.exists(), "pr-review.md should exist");
         let contents = std::fs::read_to_string(&pr_review).unwrap();
-        assert!(
-            contents.contains("directive: review-fix"),
+        let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+            .expect("pr-review.md should have valid frontmatter");
+        assert_eq!(
+            fm.directive.as_deref(),
+            Some("review-fix"),
             "template should have directive frontmatter"
         );
-        assert!(
-            contents.contains("required_params: [pr]"),
+        assert_eq!(
+            fm.required_params.as_deref(),
+            Some(vec!["pr".to_string()].as_slice()),
             "template should have required_params"
         );
         assert!(
@@ -525,6 +530,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_init_all_templates_have_correct_frontmatter() {
+        use atc_core::prompt_engine::parse_template_frontmatter;
+
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
@@ -532,34 +539,43 @@ mod tests {
 
         // pr-review.md → directive: review-fix, required_params: [pr]
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/pr-review.md")).unwrap();
-        assert!(c.contains("directive: review-fix"));
-        assert!(c.contains("required_params: [pr]"));
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("review-fix"));
+        assert_eq!(fm.required_params, Some(vec!["pr".to_string()]));
 
         // pr-comment.md → directive: pr-comments, required_params: [pr]
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/pr-comment.md")).unwrap();
-        assert!(c.contains("directive: pr-comments"));
-        assert!(c.contains("required_params: [pr]"));
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("pr-comments"));
+        assert_eq!(fm.required_params, Some(vec!["pr".to_string()]));
 
         // branch-review.md → directive: review-fix, no required_params
         let c =
             std::fs::read_to_string(dir.path().join(".atc/templates/branch-review.md")).unwrap();
-        assert!(c.contains("directive: review-fix"));
-        assert!(!c.contains("required_params"));
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("review-fix"));
+        assert_eq!(fm.required_params, None);
 
         // close.md → directive: close, required_params: [task]
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/close.md")).unwrap();
-        assert!(c.contains("directive: close"));
-        assert!(c.contains("required_params: [task]"));
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("close"));
+        assert_eq!(fm.required_params, Some(vec!["task".to_string()]));
 
-        // push-branch.md → directive: implement, no required_params
+        // push-branch.md → directive: implement, required_params: []
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/push-branch.md")).unwrap();
-        assert!(c.contains("directive: implement"));
-        assert!(!c.contains("required_params"));
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("implement"));
+        assert_eq!(fm.required_params, Some(vec![]));
 
         // swot.md → directive: research, required_params: [competitor, name]
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/swot.md")).unwrap();
-        assert!(c.contains("directive: research"));
-        assert!(c.contains("required_params: [competitor, name]"));
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("research"));
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["competitor".to_string(), "name".to_string()])
+        );
     }
 
     #[tokio::test]
@@ -652,8 +668,11 @@ mod tests {
         // Force re-init should overwrite
         run_init(&cfg, true).await.unwrap();
         let contents = std::fs::read_to_string(&template_path).unwrap();
-        assert!(
-            contents.contains("directive: review-fix"),
+        let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+            .expect("overwritten template should have valid frontmatter");
+        assert_eq!(
+            fm.directive.as_deref(),
+            Some("review-fix"),
             "force should have overwritten with embedded content"
         );
     }
@@ -665,15 +684,17 @@ mod tests {
         cfg.config_dir = Some(dir.path().to_path_buf());
         run_init(&cfg, false).await.unwrap();
 
-        // Every template file should have non-empty content
+        // Every template file should have non-empty content with valid frontmatter
         for (name, _) in DEFAULT_TEMPLATES {
             let path = dir.path().join(".atc/templates").join(name);
             let contents = std::fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("template {name} should exist"));
             assert!(!contents.is_empty(), "template {name} should not be empty");
+            let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+                .unwrap_or_else(|e| panic!("template {name} should have valid frontmatter: {e}"));
             assert!(
-                contents.contains("---"),
-                "template {name} should have frontmatter"
+                fm.directive.is_some(),
+                "template {name} should have a directive"
             );
         }
     }
@@ -715,5 +736,34 @@ mod tests {
         );
         let contents = std::fs::read_to_string(&custom_path).unwrap();
         assert!(contents.contains("42.0"));
+    }
+
+    #[tokio::test]
+    async fn test_run_init_force_overwrites_extra_config_directives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        cfg.directives.insert(
+            "custom-workflow".to_string(),
+            atc_core::config::DirectiveConfig {
+                max_budget_usd: Some(42.0),
+                ..Default::default()
+            },
+        );
+        // First init writes the custom directive
+        run_init(&cfg, false).await.unwrap();
+        let custom_path = dir.path().join(".atc/directives/custom-workflow.toml");
+        assert!(custom_path.exists());
+
+        // Modify it manually
+        std::fs::write(&custom_path, "# customized").unwrap();
+
+        // Re-init with --force should overwrite the custom directive
+        run_init(&cfg, true).await.unwrap();
+        let contents = std::fs::read_to_string(&custom_path).unwrap();
+        assert!(
+            contents.contains("42.0"),
+            "force should have overwritten custom directive"
+        );
     }
 }
