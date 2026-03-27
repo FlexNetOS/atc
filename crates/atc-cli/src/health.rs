@@ -4,7 +4,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{Directive, DispatchRecord, RunOpts, Status};
+use atc_core::types::{Directive, DispatchRecord, RunOpts, Status, WorkUnitStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
@@ -269,6 +269,39 @@ pub async fn run_health(
             .all(|done| done);
             if all_done {
                 post_completion::cleanup_worktree(&record.worktree_path, &worktree_base).await;
+            }
+        }
+    }
+
+    // --- 7C2: Work unit merge detection ---
+    // Check active work units and transition to merged when all PRs are done.
+    {
+        let active_units = registry.list_work_units().await.unwrap_or_default();
+        for wu in &active_units {
+            if wu.status != WorkUnitStatus::Active || wu.pr_urls.is_empty() {
+                continue;
+            }
+            let all_merged = futures::future::join_all(
+                wu.pr_urls.iter().map(|u| post_completion::is_pr_done(u)),
+            )
+            .await
+            .into_iter()
+            .all(|done| done);
+            if all_merged {
+                if let Err(e) = registry
+                    .update_work_unit_status(&wu.id, WorkUnitStatus::Merged)
+                    .await
+                {
+                    warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to merged");
+                } else {
+                    emit(
+                        json,
+                        &format!(
+                            "Work unit {} → merged (all PRs done)",
+                            wu.task_slug.as_deref().unwrap_or(&wu.id)
+                        ),
+                    );
+                }
             }
         }
     }

@@ -122,6 +122,15 @@ pub async fn run_post_completion(
     }
     let pr_url = all_pr_urls.first().cloned();
 
+    // 8b. Propagate discovered PR URLs to work unit
+    if let Some(ref wu_id) = record.work_unit_id {
+        for url in &all_pr_urls {
+            if let Err(e) = registry.add_work_unit_pr(wu_id, url).await {
+                warn!(id = %input.dispatch_id, work_unit = %wu_id, error = %e, "failed to add PR to work unit (non-fatal)");
+            }
+        }
+    }
+
     // 9. Store artifacts as JSON blob (always store — artifacts are additive metadata)
     let json = serde_json::to_string(&artifacts)?;
     registry.set_artifacts(&input.dispatch_id, &json).await?;
