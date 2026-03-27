@@ -196,8 +196,12 @@ async fn tmux_session_alive(session: &str) -> bool {
 
 /// Output format for the watcher.
 enum OutputFormat {
+    /// Raw JSONL — one JSON object per line. Default.
     Ndjson,
+    /// Human-readable with icons and indentation.
     Human,
+    /// Pretty: concise one-line-per-event with color (like --pretty for logs).
+    Pretty,
 }
 
 /// Main entry point for `atc watch`.
@@ -210,16 +214,14 @@ pub async fn run_watch(
     socket: Option<PathBuf>,
 ) -> Result<()> {
     let output_format = match format {
-        "ndjson" => OutputFormat::Ndjson,
+        "ndjson" | "json" => OutputFormat::Ndjson,
         "human" => OutputFormat::Human,
+        "pretty" => OutputFormat::Pretty,
         "auto" => {
-            if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                OutputFormat::Human
-            } else {
-                OutputFormat::Ndjson
-            }
+            // Default to JSONL always — pipe through jq for formatting
+            OutputFormat::Ndjson
         }
-        other => anyhow::bail!("unknown format: {other} (expected ndjson, human, or auto)"),
+        other => anyhow::bail!("unknown format: {other} (expected json, pretty, human, or auto)"),
     };
 
     let poll_interval = std::time::Duration::from_secs(config.watch.poll_interval_secs);
@@ -445,6 +447,56 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
             }
             WatchEvent::SessionDied { id } => {
                 eprintln!("💀 {id}: session died without result event");
+            }
+        },
+        OutputFormat::Pretty => match event {
+            WatchEvent::Started {
+                task, directive, ..
+            } => {
+                let label = task.as_deref().unwrap_or("(none)");
+                eprintln!("▶ {label} ({directive})");
+            }
+            WatchEvent::LogLine {
+                event_type,
+                text,
+                tool,
+                ..
+            } => match event_type.as_str() {
+                "assistant" => {
+                    if let Some(t) = text {
+                        // First line only, truncated
+                        let first = t.lines().next().unwrap_or("");
+                        println!("  {first}");
+                    }
+                }
+                "tool_use" => {
+                    let name = tool.as_deref().unwrap_or("?");
+                    let input = text.as_deref().unwrap_or("");
+                    println!("  \x1b[2m[{name}]\x1b[0m {input}");
+                }
+                _ => {}
+            },
+            WatchEvent::CostThreshold {
+                cost_usd,
+                threshold,
+                ..
+            } => {
+                eprintln!("  \x1b[33m⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m");
+            }
+            WatchEvent::Completed {
+                cost_usd, pr_url, ..
+            } => {
+                let cost = cost_usd
+                    .map(|c| format!("${c:.2}"))
+                    .unwrap_or_else(|| "-".into());
+                let pr = pr_url.as_deref().unwrap_or("");
+                eprintln!("  \x1b[32m✓ done ({cost}) {pr}\x1b[0m");
+            }
+            WatchEvent::Failed { subtype, .. } => {
+                eprintln!("  \x1b[31m✗ failed ({subtype})\x1b[0m");
+            }
+            WatchEvent::SessionDied { .. } => {
+                eprintln!("  \x1b[31m✗ session died\x1b[0m");
             }
         },
     }
