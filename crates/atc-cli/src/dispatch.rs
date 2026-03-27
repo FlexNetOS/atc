@@ -459,14 +459,13 @@ pub async fn ensure_worktree(
     let kb_root = opts.kb_root;
     let force = opts.force;
 
-    // Use branch name as the worktree directory name so each dispatch gets a
-    // unique path. Previously this used kb_basename, which caused every
-    // dispatch to collide on the same worktree name.
-    // For multi-repo, use the first (primary) repo for the path.
+    // Use sanitized branch name as the worktree directory name so each dispatch
+    // gets a unique path. Slashes replaced with -- to avoid nested directories.
     let primary_repo = repos.first().copied();
+    let sanitized_branch = branch.replace('/', "--");
     let worktree_path = match primary_repo {
-        Some(r) => worktree_base.join(branch).join(r),
-        None => worktree_base.join(branch),
+        Some(r) => worktree_base.join(&sanitized_branch).join(r),
+        None => worktree_base.join(&sanitized_branch),
     };
 
     // Collision detection
@@ -532,9 +531,12 @@ pub async fn ensure_worktree(
         }
     }
 
-    // No existing worktree — create a new one
+    // No existing worktree — create a new one.
+    // Worktree NAME must not contain path separators — sanitize by replacing / with --.
+    // The git BRANCH name (--branch) keeps the original value (slashes are valid in git refs).
+    let worktree_name = branch.replace('/', "--");
     if !repos.is_empty() {
-        let mut args = vec!["git", "worktree", "create", branch];
+        let mut args = vec!["git", "worktree", "create", &worktree_name];
         for r in repos {
             args.push("--repo");
             args.push(r);
