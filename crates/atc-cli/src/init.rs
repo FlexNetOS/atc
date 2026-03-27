@@ -562,11 +562,11 @@ mod tests {
         assert_eq!(fm.directive.as_deref(), Some("close"));
         assert_eq!(fm.required_params, Some(vec!["task".to_string()]));
 
-        // push-branch.md → directive: implement, required_params: []
+        // push-branch.md → directive: implement, no required_params
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/push-branch.md")).unwrap();
         let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
         assert_eq!(fm.directive.as_deref(), Some("implement"));
-        assert_eq!(fm.required_params, Some(vec![]));
+        assert_eq!(fm.required_params, None);
 
         // swot.md → directive: research, required_params: [competitor, name]
         let c = std::fs::read_to_string(dir.path().join(".atc/templates/swot.md")).unwrap();
