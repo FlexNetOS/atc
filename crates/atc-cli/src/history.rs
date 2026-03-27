@@ -103,7 +103,14 @@ pub async fn run_history(
 
     let Some(unit) = unit else {
         let target = slug.or(pr).or(branch).unwrap_or("(unknown)");
-        println!("No work unit found for: {}", target);
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "work_unit": null, "dispatches": [] })
+            );
+        } else {
+            println!("No work unit found for: {}", target);
+        }
         return Ok(());
     };
 

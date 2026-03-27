@@ -281,6 +281,13 @@ pub async fn run_health(
             if wu.pr_urls.is_empty() {
                 continue;
             }
+
+            // Don't close a work unit while non-terminal dispatches are still attached
+            let wu_dispatches = registry.list_dispatches_for_work_unit(&wu.id).await?;
+            if wu_dispatches.iter().any(|d| !d.status.is_terminal()) {
+                continue;
+            }
+
             // Check each PR's state individually to distinguish merged vs closed
             let pr_states = futures::future::join_all(
                 wu.pr_urls

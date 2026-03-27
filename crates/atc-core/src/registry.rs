@@ -197,6 +197,11 @@ const CREATE_WORK_UNITS_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_work_units_branch ON work_units(branch);",
     "CREATE INDEX IF NOT EXISTS idx_work_units_status ON work_units(status);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_work_unit ON dispatches(work_unit_id);",
+    // Enforce at most one active work unit per (task_slug, branch) pair.
+    // This prevents TOCTOU races where two concurrent resolve_work_unit calls
+    // both observe "no active unit" and both insert.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_task ON work_units(task_slug) WHERE status = 'active' AND task_slug IS NOT NULL;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_branch ON work_units(branch) WHERE status = 'active' AND branch IS NOT NULL;",
 ];
 
 const CREATE_QUEUE_TABLE_SQL: &str = r#"
@@ -907,8 +912,11 @@ impl Registry for SqliteRegistry {
     async fn insert_work_unit(&self, unit: &crate::types::WorkUnit) -> Result<()> {
         let repos_json = serde_json::to_string(&unit.repos)?;
         let pr_urls_json = serde_json::to_string(&unit.pr_urls)?;
+        // Use OR IGNORE so that the unique partial indexes on active (task_slug, branch)
+        // silently reject duplicates instead of erroring. The caller (resolve_work_unit)
+        // will find the existing row on retry via the lookup path.
         sqlx::query(
-            r#"INSERT INTO work_units (id, task_slug, branch, repos, pr_urls, status, created_at, updated_at)
+            r#"INSERT OR IGNORE INTO work_units (id, task_slug, branch, repos, pr_urls, status, created_at, updated_at)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
         )
         .bind(&unit.id)
@@ -969,7 +977,7 @@ impl Registry for SqliteRegistry {
 
     async fn find_work_unit_by_pr(&self, pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
         let row = sqlx::query(
-            "SELECT w.* FROM work_units w, json_each(w.pr_urls) je WHERE je.value = ?1 LIMIT 1",
+            "SELECT w.* FROM work_units w, json_each(w.pr_urls) je WHERE je.value = ?1 ORDER BY w.updated_at DESC LIMIT 1",
         )
         .bind(pr_url)
         .fetch_optional(&self.pool)

@@ -70,19 +70,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
         } else {
             r.pr_urls
                 .iter()
-                .map(|url| {
-                    // "https://github.com/org/repo/pull/42" → "repo#42"
-                    url.strip_prefix("https://github.com/")
-                        .and_then(|path| {
-                            let parts: Vec<&str> = path.split('/').collect();
-                            if parts.len() >= 4 && parts[2] == "pull" {
-                                Some(format!("{}#{}", parts[1], parts[3]))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_else(|| url.clone())
-                })
+                .map(|url| format_pr_url(url))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -236,16 +224,21 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
         };
         let dispatches_for_wu = by_wu.get(wu.id.as_str());
         let dispatch_count = dispatches_for_wu.map(|d| d.len()).unwrap_or(0);
-        let total_cost: f64 = dispatches_for_wu
-            .map(|ds| ds.iter().filter_map(|r| r.cost_usd).sum())
-            .unwrap_or(0.0);
         let dispatch_label = format!(
             "{} run{}",
             dispatch_count,
             if dispatch_count == 1 { "" } else { "s" }
         );
-        let cost_str = if total_cost > 0.0 {
-            format!("${:.2}", total_cost)
+        // Distinguish "no cost data" from "real $0.00": only show a dollar
+        // amount when at least one dispatch has cost_usd populated.
+        let has_any_cost = dispatches_for_wu
+            .map(|ds| ds.iter().any(|r| r.cost_usd.is_some()))
+            .unwrap_or(false);
+        let cost_str = if has_any_cost {
+            let total: f64 = dispatches_for_wu
+                .map(|ds| ds.iter().filter_map(|r| r.cost_usd).sum())
+                .unwrap_or(0.0);
+            format!("${:.2}", total)
         } else {
             "-".to_string()
         };

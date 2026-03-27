@@ -847,7 +847,7 @@ async fn resolve_work_unit(
         return Ok(unit);
     }
 
-    // 3. Create new work unit
+    // 3. Create new work unit (INSERT OR IGNORE to handle concurrent races)
     let now = chrono::Utc::now();
     let id = generate_work_unit_id();
     let unit = WorkUnit {
@@ -861,6 +861,21 @@ async fn resolve_work_unit(
         updated_at: now,
     };
     registry.insert_work_unit(&unit).await?;
+
+    // Re-query to return the winning row (ours or a concurrent insert that won the race).
+    // The unique partial indexes guarantee at most one active unit per task/branch.
+    if let Some(slug) = effective_task {
+        if let Some(existing) = registry.find_work_unit_by_task(slug).await? {
+            info!(id = %existing.id, task = ?effective_task, branch = %branch, "resolved work unit");
+            return Ok(existing);
+        }
+    }
+    if let Some(existing) = registry.find_work_unit_by_branch(branch).await? {
+        info!(id = %existing.id, task = ?effective_task, branch = %branch, "resolved work unit");
+        return Ok(existing);
+    }
+
+    // Shouldn't happen, but fall back to the unit we tried to insert
     info!(id = %unit.id, task = ?effective_task, branch = %branch, "created new work unit");
     Ok(unit)
 }
