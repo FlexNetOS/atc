@@ -533,11 +533,9 @@ pub async fn ensure_worktree(
     }
 
     // No existing worktree — create a new one.
-    // Worktree NAME must not contain path separators — sanitize by replacing / with --.
-    // The git BRANCH name (--branch) keeps the original value (slashes are valid in git refs).
-    let worktree_name = branch.replace('/', "--");
+    // Reuse sanitized_branch for the worktree name (git branch keeps original slashes).
     if !repos.is_empty() {
-        let mut args = vec!["git", "worktree", "create", &worktree_name];
+        let mut args = vec!["git", "worktree", "create", &sanitized_branch];
         for r in repos {
             args.push("--repo");
             args.push(r);
