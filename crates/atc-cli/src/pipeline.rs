@@ -8,6 +8,8 @@ use chrono::Utc;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+use atc_core::types::{WorkUnit, WorkUnitStatus};
+
 use crate::dispatch::{
     compute_allowed_paths, derive_pr_url_from_comment, ensure_worktree, parse_comment_url,
     resolve_gh_token, resolve_pr_repo_path, tmux_session_alive, validate_branch_name,
@@ -565,6 +567,34 @@ impl<'a> DispatchPipeline<'a> {
             }
         };
 
+        // 9b. Resolve work unit
+        let work_unit = resolve_work_unit(
+            self.registry,
+            resolved.task_slug.as_deref(),
+            &resolved.branch,
+            &effective_params,
+            &repos_for_context,
+        )
+        .await;
+        let work_unit_id = match &work_unit {
+            Ok(wu) => Some(wu.id.clone()),
+            Err(e) => {
+                warn!(error = %e, "work unit resolution failed (non-fatal)");
+                None
+            }
+        };
+
+        // Add repos to the work unit if not already present
+        if let Ok(ref wu) = work_unit {
+            for repo in &repos_for_context {
+                if !wu.repos.contains(repo) {
+                    if let Err(e) = self.registry.add_work_unit_repo(&wu.id, repo).await {
+                        warn!(error = %e, "failed to add repo to work unit (non-fatal)");
+                    }
+                }
+            }
+        }
+
         // 10. Insert registry record
         let status = match handle.inline_exit_code {
             Some(0) => Status::Done,
@@ -592,6 +622,7 @@ impl<'a> DispatchPipeline<'a> {
             num_turns: None,
             duration_ms: None,
             artifacts: None,
+            work_unit_id,
             dispatched_at: now,
             updated_at: now,
         };
@@ -704,6 +735,7 @@ impl<'a> DispatchPipeline<'a> {
             num_turns: None,
             duration_ms: None,
             artifacts: None,
+            work_unit_id: None,
             dispatched_at: now,
             updated_at: now,
         }
@@ -789,6 +821,58 @@ async fn post_pr_comment(pr_url: &str, body: &str) {
         }
         _ => {}
     }
+}
+
+/// Resolve or create a work unit for this dispatch.
+///
+/// Priority: task slug > branch > create new (orphan).
+/// Only active work units are matched — non-active ones cause a new unit.
+async fn resolve_work_unit(
+    registry: &dyn Registry,
+    task_slug: Option<&str>,
+    branch: &str,
+    params: &std::collections::HashMap<String, String>,
+    repos: &[String],
+) -> Result<WorkUnit> {
+    // 1. Try task slug (from resolved input or --param task=...)
+    let effective_task = task_slug.or_else(|| params.get("task").map(|s| s.as_str()));
+    if let Some(slug) = effective_task {
+        if let Some(unit) = registry.find_work_unit_by_task(slug).await? {
+            return Ok(unit);
+        }
+    }
+
+    // 2. Try branch
+    if let Some(unit) = registry.find_work_unit_by_branch(branch).await? {
+        return Ok(unit);
+    }
+
+    // 3. Create new work unit
+    let now = chrono::Utc::now();
+    let id = generate_work_unit_id();
+    let unit = WorkUnit {
+        id,
+        task_slug: effective_task.map(|s| s.to_string()),
+        branch: Some(branch.to_string()),
+        repos: repos.to_vec(),
+        pr_urls: Vec::new(),
+        status: WorkUnitStatus::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    registry.insert_work_unit(&unit).await?;
+    info!(id = %unit.id, task = ?effective_task, branch = %branch, "created new work unit");
+    Ok(unit)
+}
+
+/// Generate a ULID-like ID for work units.
+fn generate_work_unit_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = chrono::Utc::now().timestamp_millis();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mix = count.wrapping_mul(0x517cc1b727220a95) ^ (std::process::id() as u64);
+    format!("wu-{:013x}-{:08x}", ts, (mix & 0xFFFF_FFFF) as u32)
 }
 
 /// Rollback a newly created worktree (without resolver cleanup).

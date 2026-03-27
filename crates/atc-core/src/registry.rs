@@ -63,6 +63,51 @@ pub trait Registry: Send + Sync {
         anyhow::bail!("artifacts persistence is not implemented for this registry backend")
     }
 
+    // --- Work unit methods ---
+    async fn insert_work_unit(&self, _unit: &crate::types::WorkUnit) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn get_work_unit(&self, _id: &str) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn find_work_unit_by_task(
+        &self,
+        _task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn find_work_unit_by_branch(
+        &self,
+        _branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn find_work_unit_by_pr(&self, _pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn update_work_unit_status(
+        &self,
+        _id: &str,
+        _status: crate::types::WorkUnitStatus,
+    ) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn add_work_unit_pr(&self, _id: &str, _pr_url: &str) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn add_work_unit_repo(&self, _id: &str, _repo_path: &str) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        Ok(Vec::new())
+    }
+    async fn list_dispatches_for_work_unit(
+        &self,
+        _work_unit_id: &str,
+    ) -> Result<Vec<DispatchRecord>> {
+        Ok(Vec::new())
+    }
+
     // --- New query methods ---
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>>;
     async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>>;
@@ -116,6 +161,26 @@ const CREATE_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
 ];
 
+const CREATE_WORK_UNITS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS work_units (
+    id          TEXT PRIMARY KEY,
+    task_slug   TEXT,
+    branch      TEXT,
+    repos       TEXT NOT NULL DEFAULT '[]',
+    pr_urls     TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'active',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+"#;
+
+const CREATE_WORK_UNITS_INDEXES_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_work_units_task ON work_units(task_slug);",
+    "CREATE INDEX IF NOT EXISTS idx_work_units_branch ON work_units(branch);",
+    "CREATE INDEX IF NOT EXISTS idx_work_units_status ON work_units(status);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_work_unit ON dispatches(work_unit_id);",
+];
+
 const CREATE_QUEUE_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS dispatch_queue (
     id          TEXT PRIMARY KEY,
@@ -144,6 +209,13 @@ impl SqliteRegistry {
     async fn apply_ddl(pool: &sqlx::SqlitePool) -> Result<()> {
         sqlx::query(CREATE_TABLE_SQL).execute(pool).await?;
         for idx_sql in CREATE_INDEXES_SQL {
+            sqlx::query(idx_sql).execute(pool).await?;
+        }
+        // Work units table
+        sqlx::query(CREATE_WORK_UNITS_TABLE_SQL)
+            .execute(pool)
+            .await?;
+        for idx_sql in CREATE_WORK_UNITS_INDEXES_SQL {
             sqlx::query(idx_sql).execute(pool).await?;
         }
         // Queue table
@@ -272,6 +344,18 @@ impl SqliteRegistry {
                     .execute(pool)
                     .await?;
             }
+
+            // Add work_unit_id column if missing (work unit grouping migration)
+            let (has_work_unit_id,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'work_unit_id'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_work_unit_id == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN work_unit_id TEXT")
+                    .execute(pool)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -371,7 +455,31 @@ impl SqliteRegistry {
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("invalid duration_ms value in database"))?,
             artifacts: row.get("artifacts"),
+            work_unit_id: row.get("work_unit_id"),
             dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
+        })
+    }
+
+    fn row_to_work_unit(row: &sqlx::sqlite::SqliteRow) -> Result<crate::types::WorkUnit> {
+        use sqlx::Row;
+        let status_str: String = row.get("status");
+        let created_at_str: String = row.get("created_at");
+        let updated_at_str: String = row.get("updated_at");
+        Ok(crate::types::WorkUnit {
+            id: row.get("id"),
+            task_slug: row.get("task_slug"),
+            branch: row.get("branch"),
+            repos: {
+                let json_str: String = row.get("repos");
+                serde_json::from_str(&json_str).unwrap_or_default()
+            },
+            pr_urls: {
+                let json_str: String = row.get("pr_urls");
+                serde_json::from_str(&json_str).unwrap_or_default()
+            },
+            status: status_str.parse()?,
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
     }
@@ -388,10 +496,10 @@ impl Registry for SqliteRegistry {
                 resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
                 check_agent_exited_clean, check_branch_pushed, check_pr_created,
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
-                cost_usd, num_turns, duration_ms, dispatched_at, updated_at
+                cost_usd, num_turns, duration_ms, work_unit_id, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
             )"#,
         )
         .bind(&record.id)
@@ -449,6 +557,7 @@ impl Registry for SqliteRegistry {
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
         )
+        .bind(&record.work_unit_id)
         .bind(record.dispatched_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -770,6 +879,194 @@ impl Registry for SqliteRegistry {
         )
         .bind(path_str)
         .bind(Status::Running.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    // --- Work unit methods ---
+
+    async fn insert_work_unit(&self, unit: &crate::types::WorkUnit) -> Result<()> {
+        let repos_json = serde_json::to_string(&unit.repos)?;
+        let pr_urls_json = serde_json::to_string(&unit.pr_urls)?;
+        sqlx::query(
+            r#"INSERT INTO work_units (id, task_slug, branch, repos, pr_urls, status, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+        )
+        .bind(&unit.id)
+        .bind(&unit.task_slug)
+        .bind(&unit.branch)
+        .bind(&repos_json)
+        .bind(&pr_urls_json)
+        .bind(unit.status.as_str())
+        .bind(unit.created_at.to_rfc3339())
+        .bind(unit.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_work_unit(&self, id: &str) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query("SELECT * FROM work_units WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_work_unit_by_task(
+        &self,
+        task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE task_slug = ?1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(task_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_work_unit_by_branch(
+        &self,
+        branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE branch = ?1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(branch)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_work_unit_by_pr(&self, pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT w.* FROM work_units w, json_each(w.pr_urls) je WHERE je.value = ?1 LIMIT 1",
+        )
+        .bind(pr_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn update_work_unit_status(
+        &self,
+        id: &str,
+        status: crate::types::WorkUnitStatus,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE work_units SET status = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no work unit found for id: {id}"
+        );
+        Ok(())
+    }
+
+    async fn add_work_unit_pr(&self, id: &str, pr_url: &str) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result: Result<()> = async {
+            let now = Utc::now().to_rfc3339();
+            let (current_json,): (String,) =
+                sqlx::query_as("SELECT pr_urls FROM work_units WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let mut urls: Vec<String> = serde_json::from_str(&current_json)?;
+            if !urls.iter().any(|existing| existing == pr_url) {
+                urls.push(pr_url.to_string());
+            }
+            sqlx::query("UPDATE work_units SET pr_urls = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(serde_json::to_string(&urls)?)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
+    }
+
+    async fn add_work_unit_repo(&self, id: &str, repo_path: &str) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result: Result<()> = async {
+            let now = Utc::now().to_rfc3339();
+            let (current_json,): (String,) =
+                sqlx::query_as("SELECT repos FROM work_units WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let mut repos: Vec<String> = serde_json::from_str(&current_json)?;
+            if !repos.iter().any(|existing| existing == repo_path) {
+                repos.push(repo_path.to_string());
+            }
+            sqlx::query("UPDATE work_units SET repos = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(serde_json::to_string(&repos)?)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
+    }
+
+    async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        let rows = sqlx::query("SELECT * FROM work_units ORDER BY updated_at DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(Self::row_to_work_unit).collect()
+    }
+
+    async fn list_dispatches_for_work_unit(
+        &self,
+        work_unit_id: &str,
+    ) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE work_unit_id = ?1 ORDER BY dispatched_at ASC, id ASC",
+        )
+        .bind(work_unit_id)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(Self::row_to_record).collect()
@@ -1130,6 +1427,7 @@ mod tests {
             num_turns: None,
             duration_ms: None,
             artifacts: None,
+            work_unit_id: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }
