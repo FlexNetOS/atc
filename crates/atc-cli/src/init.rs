@@ -93,6 +93,16 @@ const DEFAULT_COMPONENTS: &[(&str, &str)] = &[
     ("web.md", include_str!("../defaults/components/web.md")),
 ];
 
+/// Embedded default partials — shared template fragments referenced via `{{>name}}`.
+const DEFAULT_PARTIALS: &[(&str, &str)] = &[
+    (
+        "github-comments.md",
+        include_str!("../defaults/partials/github-comments.md"),
+    ),
+    ("rebase.md", include_str!("../defaults/partials/rebase.md")),
+    ("verify.md", include_str!("../defaults/partials/verify.md")),
+];
+
 /// Scaffold a `.atc/` directory with embedded default content.
 ///
 /// Creates:
@@ -100,6 +110,7 @@ const DEFAULT_COMPONENTS: &[(&str, &str)] = &[
 /// - `.atc/directives/<name>.toml` — default directive files embedded in the binary
 /// - `.atc/components/<name>.md` — default component files embedded in the binary
 /// - `.atc/templates/<name>.md` — default template files embedded in the binary
+/// - `.atc/partials/<name>.md` — default partial files (shared template fragments)
 ///
 /// **Re-init behavior:**
 /// - Without `--force`: create files that don't exist, skip files that do.
@@ -119,6 +130,7 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
         atc_dir.join("directives"),
         atc_dir.join("templates"),
         atc_dir.join("components"),
+        atc_dir.join("partials"),
     ];
     for dir in &dirs {
         std::fs::create_dir_all(dir)
@@ -161,6 +173,13 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     for (name, content) in DEFAULT_COMPONENTS {
         let path = atc_dir.join("components").join(name);
         let label = format!(".atc/components/{name}");
+        write_file(&path, content, &label, force)?;
+    }
+
+    // Write embedded default partial files
+    for (name, content) in DEFAULT_PARTIALS {
+        let path = atc_dir.join("partials").join(name);
+        let label = format!(".atc/partials/{name}");
         write_file(&path, content, &label, force)?;
     }
 
