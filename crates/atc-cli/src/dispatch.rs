@@ -12,14 +12,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info, warn};
 
-/// Derive branch name from slug: replace `/` with `--`.
+/// Sanitize a string by replacing `/` with `--`. Used for:
+/// - Deriving branch names from slugs (`tasks/foo` → `tasks--foo`)
+/// - Sanitizing branch names for worktree names and dispatch IDs
 ///
-/// This is bijective for valid GitKB slugs, which conform to the ABNF
-/// `segment = 1*(ALPHA / DIGIT / "-" / "_")` — segments cannot contain `--`.
-/// If a slug ever contains `--` natively, this mapping would collide;
-/// slug validation (git-kb's ABNF enforcement) prevents that.
+/// Bijective for valid GitKB slugs (ABNF segments cannot contain `--`).
+pub fn sanitize_slashes(s: &str) -> String {
+    s.replace('/', "--")
+}
+
+/// Derive branch name from slug: replace `/` with `--`.
 pub fn derive_branch(slug: &str) -> String {
-    slug.replace('/', "--")
+    sanitize_slashes(slug)
 }
 
 /// Process-local counter to guarantee unique dispatch IDs even when two
@@ -32,7 +36,7 @@ static DISPATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 /// sub-millisecond time, guaranteeing uniqueness within a process and
 /// making cross-process collisions effectively impossible.
 pub fn build_dispatch_id(branch: &str, directive: &Directive) -> String {
-    let safe_branch = branch.replace('/', "--");
+    let safe_branch = sanitize_slashes(branch);
     let ts = Utc::now().timestamp_millis();
     let seq = DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -463,7 +467,7 @@ pub async fn ensure_worktree(
     // Use sanitized branch name as the worktree directory name so each dispatch
     // gets a unique path. Slashes replaced with -- to avoid nested directories.
     let primary_repo = repos.first().copied();
-    let sanitized_branch = branch.replace('/', "--");
+    let sanitized_branch = sanitize_slashes(branch);
     let worktree_path = match primary_repo {
         Some(r) => worktree_base.join(&sanitized_branch).join(r),
         None => worktree_base.join(&sanitized_branch),
