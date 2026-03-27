@@ -156,7 +156,7 @@ The queue is the universal interface between selection (what to dispatch) and sc
 
 ## `.atc/` Project Directory
 
-`atc init` scaffolds a per-project `.atc/` directory containing all dispatch configuration:
+`atc init` scaffolds a per-project `.atc/` directory with default content embedded in the ATC binary. No external files are copied — the binary is the source of truth for defaults:
 
 ```text
 .atc/
@@ -360,6 +360,7 @@ atc-core/                           atc-cli/
                                     +-- redirect.rs       Tmux injection
                                     +-- close.rs          Task closure
                                     +-- post_complete.rs  Post-completion
+                                    +-- init.rs           atc init (embedded defaults)
 ```
 
 ### Daemon Architecture

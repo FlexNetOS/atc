@@ -1,15 +1,105 @@
 use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
-use atc_core::prompt_engine::resolve_dir;
 use std::path::Path;
 
-/// Scaffold a `.atc/` directory from the current configuration.
+// --- Embedded default directive files ---
+const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
+    (
+        "implement",
+        include_str!("../defaults/directives/implement.toml"),
+    ),
+    (
+        "review-fix",
+        include_str!("../defaults/directives/review-fix.toml"),
+    ),
+    (
+        "pr-comments",
+        include_str!("../defaults/directives/pr-comments.toml"),
+    ),
+    (
+        "research",
+        include_str!("../defaults/directives/research.toml"),
+    ),
+    ("close", include_str!("../defaults/directives/close.toml")),
+    ("refine", include_str!("../defaults/directives/refine.toml")),
+    (
+        "create-task",
+        include_str!("../defaults/directives/create-task.toml"),
+    ),
+];
+
+// --- Embedded default template files ---
+const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "pr-review.md",
+        include_str!("../defaults/templates/pr-review.md"),
+    ),
+    (
+        "pr-comment.md",
+        include_str!("../defaults/templates/pr-comment.md"),
+    ),
+    (
+        "branch-review.md",
+        include_str!("../defaults/templates/branch-review.md"),
+    ),
+    ("close.md", include_str!("../defaults/templates/close.md")),
+    (
+        "push-branch.md",
+        include_str!("../defaults/templates/push-branch.md"),
+    ),
+    ("swot.md", include_str!("../defaults/templates/swot.md")),
+];
+
+// --- Embedded default component files ---
+const DEFAULT_COMPONENTS: &[(&str, &str)] = &[
+    ("base.md", include_str!("../defaults/components/base.md")),
+    (
+        "constraints.md",
+        include_str!("../defaults/components/constraints.md"),
+    ),
+    (
+        "code-read.md",
+        include_str!("../defaults/components/code-read.md"),
+    ),
+    (
+        "code-write.md",
+        include_str!("../defaults/components/code-write.md"),
+    ),
+    ("git.md", include_str!("../defaults/components/git.md")),
+    (
+        "github.md",
+        include_str!("../defaults/components/github.md"),
+    ),
+    (
+        "review.md",
+        include_str!("../defaults/components/review.md"),
+    ),
+    (
+        "kb-read.md",
+        include_str!("../defaults/components/kb-read.md"),
+    ),
+    (
+        "kb-write.md",
+        include_str!("../defaults/components/kb-write.md"),
+    ),
+    (
+        "refine.md",
+        include_str!("../defaults/components/refine.md"),
+    ),
+    (
+        "create-task.md",
+        include_str!("../defaults/components/create-task.md"),
+    ),
+    ("web.md", include_str!("../defaults/components/web.md")),
+];
+
+/// Scaffold a `.atc/` directory with embedded default content.
 ///
 /// Creates:
 /// - `.atc/config.toml` — base config (registry, dispatch, batch, etc.)
-/// - `.atc/directives/<name>.toml` — one file per `[directives.*]` entry
-/// - `.atc/components/` — copies component `.md` files from current components_dir
-/// - `.atc/templates/` — copies template `.md` files from current templates_dir
+/// - `.atc/directives/<name>.toml` — default directive files embedded in the binary
+/// - `.atc/components/<name>.md` — default component files embedded in the binary
+/// - `.atc/templates/<name>.md` — default template files embedded in the binary
 ///
 /// **Re-init behavior:**
 /// - Without `--force`: create files that don't exist, skip files that do.
@@ -40,32 +130,39 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     let config_toml = build_config_toml(config);
     write_file(&config_path, &config_toml, ".atc/config.toml", force)?;
 
-    // Write directive files from [directives.*] sections
-    for (name, dcfg) in &config.directives {
-        let directive_toml = toml::to_string_pretty(dcfg)
-            .with_context(|| format!("failed to serialize directive config '{name}'"))?;
+    // Write embedded default directive files
+    for (name, content) in DEFAULT_DIRECTIVES {
         let path = atc_dir.join("directives").join(format!("{name}.toml"));
         let label = format!(".atc/directives/{name}.toml");
-        write_file(&path, &directive_toml, &label, force)?;
+        write_file(&path, content, &label, force)?;
     }
 
-    // Copy components
-    let components_dir = resolve_dir(&config.prompt.components_dir, config.config_dir.as_deref());
-    copy_md_files(
-        &components_dir,
-        &atc_dir.join("components"),
-        "components",
-        force,
-    )?;
+    // Also write any extra directives from [directives.*] config sections
+    // that don't have a matching embedded default
+    for (name, dcfg) in &config.directives {
+        let is_default = DEFAULT_DIRECTIVES.iter().any(|(n, _)| *n == name.as_str());
+        if !is_default {
+            let path = atc_dir.join("directives").join(format!("{name}.toml"));
+            let directive_toml = toml::to_string_pretty(dcfg)
+                .with_context(|| format!("failed to serialize directive config '{name}'"))?;
+            let label = format!(".atc/directives/{name}.toml");
+            write_file(&path, &directive_toml, &label, force)?;
+        }
+    }
 
-    // Copy templates
-    let templates_dir = resolve_dir(&config.prompt.templates_dir, config.config_dir.as_deref());
-    copy_md_files(
-        &templates_dir,
-        &atc_dir.join("templates"),
-        "templates",
-        force,
-    )?;
+    // Write embedded default template files
+    for (name, content) in DEFAULT_TEMPLATES {
+        let path = atc_dir.join("templates").join(name);
+        let label = format!(".atc/templates/{name}");
+        write_file(&path, content, &label, force)?;
+    }
+
+    // Write embedded default component files
+    for (name, content) in DEFAULT_COMPONENTS {
+        let path = atc_dir.join("components").join(name);
+        let label = format!(".atc/components/{name}");
+        write_file(&path, content, &label, force)?;
+    }
 
     if is_reinit && !force {
         println!(
@@ -220,57 +317,6 @@ fn build_config_toml(config: &AtcConfig) -> String {
     } else {
         parts.join("\n")
     }
-}
-
-/// Copy all `.md` files from `src` to `dst`, respecting the `force` flag.
-/// Skips when `src` and `dst` resolve to the same directory (e.g. during re-init).
-fn copy_md_files(src: &Path, dst: &Path, label: &str, force: bool) -> Result<()> {
-    // Guard: if src and dst are the same directory, copying is a no-op (or harmful).
-    if let (Ok(canon_src), Ok(canon_dst)) = (src.canonicalize(), dst.canonicalize()) {
-        if canon_src == canon_dst {
-            return Ok(());
-        }
-    }
-
-    let entries = match std::fs::read_dir(src) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!(
-                "  Skipping {label} (source dir not found: {})",
-                src.display()
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(e)
-                .with_context(|| format!("failed to read {label} directory {}", src.display()));
-        }
-    };
-
-    for entry in entries {
-        let entry = entry.with_context(|| {
-            format!(
-                "failed to read entry in {label} directory {}",
-                src.display()
-            )
-        })?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            if let Some(name) = path.file_name() {
-                let dest = dst.join(name);
-                let name_str = name.to_string_lossy();
-                if dest.exists() && !force {
-                    println!("  Skipped (exists): .atc/{label}/{name_str}");
-                } else {
-                    std::fs::copy(&path, &dest).with_context(|| {
-                        format!("failed to copy {} to {}", path.display(), dest.display())
-                    })?;
-                    println!("  Created .atc/{label}/{name_str}");
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -431,6 +477,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_init_writes_embedded_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        run_init(&cfg, false).await.unwrap();
+
+        // Verify embedded directive files are written with content
+        let impl_path = dir.path().join(".atc/directives/implement.toml");
+        assert!(impl_path.exists(), "implement.toml should exist");
+        let contents = std::fs::read_to_string(&impl_path).unwrap();
+        assert!(
+            contents.contains("max_budget_usd"),
+            "directive should have budget"
+        );
+        assert!(
+            contents.contains("components"),
+            "directive should have components"
+        );
+
+        // Verify embedded template files are written with valid frontmatter
+        let pr_review = dir.path().join(".atc/templates/pr-review.md");
+        assert!(pr_review.exists(), "pr-review.md should exist");
+        let contents = std::fs::read_to_string(&pr_review).unwrap();
+        let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+            .expect("pr-review.md should have valid frontmatter");
+        assert_eq!(
+            fm.directive.as_deref(),
+            Some("review-fix"),
+            "template should have directive frontmatter"
+        );
+        assert_eq!(
+            fm.required_params.as_deref(),
+            Some(vec!["pr".to_string()].as_slice()),
+            "template should have required_params"
+        );
+        assert!(
+            contents.contains("{{pr}}"),
+            "template should have body content"
+        );
+
+        // Verify embedded component files are written with content
+        let base_comp = dir.path().join(".atc/components/base.md");
+        assert!(base_comp.exists(), "base.md should exist");
+        let contents = std::fs::read_to_string(&base_comp).unwrap();
+        assert!(!contents.is_empty(), "component should not be empty");
+        assert!(
+            contents.contains("Agent"),
+            "component should have agent content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_init_all_templates_have_correct_frontmatter() {
+        use atc_core::prompt_engine::parse_template_frontmatter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        run_init(&cfg, false).await.unwrap();
+
+        // pr-review.md → directive: review-fix, required_params: [pr]
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/pr-review.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("review-fix"));
+        assert_eq!(fm.required_params, Some(vec!["pr".to_string()]));
+
+        // pr-comment.md → directive: pr-comments, required_params: [pr]
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/pr-comment.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("pr-comments"));
+        assert_eq!(fm.required_params, Some(vec!["pr".to_string()]));
+
+        // branch-review.md → directive: review-fix, no required_params
+        let c =
+            std::fs::read_to_string(dir.path().join(".atc/templates/branch-review.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("review-fix"));
+        assert_eq!(fm.required_params, None);
+
+        // close.md → directive: close, required_params: [task]
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/close.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("close"));
+        assert_eq!(fm.required_params, Some(vec!["task".to_string()]));
+
+        // push-branch.md → directive: implement, required_params: []
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/push-branch.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("implement"));
+        assert_eq!(fm.required_params, Some(vec![]));
+
+        // swot.md → directive: research, required_params: [competitor, name]
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/swot.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("research"));
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["competitor".to_string(), "name".to_string()])
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_init_skips_existing_without_force() {
         let dir = tempfile::tempdir().unwrap();
         let atc_dir = dir.path().join(".atc");
@@ -473,18 +621,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
-        cfg.directives.insert(
-            "implement".to_string(),
-            atc_core::config::DirectiveConfig {
-                max_budget_usd: Some(15.0),
-                ..Default::default()
-            },
-        );
         run_init(&cfg, false).await.unwrap();
+        // Default embedded directives should exist
         let directive_path = dir.path().join(".atc/directives/implement.toml");
         assert!(directive_path.exists());
         let contents = std::fs::read_to_string(&directive_path).unwrap();
-        assert!(contents.contains("15.0"));
+        assert!(contents.contains("max_budget_usd"));
     }
 
     #[tokio::test]
@@ -492,13 +634,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
-        cfg.directives.insert(
-            "implement".to_string(),
-            atc_core::config::DirectiveConfig {
-                max_budget_usd: Some(15.0),
-                ..Default::default()
-            },
-        );
         // First init
         run_init(&cfg, false).await.unwrap();
         let impl_path = dir.path().join(".atc/directives/implement.toml");
@@ -506,14 +641,7 @@ mod tests {
         // Modify the file so we can verify it's preserved
         std::fs::write(&impl_path, "# customized").unwrap();
 
-        // Add a new directive and re-init without force
-        cfg.directives.insert(
-            "research".to_string(),
-            atc_core::config::DirectiveConfig {
-                max_budget_usd: Some(7.0),
-                ..Default::default()
-            },
-        );
+        // Re-init without force
         run_init(&cfg, false).await.unwrap();
 
         // Old file should be preserved
@@ -522,78 +650,120 @@ mod tests {
             impl_contents, "# customized",
             "existing directive should be preserved"
         );
-        // New file should be created
-        let research_path = dir.path().join(".atc/directives/research.toml");
-        assert!(research_path.exists(), "new directive should be created");
-        let research_contents = std::fs::read_to_string(&research_path).unwrap();
-        assert!(research_contents.contains("7.0"));
     }
 
-    /// Regression test: force re-init when templates_dir already points to `.atc/templates`
-    /// should not corrupt files by copying them onto themselves.
     #[tokio::test]
-    async fn test_force_reinit_same_src_dst_does_not_corrupt() {
+    async fn test_run_init_force_overwrites_templates() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
 
-        // First init to create .atc/ scaffolding
+        // First init
         run_init(&cfg, false).await.unwrap();
 
-        // Write a template directly into .atc/templates (simulates existing content)
-        let template_path = dir.path().join(".atc/templates/task.md");
-        let original = "---\ndirective: implement\n---\nDo the thing";
-        std::fs::write(&template_path, original).unwrap();
+        // Customize a template
+        let template_path = dir.path().join(".atc/templates/pr-review.md");
+        std::fs::write(&template_path, "# customized").unwrap();
 
-        // Now set templates_dir to .atc/templates — same as destination
-        cfg.prompt.templates_dir = ".atc/templates".to_string();
-
-        // Force re-init: should not corrupt or error
+        // Force re-init should overwrite
         run_init(&cfg, true).await.unwrap();
-
-        // File should still be intact
         let contents = std::fs::read_to_string(&template_path).unwrap();
+        let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+            .expect("overwritten template should have valid frontmatter");
         assert_eq!(
-            contents, original,
-            "template should not be corrupted by src==dst copy"
+            fm.directive.as_deref(),
+            Some("review-fix"),
+            "force should have overwritten with embedded content"
         );
     }
 
     #[tokio::test]
-    async fn test_run_init_copies_templates_with_skip() {
+    async fn test_run_init_templates_not_empty() {
         let dir = tempfile::tempdir().unwrap();
-        // Create source templates dir with one template
-        let src_templates = dir.path().join("templates");
-        std::fs::create_dir_all(&src_templates).unwrap();
-        std::fs::write(
-            src_templates.join("pr-review.md"),
-            "---\ndirective: review-fix\nrequired_params: [pr]\n---\nReview {{pr}}",
-        )
-        .unwrap();
-        std::fs::write(
-            src_templates.join("swot.md"),
-            "---\ndirective: research\nrequired_params: [competitor, name]\n---\nSWOT {{name}}",
-        )
-        .unwrap();
-
         let mut cfg = AtcConfig::default();
         cfg.config_dir = Some(dir.path().to_path_buf());
-        cfg.prompt.templates_dir = "templates".to_string();
-        // First init
         run_init(&cfg, false).await.unwrap();
-        assert!(dir.path().join(".atc/templates/pr-review.md").exists());
-        assert!(dir.path().join(".atc/templates/swot.md").exists());
 
-        // Modify pr-review and re-init
-        std::fs::write(
-            dir.path().join(".atc/templates/pr-review.md"),
-            "# customized",
-        )
-        .unwrap();
+        // Every template file should have non-empty content with valid frontmatter
+        for (name, _) in DEFAULT_TEMPLATES {
+            let path = dir.path().join(".atc/templates").join(name);
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("template {name} should exist"));
+            assert!(!contents.is_empty(), "template {name} should not be empty");
+            let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+                .unwrap_or_else(|e| panic!("template {name} should have valid frontmatter: {e}"));
+            assert!(
+                fm.directive.is_some(),
+                "template {name} should have a directive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_init_components_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
         run_init(&cfg, false).await.unwrap();
-        // Existing template should be preserved
-        let contents =
-            std::fs::read_to_string(dir.path().join(".atc/templates/pr-review.md")).unwrap();
-        assert_eq!(contents, "# customized");
+
+        // Every component file should have non-empty content
+        for (name, _) in DEFAULT_COMPONENTS {
+            let path = dir.path().join(".atc/components").join(name);
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("component {name} should exist"));
+            assert!(!contents.is_empty(), "component {name} should not be empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_init_extra_config_directives_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        // Add a custom directive not in the embedded defaults
+        cfg.directives.insert(
+            "custom-workflow".to_string(),
+            atc_core::config::DirectiveConfig {
+                max_budget_usd: Some(42.0),
+                ..Default::default()
+            },
+        );
+        run_init(&cfg, false).await.unwrap();
+        let custom_path = dir.path().join(".atc/directives/custom-workflow.toml");
+        assert!(
+            custom_path.exists(),
+            "custom directive from config should be written"
+        );
+        let contents = std::fs::read_to_string(&custom_path).unwrap();
+        assert!(contents.contains("42.0"));
+    }
+
+    #[tokio::test]
+    async fn test_run_init_force_overwrites_extra_config_directives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        cfg.directives.insert(
+            "custom-workflow".to_string(),
+            atc_core::config::DirectiveConfig {
+                max_budget_usd: Some(42.0),
+                ..Default::default()
+            },
+        );
+        // First init writes the custom directive
+        run_init(&cfg, false).await.unwrap();
+        let custom_path = dir.path().join(".atc/directives/custom-workflow.toml");
+        assert!(custom_path.exists());
+
+        // Modify it manually
+        std::fs::write(&custom_path, "# customized").unwrap();
+
+        // Re-init with --force should overwrite the custom directive
+        run_init(&cfg, true).await.unwrap();
+        let contents = std::fs::read_to_string(&custom_path).unwrap();
+        assert!(
+            contents.contains("42.0"),
+            "force should have overwritten custom directive"
+        );
     }
 }

@@ -1,0 +1,4 @@
+max_budget_usd = 5.0
+max_turns = 2000
+components = ["base", "constraints", "code-read", "kb-read", "kb-write", "create-task"]
+providers = ["kb-context"]
