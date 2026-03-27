@@ -100,6 +100,7 @@ const DEFAULT_PARTIALS: &[(&str, &str)] = &[
         include_str!("../defaults/partials/github-comments.md"),
     ),
     ("rebase.md", include_str!("../defaults/partials/rebase.md")),
+    ("review.md", include_str!("../defaults/partials/review.md")),
     ("verify.md", include_str!("../defaults/partials/verify.md")),
 ];
 
