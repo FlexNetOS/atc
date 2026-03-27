@@ -221,7 +221,9 @@ pub async fn run_watch(
             // Default to JSONL always — pipe through jq for formatting
             OutputFormat::Ndjson
         }
-        other => anyhow::bail!("unknown format: {other} (expected json, pretty, human, or auto)"),
+        other => {
+            anyhow::bail!("unknown format: {other} (expected ndjson, json, pretty, human, or auto)")
+        }
     };
 
     let poll_interval = std::time::Duration::from_secs(config.watch.poll_interval_secs);
@@ -451,12 +453,16 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
         },
         OutputFormat::Pretty => match event {
             WatchEvent::Started {
-                task, directive, ..
+                id,
+                task,
+                directive,
+                ..
             } => {
-                let label = task.as_deref().unwrap_or("(none)");
+                let label = task.as_deref().unwrap_or(id);
                 eprintln!("▶ {label} ({directive})");
             }
             WatchEvent::LogLine {
+                id,
                 event_type,
                 text,
                 tool,
@@ -466,37 +472,41 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
                     if let Some(t) = text {
                         // First line only, truncated
                         let first = t.lines().next().unwrap_or("");
-                        println!("  {first}");
+                        println!("  [{id}] {first}");
                     }
                 }
                 "tool_use" => {
                     let name = tool.as_deref().unwrap_or("?");
                     let input = text.as_deref().unwrap_or("");
-                    println!("  \x1b[2m[{name}]\x1b[0m {input}");
+                    println!("  [{id}] \x1b[2m[{name}]\x1b[0m {input}");
                 }
                 _ => {}
             },
             WatchEvent::CostThreshold {
+                id,
                 cost_usd,
                 threshold,
                 ..
             } => {
-                eprintln!("  \x1b[33m⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m");
+                eprintln!("  \x1b[33m{id}: ⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m");
             }
             WatchEvent::Completed {
-                cost_usd, pr_url, ..
+                id,
+                cost_usd,
+                pr_url,
+                ..
             } => {
                 let cost = cost_usd
                     .map(|c| format!("${c:.2}"))
                     .unwrap_or_else(|| "-".into());
                 let pr = pr_url.as_deref().unwrap_or("");
-                eprintln!("  \x1b[32m✓ done ({cost}) {pr}\x1b[0m");
+                eprintln!("  \x1b[32m{id}: ✓ done ({cost}) {pr}\x1b[0m");
             }
-            WatchEvent::Failed { subtype, .. } => {
-                eprintln!("  \x1b[31m✗ failed ({subtype})\x1b[0m");
+            WatchEvent::Failed { id, subtype, .. } => {
+                eprintln!("  \x1b[31m{id}: ✗ failed ({subtype})\x1b[0m");
             }
-            WatchEvent::SessionDied { .. } => {
-                eprintln!("  \x1b[31m✗ session died\x1b[0m");
+            WatchEvent::SessionDied { id } => {
+                eprintln!("  \x1b[31m{id}: ✗ session died\x1b[0m");
             }
         },
     }

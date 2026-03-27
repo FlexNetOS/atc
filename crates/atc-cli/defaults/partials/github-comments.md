@@ -8,8 +8,8 @@ If `triage.md` doesn't exist, fall back to raw JSON:
 
 If `.dispatch-prefetch/` doesn't exist at all, fetch directly:
 ```bash
-PR_REPO=$(echo "$PR_URL" | sed 's|https://github.com/||; s|/pull/.*||')
-PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's|^https://github.com/([^/]+/[^/]+)/pull/.*$|\1|')
+PR_NUMBER=$(printf '%s\n' "$PR_URL" | sed -E 's|^https://github.com/[^/]+/[^/]+/pull/([0-9]+).*$|\1|')
 gh api repos/$PR_REPO/pulls/$PR_NUMBER/comments
 gh api repos/$PR_REPO/pulls/$PR_NUMBER/reviews
 ```
