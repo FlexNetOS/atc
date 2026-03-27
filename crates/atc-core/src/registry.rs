@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   num_turns                 INTEGER,
   duration_ms               INTEGER,
   artifacts                 TEXT,
+  work_unit_id              TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );
@@ -2614,5 +2615,226 @@ mod tests {
         // Should not appear in pending list
         let items = registry.queue_list("default").await.unwrap();
         assert!(items.is_empty());
+    }
+
+    // ---- Work Unit tests ----
+
+    use crate::types::{WorkUnit, WorkUnitStatus};
+
+    fn sample_work_unit(id: &str, task_slug: Option<&str>, branch: Option<&str>) -> WorkUnit {
+        WorkUnit {
+            id: id.to_string(),
+            task_slug: task_slug.map(|s| s.to_string()),
+            branch: branch.map(|s| s.to_string()),
+            repos: vec!["open-source/atc".to_string()],
+            pr_urls: vec![],
+            status: WorkUnitStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_insert_and_get() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit(
+            "wu-001",
+            Some("tasks/harmony-370"),
+            Some("tasks-harmony-370"),
+        );
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let fetched = registry.get_work_unit("wu-001").await.unwrap().unwrap();
+        assert_eq!(fetched.id, "wu-001");
+        assert_eq!(fetched.task_slug.as_deref(), Some("tasks/harmony-370"));
+        assert_eq!(fetched.branch.as_deref(), Some("tasks-harmony-370"));
+        assert_eq!(fetched.status, WorkUnitStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_find_by_task() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit(
+            "wu-002",
+            Some("tasks/harmony-370"),
+            Some("tasks-harmony-370"),
+        );
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let found = registry
+            .find_work_unit_by_task("tasks/harmony-370")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "wu-002");
+
+        // Non-existent task returns None
+        let not_found = registry
+            .find_work_unit_by_task("tasks/nonexistent")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_find_by_branch() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-003", None, Some("fix/rebase-msg"));
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let found = registry
+            .find_work_unit_by_branch("fix/rebase-msg")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "wu-003");
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_find_by_pr() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut wu = sample_work_unit("wu-004", Some("tasks/harmony-370"), None);
+        wu.pr_urls = vec!["https://github.com/org/repo/pull/42".to_string()];
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let found = registry
+            .find_work_unit_by_pr("https://github.com/org/repo/pull/42")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "wu-004");
+
+        // Non-existent PR returns None
+        let not_found = registry
+            .find_work_unit_by_pr("https://github.com/org/repo/pull/999")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_status_transition() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-005", Some("tasks/harmony-370"), None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        registry
+            .update_work_unit_status("wu-005", WorkUnitStatus::Merged)
+            .await
+            .unwrap();
+
+        let fetched = registry.get_work_unit("wu-005").await.unwrap().unwrap();
+        assert_eq!(fetched.status, WorkUnitStatus::Merged);
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_non_active_not_found_by_task() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-006", Some("tasks/harmony-370"), None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        // Transition to merged
+        registry
+            .update_work_unit_status("wu-006", WorkUnitStatus::Merged)
+            .await
+            .unwrap();
+
+        // find_work_unit_by_task only returns active work units
+        let not_found = registry
+            .find_work_unit_by_task("tasks/harmony-370")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_add_pr() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-007", None, None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        registry
+            .add_work_unit_pr("wu-007", "https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+        registry
+            .add_work_unit_pr("wu-007", "https://github.com/org/repo/pull/2")
+            .await
+            .unwrap();
+        // Dedup
+        registry
+            .add_work_unit_pr("wu-007", "https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+
+        let fetched = registry.get_work_unit("wu-007").await.unwrap().unwrap();
+        assert_eq!(fetched.pr_urls.len(), 2);
+        assert!(fetched
+            .pr_urls
+            .contains(&"https://github.com/org/repo/pull/1".to_string()));
+        assert!(fetched
+            .pr_urls
+            .contains(&"https://github.com/org/repo/pull/2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_add_repo() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-008", None, None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        registry
+            .add_work_unit_repo("wu-008", "platform/api")
+            .await
+            .unwrap();
+        // Dedup existing repo
+        registry
+            .add_work_unit_repo("wu-008", "open-source/atc")
+            .await
+            .unwrap();
+
+        let fetched = registry.get_work_unit("wu-008").await.unwrap().unwrap();
+        assert_eq!(fetched.repos.len(), 2);
+        assert!(fetched.repos.contains(&"open-source/atc".to_string()));
+        assert!(fetched.repos.contains(&"platform/api".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_list_dispatches() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-009", Some("tasks/harmony-370"), None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let mut record = sample_record("dispatch-1");
+        record.work_unit_id = Some("wu-009".to_string());
+        registry.insert(&record).await.unwrap();
+
+        let mut record2 = sample_record("dispatch-2");
+        record2.work_unit_id = Some("wu-009".to_string());
+        registry.insert(&record2).await.unwrap();
+
+        // Orphan dispatch (no work unit)
+        let record3 = sample_record("dispatch-3");
+        registry.insert(&record3).await.unwrap();
+
+        let dispatches = registry
+            .list_dispatches_for_work_unit("wu-009")
+            .await
+            .unwrap();
+        assert_eq!(dispatches.len(), 2);
+        assert_eq!(dispatches[0].id, "dispatch-1");
+        assert_eq!(dispatches[1].id, "dispatch-2");
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_list() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu1 = sample_work_unit("wu-010", Some("tasks/harmony-370"), None);
+        let wu2 = sample_work_unit("wu-011", None, Some("fix/bug"));
+        registry.insert_work_unit(&wu1).await.unwrap();
+        registry.insert_work_unit(&wu2).await.unwrap();
+
+        let all = registry.list_work_units().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }
