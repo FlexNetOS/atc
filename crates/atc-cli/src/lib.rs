@@ -197,9 +197,12 @@ mod args {
             /// Watch all running dispatches
             #[arg(long)]
             all_running: bool,
-            /// Output format: ndjson or human
+            /// Output format: json, pretty, human, or auto (default: auto → json)
             #[arg(long, default_value = "auto")]
             format: String,
+            /// Shorthand for --format pretty
+            #[arg(long)]
+            pretty: bool,
             /// Unix socket path for multi-consumer mode
             #[arg(long)]
             socket: Option<std::path::PathBuf>,
@@ -476,14 +479,16 @@ pub async fn run(
             id,
             all_running,
             format,
+            pretty,
             socket,
         } => {
+            let effective_format = if *pretty { "pretty" } else { format.as_str() };
             watch::run_watch(
                 config,
                 registry.clone() as Arc<dyn Registry>,
                 id.as_deref(),
                 *all_running,
-                format,
+                effective_format,
                 socket.clone(),
             )
             .await
