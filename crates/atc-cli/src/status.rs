@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{DispatchRecord, Status};
+use atc_core::types::{DispatchRecord, Status, WorkUnit};
 use std::sync::Arc;
 
 /// Format duration_ms as human-friendly "Nm NNs".
@@ -181,10 +181,118 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
     )
 }
 
+/// Format PR URLs as compact "repo#N" references.
+fn format_pr_url(url: &str) -> String {
+    url.strip_prefix("https://github.com/")
+        .and_then(|path| {
+            let parts: Vec<&str> = path.split('/').collect();
+            if parts.len() >= 4 && parts[2] == "pull" {
+                Some(format!("{}#{}", parts[1], parts[3]))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| url.to_string())
+}
+
+/// Build a work-unit-grouped status table.
+pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) -> String {
+    use comfy_table::{presets::NOTHING, Table};
+    use std::collections::HashMap;
+
+    // Group dispatches by work_unit_id
+    let mut by_wu: HashMap<&str, Vec<&DispatchRecord>> = HashMap::new();
+    let mut orphan_records: Vec<&DispatchRecord> = Vec::new();
+    for r in records {
+        if let Some(ref wu_id) = r.work_unit_id {
+            by_wu.entry(wu_id.as_str()).or_default().push(r);
+        } else {
+            orphan_records.push(r);
+        }
+    }
+
+    let mut table = Table::new();
+    table.load_preset(NOTHING);
+    table.set_header(vec![
+        "task",
+        "branch",
+        "PRs",
+        "dispatches",
+        "status",
+        "cost",
+    ]);
+
+    for wu in work_units {
+        let task = wu.task_slug.as_deref().unwrap_or("(none)");
+        let branch = wu.branch.as_deref().unwrap_or("-");
+        let prs = if wu.pr_urls.is_empty() {
+            "-".to_string()
+        } else {
+            wu.pr_urls
+                .iter()
+                .map(|u| format_pr_url(u))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let dispatches_for_wu = by_wu.get(wu.id.as_str());
+        let dispatch_count = dispatches_for_wu.map(|d| d.len()).unwrap_or(0);
+        let total_cost: f64 = dispatches_for_wu
+            .map(|ds| ds.iter().filter_map(|r| r.cost_usd).sum())
+            .unwrap_or(0.0);
+        let dispatch_label = format!(
+            "{} run{}",
+            dispatch_count,
+            if dispatch_count == 1 { "" } else { "s" }
+        );
+        let cost_str = if total_cost > 0.0 {
+            format!("${:.2}", total_cost)
+        } else {
+            "-".to_string()
+        };
+        table.add_row(vec![
+            task.to_string(),
+            branch.to_string(),
+            prs,
+            dispatch_label,
+            wu.status.as_str().to_string(),
+            cost_str,
+        ]);
+    }
+
+    // Show orphan dispatches (no work unit) as individual rows
+    for r in &orphan_records {
+        let task = r.task_slug.as_deref().unwrap_or("(none)");
+        let prs = if r.pr_urls.is_empty() {
+            "-".to_string()
+        } else {
+            r.pr_urls
+                .iter()
+                .map(|u| format_pr_url(u))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let cost_str = r
+            .cost_usd
+            .map(|c| format!("${:.2}", c))
+            .unwrap_or_else(|| "-".to_string());
+        table.add_row(vec![
+            task.to_string(),
+            r.branch.clone(),
+            prs,
+            "1 run".to_string(),
+            r.status.as_str().to_string(),
+            cost_str,
+        ]);
+    }
+
+    table.to_string()
+}
+
 pub async fn run_status(
     registry: Arc<dyn Registry>,
     status_filter: Option<String>,
     json: bool,
+    flat: bool,
 ) -> Result<()> {
     let filter = match &status_filter {
         Some(s) => {
@@ -207,10 +315,26 @@ pub async fn run_status(
         return Ok(());
     }
 
-    let width = terminal_width();
-    let table = build_table(&records, width);
-    println!("{table}");
-    println!("{}", build_summary(&records));
+    if flat {
+        let width = terminal_width();
+        let table = build_table(&records, width);
+        println!("{table}");
+        println!("{}", build_summary(&records));
+    } else {
+        // Default: work-unit-grouped view
+        let work_units = registry.list_work_units().await?;
+        if work_units.is_empty() {
+            // No work units yet — fall back to flat view
+            let width = terminal_width();
+            let table = build_table(&records, width);
+            println!("{table}");
+            println!("{}", build_summary(&records));
+        } else {
+            let table = build_grouped_table(&work_units, &records);
+            println!("{table}");
+            println!("{}", build_summary(&records));
+        }
+    }
 
     Ok(())
 }

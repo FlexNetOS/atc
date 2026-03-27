@@ -14,6 +14,7 @@ pub mod daemon;
 pub mod dispatch;
 pub mod enqueue;
 pub mod health;
+pub mod history;
 pub mod info;
 pub mod init;
 pub mod kb;
@@ -142,6 +143,23 @@ mod args {
             #[arg(long = "status")]
             status_filter: Option<String>,
             /// Output as JSON array
+            #[arg(long)]
+            json: bool,
+            /// Show flat per-dispatch table instead of work-unit-grouped view
+            #[arg(long)]
+            flat: bool,
+        },
+        /// Show dispatch history for a work unit (by task, PR, or branch)
+        History {
+            /// Task slug (e.g. tasks/harmony-370)
+            slug: Option<String>,
+            /// PR URL to resolve to a work unit
+            #[arg(long)]
+            pr: Option<String>,
+            /// Branch name to resolve to a work unit
+            #[arg(long)]
+            branch: Option<String>,
+            /// Output as JSON
             #[arg(long)]
             json: bool,
         },
@@ -445,14 +463,31 @@ pub async fn run(
         Commands::Retry { id } => {
             retry::run_retry(config, registry.as_ref(), executor.as_ref(), id).await
         }
+        Commands::History {
+            slug,
+            pr,
+            branch,
+            json,
+        } => {
+            history::run_history(
+                registry.clone() as Arc<dyn Registry>,
+                slug.as_deref(),
+                pr.as_deref(),
+                branch.as_deref(),
+                *json,
+            )
+            .await
+        }
         Commands::StatusCmd {
             status_filter,
             json,
+            flat,
         } => {
             status::run_status(
                 registry.clone() as Arc<dyn Registry>,
                 status_filter.clone(),
                 *json,
+                *flat,
             )
             .await
         }
