@@ -67,6 +67,8 @@ pub enum WatchEvent {
 struct DispatchWatcher {
     id: String,
     log_file: PathBuf,
+    /// PR URLs known at dispatch time (from registry record).
+    pr_urls: Vec<String>,
     lines_read: usize,
     last_len: u64,
     cost_threshold_fired: bool,
@@ -75,10 +77,11 @@ struct DispatchWatcher {
 }
 
 impl DispatchWatcher {
-    fn new(id: String, log_file: PathBuf) -> Self {
+    fn new(id: String, log_file: PathBuf, pr_urls: Vec<String>) -> Self {
         Self {
             id,
             log_file,
+            pr_urls,
             lines_read: 0,
             last_len: 0,
             cost_threshold_fired: false,
@@ -155,7 +158,7 @@ impl DispatchWatcher {
                                 id: self.id.clone(),
                                 status: "done".to_string(),
                                 cost_usd: r.total_cost_usd,
-                                pr_url: None, // Would need artifact extraction
+                                pr_url: self.pr_urls.first().cloned(),
                                 summary: None,
                             });
                         } else {
@@ -301,7 +304,11 @@ pub async fn run_watch(
         emit_event(&started, &output_format, &tx_clone);
         watchers.insert(
             record.id.clone(),
-            DispatchWatcher::new(record.id.clone(), record.log_file.clone()),
+            DispatchWatcher::new(
+                record.id.clone(),
+                record.log_file.clone(),
+                record.pr_urls.clone(),
+            ),
         );
     }
 
