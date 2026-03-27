@@ -32,6 +32,7 @@ static DISPATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 /// sub-millisecond time, guaranteeing uniqueness within a process and
 /// making cross-process collisions effectively impossible.
 pub fn build_dispatch_id(branch: &str, directive: &Directive) -> String {
+    let safe_branch = branch.replace('/', "--");
     let ts = Utc::now().timestamp_millis();
     let seq = DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -41,7 +42,7 @@ pub fn build_dispatch_id(branch: &str, directive: &Directive) -> String {
     let suffix = nanos ^ std::process::id() ^ seq;
     format!(
         "{}@{}@{}-{:04x}",
-        branch,
+        safe_branch,
         directive.as_str(),
         ts,
         suffix & 0xffff
