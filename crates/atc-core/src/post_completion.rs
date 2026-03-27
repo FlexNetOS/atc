@@ -122,6 +122,13 @@ pub async fn run_post_completion(
     }
     let pr_url = all_pr_urls.first().cloned();
 
+    // 8b. Propagate discovered PR URLs to work unit
+    if let Some(ref wu_id) = record.work_unit_id {
+        for url in &all_pr_urls {
+            registry.add_work_unit_pr(wu_id, url).await?;
+        }
+    }
+
     // 9. Store artifacts as JSON blob (always store — artifacts are additive metadata)
     let json = serde_json::to_string(&artifacts)?;
     registry.set_artifacts(&input.dispatch_id, &json).await?;
@@ -348,6 +355,11 @@ pub async fn cleanup_if_pr_done(pr_url: &str, worktree_path: &Path, worktree_bas
     if is_pr_done(pr_url).await {
         cleanup_worktree(worktree_path, worktree_base).await;
     }
+}
+
+/// Query PR state via `gh pr view` (public for health checker use).
+pub async fn get_pr_state_public(pr_url: &str) -> Option<String> {
+    get_pr_state(pr_url).await
 }
 
 /// Query PR state via `gh pr view`.

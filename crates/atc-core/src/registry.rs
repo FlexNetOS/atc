@@ -63,6 +63,82 @@ pub trait Registry: Send + Sync {
         anyhow::bail!("artifacts persistence is not implemented for this registry backend")
     }
 
+    // --- Work unit methods ---
+    async fn insert_work_unit(&self, _unit: &crate::types::WorkUnit) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn get_work_unit(&self, _id: &str) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn find_work_unit_by_task(
+        &self,
+        _task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn find_work_unit_by_branch(
+        &self,
+        _branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn find_work_unit_by_pr(&self, _pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn update_work_unit_status(
+        &self,
+        _id: &str,
+        _status: crate::types::WorkUnitStatus,
+    ) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    /// Atomically update work unit status only if no non-terminal dispatches exist.
+    /// Returns Ok(true) if status was updated, Ok(false) if a live dispatch blocked it.
+    async fn update_work_unit_status_if_idle(
+        &self,
+        _id: &str,
+        _status: crate::types::WorkUnitStatus,
+    ) -> Result<bool> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn add_work_unit_pr(&self, _id: &str, _pr_url: &str) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn add_work_unit_repo(&self, _id: &str, _repo_path: &str) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    /// Promote a work unit by setting its task_slug (e.g., when a branch-only unit
+    /// is later associated with a task).
+    async fn update_work_unit_task_slug(&self, _id: &str, _task_slug: &str) -> Result<()> {
+        anyhow::bail!("work units not implemented for this registry backend")
+    }
+    async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        Ok(Vec::new())
+    }
+    async fn list_active_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        Ok(Vec::new())
+    }
+    /// Find work unit by task slug across all statuses (for history lookups).
+    async fn find_work_unit_by_task_any_status(
+        &self,
+        _task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    /// Find work unit by branch across all statuses (for history lookups).
+    async fn find_work_unit_by_branch_any_status(
+        &self,
+        _branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    async fn list_dispatches_for_work_unit(
+        &self,
+        _work_unit_id: &str,
+    ) -> Result<Vec<DispatchRecord>> {
+        Ok(Vec::new())
+    }
+
     // --- New query methods ---
     async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>>;
     async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>>;
@@ -103,6 +179,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   num_turns                 INTEGER,
   duration_ms               INTEGER,
   artifacts                 TEXT,
+  work_unit_id              TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );
@@ -114,6 +191,31 @@ const CREATE_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
+];
+
+const CREATE_WORK_UNITS_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS work_units (
+    id          TEXT PRIMARY KEY,
+    task_slug   TEXT,
+    branch      TEXT,
+    repos       TEXT NOT NULL DEFAULT '[]',
+    pr_urls     TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'active',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+"#;
+
+const CREATE_WORK_UNITS_INDEXES_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_work_units_task ON work_units(task_slug);",
+    "CREATE INDEX IF NOT EXISTS idx_work_units_branch ON work_units(branch);",
+    "CREATE INDEX IF NOT EXISTS idx_work_units_status ON work_units(status);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_work_unit ON dispatches(work_unit_id);",
+    // Enforce at most one active work unit per (task_slug, branch) pair.
+    // This prevents TOCTOU races where two concurrent resolve_work_unit calls
+    // both observe "no active unit" and both insert.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_task ON work_units(task_slug) WHERE status = 'active' AND task_slug IS NOT NULL;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_branch ON work_units(branch) WHERE status = 'active' AND branch IS NOT NULL;",
 ];
 
 const CREATE_QUEUE_TABLE_SQL: &str = r#"
@@ -144,6 +246,13 @@ impl SqliteRegistry {
     async fn apply_ddl(pool: &sqlx::SqlitePool) -> Result<()> {
         sqlx::query(CREATE_TABLE_SQL).execute(pool).await?;
         for idx_sql in CREATE_INDEXES_SQL {
+            sqlx::query(idx_sql).execute(pool).await?;
+        }
+        // Work units table
+        sqlx::query(CREATE_WORK_UNITS_TABLE_SQL)
+            .execute(pool)
+            .await?;
+        for idx_sql in CREATE_WORK_UNITS_INDEXES_SQL {
             sqlx::query(idx_sql).execute(pool).await?;
         }
         // Queue table
@@ -272,6 +381,18 @@ impl SqliteRegistry {
                     .execute(pool)
                     .await?;
             }
+
+            // Add work_unit_id column if missing (work unit grouping migration)
+            let (has_work_unit_id,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'work_unit_id'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_work_unit_id == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN work_unit_id TEXT")
+                    .execute(pool)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -371,9 +492,43 @@ impl SqliteRegistry {
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("invalid duration_ms value in database"))?,
             artifacts: row.get("artifacts"),
+            work_unit_id: row.get("work_unit_id"),
             dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
+    }
+
+    fn row_to_work_unit(row: &sqlx::sqlite::SqliteRow) -> Result<crate::types::WorkUnit> {
+        use sqlx::Row;
+        let status_str: String = row.get("status");
+        let created_at_str: String = row.get("created_at");
+        let updated_at_str: String = row.get("updated_at");
+        Ok(crate::types::WorkUnit {
+            id: row.get("id"),
+            task_slug: row.get("task_slug"),
+            branch: row.get("branch"),
+            repos: {
+                let json_str: String = row.get("repos");
+                serde_json::from_str(&json_str).unwrap_or_default()
+            },
+            pr_urls: {
+                let json_str: String = row.get("pr_urls");
+                serde_json::from_str(&json_str).unwrap_or_default()
+            },
+            status: status_str.parse()?,
+            created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
+        })
+    }
+
+    /// Convert an optional row to an optional WorkUnit (reduces repetition in find_* methods).
+    fn optional_work_unit(
+        row: Option<&sqlx::sqlite::SqliteRow>,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        match row {
+            Some(r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -388,10 +543,10 @@ impl Registry for SqliteRegistry {
                 resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
                 check_agent_exited_clean, check_branch_pushed, check_pr_created,
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
-                cost_usd, num_turns, duration_ms, dispatched_at, updated_at
+                cost_usd, num_turns, duration_ms, work_unit_id, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
             )"#,
         )
         .bind(&record.id)
@@ -449,6 +604,7 @@ impl Registry for SqliteRegistry {
                 .transpose()
                 .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
         )
+        .bind(&record.work_unit_id)
         .bind(record.dispatched_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -770,6 +926,297 @@ impl Registry for SqliteRegistry {
         )
         .bind(path_str)
         .bind(Status::Running.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    // --- Work unit methods ---
+
+    async fn insert_work_unit(&self, unit: &crate::types::WorkUnit) -> Result<()> {
+        let repos_json = serde_json::to_string(&unit.repos)?;
+        let pr_urls_json = serde_json::to_string(&unit.pr_urls)?;
+        // Use OR IGNORE so that the unique partial indexes on active (task_slug, branch)
+        // silently reject duplicates instead of erroring. The caller (resolve_work_unit)
+        // will find the existing row on retry via the lookup path.
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO work_units (id, task_slug, branch, repos, pr_urls, status, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+        )
+        .bind(&unit.id)
+        .bind(&unit.task_slug)
+        .bind(&unit.branch)
+        .bind(&repos_json)
+        .bind(&pr_urls_json)
+        .bind(unit.status.as_str())
+        .bind(unit.created_at.to_rfc3339())
+        .bind(unit.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_work_unit(&self, id: &str) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query("SELECT * FROM work_units WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Self::optional_work_unit(row.as_ref())
+    }
+
+    async fn find_work_unit_by_task(
+        &self,
+        task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE task_slug = ?1 AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(task_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Self::optional_work_unit(row.as_ref())
+    }
+
+    async fn find_work_unit_by_branch(
+        &self,
+        branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE branch = ?1 AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(branch)
+        .fetch_optional(&self.pool)
+        .await?;
+        Self::optional_work_unit(row.as_ref())
+    }
+
+    async fn find_work_unit_by_pr(&self, pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT w.* FROM work_units w, json_each(w.pr_urls) je WHERE je.value = ?1 ORDER BY w.created_at DESC, w.id DESC LIMIT 1",
+        )
+        .bind(pr_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        Self::optional_work_unit(row.as_ref())
+    }
+
+    async fn update_work_unit_status(
+        &self,
+        id: &str,
+        status: crate::types::WorkUnitStatus,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE work_units SET status = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no work unit found for id: {id}"
+        );
+        Ok(())
+    }
+
+    async fn update_work_unit_status_if_idle(
+        &self,
+        id: &str,
+        status: crate::types::WorkUnitStatus,
+    ) -> Result<bool> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result: Result<bool> = async {
+            // Check for non-terminal dispatches under the write lock
+            let terminal_statuses = ["done", "failed", "stopped", "needs-human", "needs-review"];
+            let has_live: (i64,) =
+                sqlx::query_as(&format!(
+                "SELECT COUNT(*) FROM dispatches WHERE work_unit_id = ?1 AND status NOT IN ({})",
+                terminal_statuses.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
+            ))
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await?;
+            if has_live.0 > 0 {
+                return Ok(false);
+            }
+            let now = Utc::now().to_rfc3339();
+            let r = sqlx::query("UPDATE work_units SET status = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            anyhow::ensure!(r.rows_affected() > 0, "no work unit found for id: {id}");
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(updated) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(updated)
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
+    }
+
+    async fn add_work_unit_pr(&self, id: &str, pr_url: &str) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result: Result<()> = async {
+            let now = Utc::now().to_rfc3339();
+            let (current_json,): (String,) =
+                sqlx::query_as("SELECT pr_urls FROM work_units WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let mut urls: Vec<String> = serde_json::from_str(&current_json)?;
+            if !urls.iter().any(|existing| existing == pr_url) {
+                urls.push(pr_url.to_string());
+            }
+            sqlx::query("UPDATE work_units SET pr_urls = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(serde_json::to_string(&urls)?)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
+    }
+
+    async fn add_work_unit_repo(&self, id: &str, repo_path: &str) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result: Result<()> = async {
+            let now = Utc::now().to_rfc3339();
+            let (current_json,): (String,) =
+                sqlx::query_as("SELECT repos FROM work_units WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let mut repos: Vec<String> = serde_json::from_str(&current_json)?;
+            if !repos.iter().any(|existing| existing == repo_path) {
+                repos.push(repo_path.to_string());
+            }
+            sqlx::query("UPDATE work_units SET repos = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(serde_json::to_string(&repos)?)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+                Err(e)
+            }
+        }
+    }
+
+    async fn update_work_unit_task_slug(&self, id: &str, task_slug: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE work_units SET task_slug = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(task_slug)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await;
+        match result {
+            Ok(r) => {
+                anyhow::ensure!(r.rows_affected() > 0, "no work unit found for id: {id}");
+                Ok(())
+            }
+            Err(e) => {
+                // If the update hits the unique partial index (another dispatch
+                // already created an active work unit for this task_slug), that's
+                // fine — the winning row exists. Treat as success.
+                let msg = e.to_string();
+                if msg.contains("UNIQUE constraint failed") || msg.contains("unique") {
+                    tracing::debug!(
+                        work_unit = %id,
+                        task_slug = %task_slug,
+                        "task-slug promotion hit unique constraint — another active unit exists, treating as success"
+                    );
+                    Ok(())
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        let rows = sqlx::query("SELECT * FROM work_units ORDER BY updated_at DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(Self::row_to_work_unit).collect()
+    }
+
+    async fn list_active_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        let rows = sqlx::query(
+            "SELECT * FROM work_units WHERE status = 'active' ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_work_unit).collect()
+    }
+
+    async fn find_work_unit_by_task_any_status(
+        &self,
+        task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE task_slug = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(task_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Self::optional_work_unit(row.as_ref())
+    }
+
+    async fn find_work_unit_by_branch_any_status(
+        &self,
+        branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE branch = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(branch)
+        .fetch_optional(&self.pool)
+        .await?;
+        Self::optional_work_unit(row.as_ref())
+    }
+
+    async fn list_dispatches_for_work_unit(
+        &self,
+        work_unit_id: &str,
+    ) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE work_unit_id = ?1 ORDER BY dispatched_at ASC, id ASC",
+        )
+        .bind(work_unit_id)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(Self::row_to_record).collect()
@@ -1130,6 +1577,7 @@ mod tests {
             num_turns: None,
             duration_ms: None,
             artifacts: None,
+            work_unit_id: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -2316,5 +2764,226 @@ mod tests {
         // Should not appear in pending list
         let items = registry.queue_list("default").await.unwrap();
         assert!(items.is_empty());
+    }
+
+    // ---- Work Unit tests ----
+
+    use crate::types::{WorkUnit, WorkUnitStatus};
+
+    fn sample_work_unit(id: &str, task_slug: Option<&str>, branch: Option<&str>) -> WorkUnit {
+        WorkUnit {
+            id: id.to_string(),
+            task_slug: task_slug.map(|s| s.to_string()),
+            branch: branch.map(|s| s.to_string()),
+            repos: vec!["open-source/atc".to_string()],
+            pr_urls: vec![],
+            status: WorkUnitStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_insert_and_get() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit(
+            "wu-001",
+            Some("tasks/harmony-370"),
+            Some("tasks-harmony-370"),
+        );
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let fetched = registry.get_work_unit("wu-001").await.unwrap().unwrap();
+        assert_eq!(fetched.id, "wu-001");
+        assert_eq!(fetched.task_slug.as_deref(), Some("tasks/harmony-370"));
+        assert_eq!(fetched.branch.as_deref(), Some("tasks-harmony-370"));
+        assert_eq!(fetched.status, WorkUnitStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_find_by_task() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit(
+            "wu-002",
+            Some("tasks/harmony-370"),
+            Some("tasks-harmony-370"),
+        );
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let found = registry
+            .find_work_unit_by_task("tasks/harmony-370")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "wu-002");
+
+        // Non-existent task returns None
+        let not_found = registry
+            .find_work_unit_by_task("tasks/nonexistent")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_find_by_branch() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-003", None, Some("fix/rebase-msg"));
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let found = registry
+            .find_work_unit_by_branch("fix/rebase-msg")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "wu-003");
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_find_by_pr() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut wu = sample_work_unit("wu-004", Some("tasks/harmony-370"), None);
+        wu.pr_urls = vec!["https://github.com/org/repo/pull/42".to_string()];
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let found = registry
+            .find_work_unit_by_pr("https://github.com/org/repo/pull/42")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "wu-004");
+
+        // Non-existent PR returns None
+        let not_found = registry
+            .find_work_unit_by_pr("https://github.com/org/repo/pull/999")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_status_transition() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-005", Some("tasks/harmony-370"), None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        registry
+            .update_work_unit_status("wu-005", WorkUnitStatus::Merged)
+            .await
+            .unwrap();
+
+        let fetched = registry.get_work_unit("wu-005").await.unwrap().unwrap();
+        assert_eq!(fetched.status, WorkUnitStatus::Merged);
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_non_active_not_found_by_task() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-006", Some("tasks/harmony-370"), None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        // Transition to merged
+        registry
+            .update_work_unit_status("wu-006", WorkUnitStatus::Merged)
+            .await
+            .unwrap();
+
+        // find_work_unit_by_task only returns active work units
+        let not_found = registry
+            .find_work_unit_by_task("tasks/harmony-370")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_add_pr() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-007", None, None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        registry
+            .add_work_unit_pr("wu-007", "https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+        registry
+            .add_work_unit_pr("wu-007", "https://github.com/org/repo/pull/2")
+            .await
+            .unwrap();
+        // Dedup
+        registry
+            .add_work_unit_pr("wu-007", "https://github.com/org/repo/pull/1")
+            .await
+            .unwrap();
+
+        let fetched = registry.get_work_unit("wu-007").await.unwrap().unwrap();
+        assert_eq!(fetched.pr_urls.len(), 2);
+        assert!(fetched
+            .pr_urls
+            .contains(&"https://github.com/org/repo/pull/1".to_string()));
+        assert!(fetched
+            .pr_urls
+            .contains(&"https://github.com/org/repo/pull/2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_add_repo() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-008", None, None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        registry
+            .add_work_unit_repo("wu-008", "platform/api")
+            .await
+            .unwrap();
+        // Dedup existing repo
+        registry
+            .add_work_unit_repo("wu-008", "open-source/atc")
+            .await
+            .unwrap();
+
+        let fetched = registry.get_work_unit("wu-008").await.unwrap().unwrap();
+        assert_eq!(fetched.repos.len(), 2);
+        assert!(fetched.repos.contains(&"open-source/atc".to_string()));
+        assert!(fetched.repos.contains(&"platform/api".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_list_dispatches() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu = sample_work_unit("wu-009", Some("tasks/harmony-370"), None);
+        registry.insert_work_unit(&wu).await.unwrap();
+
+        let mut record = sample_record("dispatch-1");
+        record.work_unit_id = Some("wu-009".to_string());
+        registry.insert(&record).await.unwrap();
+
+        let mut record2 = sample_record("dispatch-2");
+        record2.work_unit_id = Some("wu-009".to_string());
+        registry.insert(&record2).await.unwrap();
+
+        // Orphan dispatch (no work unit)
+        let record3 = sample_record("dispatch-3");
+        registry.insert(&record3).await.unwrap();
+
+        let dispatches = registry
+            .list_dispatches_for_work_unit("wu-009")
+            .await
+            .unwrap();
+        assert_eq!(dispatches.len(), 2);
+        assert_eq!(dispatches[0].id, "dispatch-1");
+        assert_eq!(dispatches[1].id, "dispatch-2");
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_list() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu1 = sample_work_unit("wu-010", Some("tasks/harmony-370"), None);
+        let wu2 = sample_work_unit("wu-011", None, Some("fix/bug"));
+        registry.insert_work_unit(&wu1).await.unwrap();
+        registry.insert_work_unit(&wu2).await.unwrap();
+
+        let all = registry.list_work_units().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

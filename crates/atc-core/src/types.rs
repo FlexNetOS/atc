@@ -35,6 +35,8 @@ pub struct DispatchRecord {
     /// JSON blob stored by post-completion (always written, even when no result event
     /// is found). `Some` means post-completion already ran for this record.
     pub artifacts: Option<String>,
+    /// Work unit this dispatch belongs to (nullable for pre-work-unit dispatches).
+    pub work_unit_id: Option<String>,
     pub dispatched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -162,6 +164,65 @@ impl std::str::FromStr for Directive {
 }
 
 impl std::fmt::Display for Directive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A work unit groups all dispatches, PRs, and branches for a piece of work.
+/// It's the backing data for the desktop/web task lifecycle strip and session history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkUnit {
+    /// ULID
+    pub id: String,
+    /// KB task slug (nullable — not all work has a task)
+    pub task_slug: Option<String>,
+    /// Shared branch name across all repos
+    pub branch: Option<String>,
+    /// Repo paths involved (e.g., ["open-source/atc", "platform/api"])
+    pub repos: Vec<String>,
+    /// Accumulates PR URLs across dispatches and repos
+    pub pr_urls: Vec<String>,
+    /// active, merged, closed, abandoned
+    pub status: WorkUnitStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkUnitStatus {
+    Active,
+    Merged,
+    Closed,
+    Abandoned,
+}
+
+impl WorkUnitStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkUnitStatus::Active => "active",
+            WorkUnitStatus::Merged => "merged",
+            WorkUnitStatus::Closed => "closed",
+            WorkUnitStatus::Abandoned => "abandoned",
+        }
+    }
+}
+
+impl std::str::FromStr for WorkUnitStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(WorkUnitStatus::Active),
+            "merged" => Ok(WorkUnitStatus::Merged),
+            "closed" => Ok(WorkUnitStatus::Closed),
+            "abandoned" => Ok(WorkUnitStatus::Abandoned),
+            other => Err(anyhow::anyhow!("unknown work unit status: {}", other)),
+        }
+    }
+}
+
+impl std::fmt::Display for WorkUnitStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

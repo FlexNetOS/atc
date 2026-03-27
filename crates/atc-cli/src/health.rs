@@ -4,7 +4,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{Directive, DispatchRecord, RunOpts, Status};
+use atc_core::types::{Directive, DispatchRecord, RunOpts, Status, WorkUnitStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
@@ -273,6 +273,70 @@ pub async fn run_health(
         }
     }
 
+    // --- 7C2: Work unit merge detection ---
+    // Check active work units and transition to merged/closed when all PRs are done.
+    {
+        let active_units = registry.list_active_work_units().await?;
+        for wu in &active_units {
+            if wu.pr_urls.is_empty() {
+                continue;
+            }
+
+            // Check each PR's state individually to distinguish merged vs closed
+            let pr_states = futures::future::join_all(
+                wu.pr_urls
+                    .iter()
+                    .map(|u| post_completion::get_pr_state_public(u)),
+            )
+            .await;
+            // If any PR state lookup failed (None), log and skip — don't leave
+            // the unit stuck in active forever, but also don't wrongly transition.
+            if pr_states.iter().any(|s| s.is_none()) {
+                warn!(
+                    work_unit = %wu.id,
+                    pr_urls = ?wu.pr_urls,
+                    "PR state lookup returned None for one or more PRs — skipping work unit transition (transient failure?)"
+                );
+                continue;
+            }
+            // Single pass: check all terminal + track if any merged
+            let (all_terminal, any_merged) = pr_states.iter().fold((true, false), |(at, am), s| {
+                let is_terminal = matches!(s.as_deref(), Some("MERGED") | Some("CLOSED"));
+                let is_merged = matches!(s.as_deref(), Some("MERGED"));
+                (at && is_terminal, am || is_merged)
+            });
+            if !all_terminal {
+                continue;
+            }
+            let new_status = if any_merged {
+                WorkUnitStatus::Merged
+            } else {
+                WorkUnitStatus::Closed
+            };
+            match registry
+                .update_work_unit_status_if_idle(&wu.id, new_status)
+                .await
+            {
+                Ok(true) => {
+                    emit(
+                        json,
+                        &format!(
+                            "Work unit {} → {} (all PRs done)",
+                            wu.task_slug.as_deref().unwrap_or(&wu.id),
+                            new_status.as_str()
+                        ),
+                    );
+                }
+                Ok(false) => {
+                    // A non-terminal dispatch is still attached — skip transition
+                }
+                Err(e) => {
+                    warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to {}", new_status.as_str());
+                }
+            }
+        }
+    }
+
     // --- 7D: Auto-remediation ---
     if auto_enabled {
         let candidates = collect_auto_review_candidates(&results);
@@ -401,6 +465,7 @@ mod tests {
             num_turns: None,
             duration_ms: None,
             artifacts: None,
+            work_unit_id: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }

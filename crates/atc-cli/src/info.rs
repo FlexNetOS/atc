@@ -138,6 +138,7 @@ mod tests {
             num_turns: Some(47),
             duration_ms: Some(592_000),
             artifacts: None,
+            work_unit_id: None,
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41+00:00")
                 .unwrap()
                 .with_timezone(&Utc),
