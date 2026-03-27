@@ -649,6 +649,19 @@ mod tests {
     }
 
     #[test]
+    fn test_build_dispatch_id_sanitizes_slashes() {
+        let id = build_dispatch_id("fix/simplify-rebase-msg", &Directive::ReviewFix);
+        assert!(
+            !id.contains('/'),
+            "dispatch ID must not contain slashes (would create subdirs in log path), got: {id}"
+        );
+        assert!(
+            id.starts_with("fix--simplify-rebase-msg@review-fix@"),
+            "expected sanitized branch in ID, got: {id}"
+        );
+    }
+
+    #[test]
     fn test_compute_allowed_paths() {
         let result = compute_allowed_paths(Path::new("/tmp/wt"), &[]);
         assert!(result.contains("/tmp/wt"));
