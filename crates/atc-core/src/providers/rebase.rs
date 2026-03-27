@@ -126,14 +126,10 @@ impl ContextProvider for RebaseProvider {
             let rendered = partial_content.replace("{{default_branch}}", &default_branch);
             instruction.push_str(&rendered);
         } else {
-            // Fallback instruction
+            // Fallback instruction — keep it brief, agent knows how to rebase
             instruction.push_str(&format!(
-                "Before starting work, rebase onto `origin/{}` to avoid merge conflicts:\n\n\
-                 ```bash\n\
-                 git rebase origin/{}\n\
-                 ```\n\n\
-                 If there are conflicts, resolve them before proceeding.",
-                default_branch, default_branch
+                "Before starting work, fetch and rebase from latest `{}`.",
+                default_branch
             ));
         }
 
