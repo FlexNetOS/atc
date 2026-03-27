@@ -12,14 +12,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info, warn};
 
-/// Derive branch name from slug: replace `/` with `--`.
+/// Sanitize a string by replacing `/` with `--`. Used for:
+/// - Deriving branch names from slugs (`tasks/foo` → `tasks--foo`)
+/// - Sanitizing branch names for worktree names and dispatch IDs
 ///
-/// This is bijective for valid GitKB slugs, which conform to the ABNF
-/// `segment = 1*(ALPHA / DIGIT / "-" / "_")` — segments cannot contain `--`.
-/// If a slug ever contains `--` natively, this mapping would collide;
-/// slug validation (git-kb's ABNF enforcement) prevents that.
+/// Bijective for valid GitKB slugs (ABNF segments cannot contain `--`).
+pub fn sanitize_slashes(s: &str) -> String {
+    s.replace('/', "--")
+}
+
+/// Derive branch name from slug: replace `/` with `--`.
 pub fn derive_branch(slug: &str) -> String {
-    slug.replace('/', "--")
+    sanitize_slashes(slug)
 }
 
 /// Process-local counter to guarantee unique dispatch IDs even when two
@@ -32,6 +36,7 @@ static DISPATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 /// sub-millisecond time, guaranteeing uniqueness within a process and
 /// making cross-process collisions effectively impossible.
 pub fn build_dispatch_id(branch: &str, directive: &Directive) -> String {
+    let safe_branch = sanitize_slashes(branch);
     let ts = Utc::now().timestamp_millis();
     let seq = DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -41,7 +46,7 @@ pub fn build_dispatch_id(branch: &str, directive: &Directive) -> String {
     let suffix = nanos ^ std::process::id() ^ seq;
     format!(
         "{}@{}@{}-{:04x}",
-        branch,
+        safe_branch,
         directive.as_str(),
         ts,
         suffix & 0xffff
@@ -459,14 +464,13 @@ pub async fn ensure_worktree(
     let kb_root = opts.kb_root;
     let force = opts.force;
 
-    // Use branch name as the worktree directory name so each dispatch gets a
-    // unique path. Previously this used kb_basename, which caused every
-    // dispatch to collide on the same worktree name.
-    // For multi-repo, use the first (primary) repo for the path.
+    // Use sanitized branch name as the worktree directory name so each dispatch
+    // gets a unique path. Slashes replaced with -- to avoid nested directories.
     let primary_repo = repos.first().copied();
+    let sanitized_branch = sanitize_slashes(branch);
     let worktree_path = match primary_repo {
-        Some(r) => worktree_base.join(branch).join(r),
-        None => worktree_base.join(branch),
+        Some(r) => worktree_base.join(&sanitized_branch).join(r),
+        None => worktree_base.join(&sanitized_branch),
     };
 
     // Collision detection
@@ -532,9 +536,10 @@ pub async fn ensure_worktree(
         }
     }
 
-    // No existing worktree — create a new one
+    // No existing worktree — create a new one.
+    // Reuse sanitized_branch for the worktree name (git branch keeps original slashes).
     if !repos.is_empty() {
-        let mut args = vec!["git", "worktree", "create", branch];
+        let mut args = vec!["git", "worktree", "create", &sanitized_branch];
         for r in repos {
             args.push("--repo");
             args.push(r);
@@ -645,6 +650,19 @@ mod tests {
         let id1 = build_dispatch_id("tasks--foo", &Directive::Implement);
         let id2 = build_dispatch_id("tasks--foo", &Directive::Implement);
         assert_ne!(id1, id2, "consecutive dispatch IDs should differ");
+    }
+
+    #[test]
+    fn test_build_dispatch_id_sanitizes_slashes() {
+        let id = build_dispatch_id("fix/simplify-rebase-msg", &Directive::ReviewFix);
+        assert!(
+            !id.contains('/'),
+            "dispatch ID must not contain slashes (would create subdirs in log path), got: {id}"
+        );
+        assert!(
+            id.starts_with("fix--simplify-rebase-msg@review-fix@"),
+            "expected sanitized branch in ID, got: {id}"
+        );
     }
 
     #[test]
