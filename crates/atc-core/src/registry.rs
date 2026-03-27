@@ -511,6 +511,16 @@ impl SqliteRegistry {
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
     }
+
+    /// Convert an optional row to an optional WorkUnit (reduces repetition in find_* methods).
+    fn optional_work_unit(
+        row: Option<&sqlx::sqlite::SqliteRow>,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        match row {
+            Some(r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[async_trait]
@@ -942,10 +952,7 @@ impl Registry for SqliteRegistry {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        match row {
-            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
-            None => Ok(None),
-        }
+        Self::optional_work_unit(row.as_ref())
     }
 
     async fn find_work_unit_by_task(
@@ -958,10 +965,7 @@ impl Registry for SqliteRegistry {
         .bind(task_slug)
         .fetch_optional(&self.pool)
         .await?;
-        match row {
-            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
-            None => Ok(None),
-        }
+        Self::optional_work_unit(row.as_ref())
     }
 
     async fn find_work_unit_by_branch(
@@ -974,10 +978,7 @@ impl Registry for SqliteRegistry {
         .bind(branch)
         .fetch_optional(&self.pool)
         .await?;
-        match row {
-            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
-            None => Ok(None),
-        }
+        Self::optional_work_unit(row.as_ref())
     }
 
     async fn find_work_unit_by_pr(&self, pr_url: &str) -> Result<Option<crate::types::WorkUnit>> {
@@ -987,10 +988,7 @@ impl Registry for SqliteRegistry {
         .bind(pr_url)
         .fetch_optional(&self.pool)
         .await?;
-        match row {
-            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
-            None => Ok(None),
-        }
+        Self::optional_work_unit(row.as_ref())
     }
 
     async fn update_work_unit_status(
@@ -1125,10 +1123,7 @@ impl Registry for SqliteRegistry {
         .bind(task_slug)
         .fetch_optional(&self.pool)
         .await?;
-        match row {
-            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
-            None => Ok(None),
-        }
+        Self::optional_work_unit(row.as_ref())
     }
 
     async fn find_work_unit_by_branch_any_status(
@@ -1141,10 +1136,7 @@ impl Registry for SqliteRegistry {
         .bind(branch)
         .fetch_optional(&self.pool)
         .await?;
-        match row {
-            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
-            None => Ok(None),
-        }
+        Self::optional_work_unit(row.as_ref())
     }
 
     async fn list_dispatches_for_work_unit(

@@ -5,7 +5,9 @@ use atc_core::registry::Registry;
 use atc_core::types::{DispatchRecord, WorkUnit};
 use std::sync::Arc;
 
-use crate::status::{format_duration, format_pr_url};
+#[cfg(test)]
+use crate::status::format_pr_url;
+use crate::status::{format_duration, format_pr_list};
 
 /// Build the history table for a work unit's dispatches.
 pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> String {
@@ -23,8 +25,7 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
         out.push_str(&format!("  Repos:  {}\n", unit.repos.join(", ")));
     }
     if !unit.pr_urls.is_empty() {
-        let prs: Vec<String> = unit.pr_urls.iter().map(|u| format_pr_url(u)).collect();
-        out.push_str(&format!("  PRs:    {}\n", prs.join(", ")));
+        out.push_str(&format!("  PRs:    {}\n", format_pr_list(&unit.pr_urls)));
     }
     out.push_str(&format!("  Status: {}\n", unit.status.as_str()));
     out.push('\n');
@@ -55,15 +56,7 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
             .duration_ms
             .map(format_duration)
             .unwrap_or_else(|| "-".to_string());
-        let prs = if r.pr_urls.is_empty() {
-            "-".to_string()
-        } else {
-            r.pr_urls
-                .iter()
-                .map(|u| format_pr_url(u))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let prs = format_pr_list(&r.pr_urls);
 
         table.add_row(vec![dispatched, directive, status, cost, duration, prs]);
     }

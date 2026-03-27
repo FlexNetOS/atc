@@ -305,15 +305,15 @@ pub async fn run_health(
                 );
                 continue;
             }
-            let all_terminal = pr_states
-                .iter()
-                .all(|s| matches!(s.as_deref(), Some("MERGED") | Some("CLOSED")));
+            // Single pass: check all terminal + track if any merged
+            let (all_terminal, any_merged) = pr_states.iter().fold((true, false), |(at, am), s| {
+                let is_terminal = matches!(s.as_deref(), Some("MERGED") | Some("CLOSED"));
+                let is_merged = matches!(s.as_deref(), Some("MERGED"));
+                (at && is_terminal, am || is_merged)
+            });
             if !all_terminal {
                 continue;
             }
-            let any_merged = pr_states
-                .iter()
-                .any(|s| matches!(s.as_deref(), Some("MERGED")));
             let new_status = if any_merged {
                 WorkUnitStatus::Merged
             } else {

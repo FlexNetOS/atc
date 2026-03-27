@@ -64,16 +64,7 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
             task.to_string()
         };
         let directive_str = r.directive.as_str().to_string();
-        // Format PR URLs as compact "owner/repo#N" references
-        let pr_urls_display = if r.pr_urls.is_empty() {
-            "-".to_string()
-        } else {
-            r.pr_urls
-                .iter()
-                .map(|url| format_pr_url(url))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let pr_urls_display = format_pr_list(&r.pr_urls);
         let cost = r
             .cost_usd
             .map(|c| format!("${:.2}", c))
@@ -169,6 +160,18 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
     )
 }
 
+/// Format a list of PR URLs as a comma-separated compact string, or "-" if empty.
+pub fn format_pr_list(urls: &[String]) -> String {
+    if urls.is_empty() {
+        "-".to_string()
+    } else {
+        urls.iter()
+            .map(|u| format_pr_url(u))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Format PR URLs as compact "repo#N" references.
 pub fn format_pr_url(url: &str) -> String {
     url.strip_prefix("https://github.com/")
@@ -213,15 +216,7 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
     for wu in work_units {
         let task = wu.task_slug.as_deref().unwrap_or("(none)");
         let branch = wu.branch.as_deref().unwrap_or("-");
-        let prs = if wu.pr_urls.is_empty() {
-            "-".to_string()
-        } else {
-            wu.pr_urls
-                .iter()
-                .map(|u| format_pr_url(u))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let prs = format_pr_list(&wu.pr_urls);
         let dispatches_for_wu = by_wu.get(wu.id.as_str());
         let dispatch_count = dispatches_for_wu.map(|d| d.len()).unwrap_or(0);
         let dispatch_label = format!(
@@ -255,15 +250,7 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
     // Show orphan dispatches (no work unit) as individual rows
     for r in &orphan_records {
         let task = r.task_slug.as_deref().unwrap_or("(none)");
-        let prs = if r.pr_urls.is_empty() {
-            "-".to_string()
-        } else {
-            r.pr_urls
-                .iter()
-                .map(|u| format_pr_url(u))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let prs = format_pr_list(&r.pr_urls);
         let cost_str = r
             .cost_usd
             .map(|c| format!("${:.2}", c))
