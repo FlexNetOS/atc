@@ -5,21 +5,7 @@ use atc_core::registry::Registry;
 use atc_core::types::{DispatchRecord, WorkUnit};
 use std::sync::Arc;
 
-use crate::status::format_duration;
-
-/// Format PR URLs as compact "repo#N" references.
-fn format_pr_url(url: &str) -> String {
-    url.strip_prefix("https://github.com/")
-        .and_then(|path| {
-            let parts: Vec<&str> = path.split('/').collect();
-            if parts.len() >= 4 && parts[2] == "pull" {
-                Some(format!("{}#{}", parts[1], parts[3]))
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| url.to_string())
-}
+use crate::status::{format_duration, format_pr_url};
 
 /// Build the history table for a work unit's dispatches.
 pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> String {
@@ -102,13 +88,15 @@ pub async fn run_history(
     branch: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    // Resolve to a work unit
+    // Resolve to a work unit (search all statuses — history needs merged/closed units too)
     let unit = if let Some(slug) = slug {
-        registry.find_work_unit_by_task(slug).await?
+        registry.find_work_unit_by_task_any_status(slug).await?
     } else if let Some(pr_url) = pr {
         registry.find_work_unit_by_pr(pr_url).await?
     } else if let Some(branch_name) = branch {
-        registry.find_work_unit_by_branch(branch_name).await?
+        registry
+            .find_work_unit_by_branch_any_status(branch_name)
+            .await?
     } else {
         anyhow::bail!("provide a task slug, --pr URL, or --branch name");
     };

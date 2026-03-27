@@ -274,34 +274,45 @@ pub async fn run_health(
     }
 
     // --- 7C2: Work unit merge detection ---
-    // Check active work units and transition to merged when all PRs are done.
+    // Check active work units and transition to merged/closed when all PRs are done.
     {
-        let active_units = registry.list_work_units().await.unwrap_or_default();
+        let active_units = registry.list_active_work_units().await?;
         for wu in &active_units {
-            if wu.status != WorkUnitStatus::Active || wu.pr_urls.is_empty() {
+            if wu.pr_urls.is_empty() {
                 continue;
             }
-            let all_merged = futures::future::join_all(
-                wu.pr_urls.iter().map(|u| post_completion::is_pr_done(u)),
+            // Check each PR's state individually to distinguish merged vs closed
+            let pr_states = futures::future::join_all(
+                wu.pr_urls
+                    .iter()
+                    .map(|u| post_completion::get_pr_state_public(u)),
             )
-            .await
-            .into_iter()
-            .all(|done| done);
-            if all_merged {
-                if let Err(e) = registry
-                    .update_work_unit_status(&wu.id, WorkUnitStatus::Merged)
-                    .await
-                {
-                    warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to merged");
-                } else {
-                    emit(
-                        json,
-                        &format!(
-                            "Work unit {} → merged (all PRs done)",
-                            wu.task_slug.as_deref().unwrap_or(&wu.id)
-                        ),
-                    );
-                }
+            .await;
+            let all_terminal = pr_states
+                .iter()
+                .all(|s| matches!(s.as_deref(), Some("MERGED") | Some("CLOSED")));
+            if !all_terminal {
+                continue;
+            }
+            let any_merged = pr_states
+                .iter()
+                .any(|s| matches!(s.as_deref(), Some("MERGED")));
+            let new_status = if any_merged {
+                WorkUnitStatus::Merged
+            } else {
+                WorkUnitStatus::Closed
+            };
+            if let Err(e) = registry.update_work_unit_status(&wu.id, new_status).await {
+                warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to {}", new_status.as_str());
+            } else {
+                emit(
+                    json,
+                    &format!(
+                        "Work unit {} → {} (all PRs done)",
+                        wu.task_slug.as_deref().unwrap_or(&wu.id),
+                        new_status.as_str()
+                    ),
+                );
             }
         }
     }

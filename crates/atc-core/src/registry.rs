@@ -101,6 +101,23 @@ pub trait Registry: Send + Sync {
     async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
         Ok(Vec::new())
     }
+    async fn list_active_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        Ok(Vec::new())
+    }
+    /// Find work unit by task slug across all statuses (for history lookups).
+    async fn find_work_unit_by_task_any_status(
+        &self,
+        _task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
+    /// Find work unit by branch across all statuses (for history lookups).
+    async fn find_work_unit_by_branch_any_status(
+        &self,
+        _branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        Ok(None)
+    }
     async fn list_dispatches_for_work_unit(
         &self,
         _work_unit_id: &str,
@@ -1058,6 +1075,47 @@ impl Registry for SqliteRegistry {
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(Self::row_to_work_unit).collect()
+    }
+
+    async fn list_active_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
+        let rows = sqlx::query(
+            "SELECT * FROM work_units WHERE status = 'active' ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_work_unit).collect()
+    }
+
+    async fn find_work_unit_by_task_any_status(
+        &self,
+        task_slug: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE task_slug = ?1 ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(task_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_work_unit_by_branch_any_status(
+        &self,
+        branch: &str,
+    ) -> Result<Option<crate::types::WorkUnit>> {
+        let row = sqlx::query(
+            "SELECT * FROM work_units WHERE branch = ?1 ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(branch)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_work_unit(r)?)),
+            None => Ok(None),
+        }
     }
 
     async fn list_dispatches_for_work_unit(

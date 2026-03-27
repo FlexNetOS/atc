@@ -182,7 +182,7 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
 }
 
 /// Format PR URLs as compact "repo#N" references.
-fn format_pr_url(url: &str) -> String {
+pub fn format_pr_url(url: &str) -> String {
     url.strip_prefix("https://github.com/")
         .and_then(|path| {
             let parts: Vec<&str> = path.split('/').collect();
@@ -322,7 +322,14 @@ pub async fn run_status(
         println!("{}", build_summary(&records));
     } else {
         // Default: work-unit-grouped view
-        let work_units = registry.list_work_units().await?;
+        let mut work_units = registry.list_work_units().await?;
+        if status_filter.is_some() {
+            let visible_ids: std::collections::HashSet<&str> = records
+                .iter()
+                .filter_map(|r| r.work_unit_id.as_deref())
+                .collect();
+            work_units.retain(|wu| visible_ids.contains(wu.id.as_str()));
+        }
         if work_units.is_empty() {
             // No work units yet — fall back to flat view
             let width = terminal_width();
