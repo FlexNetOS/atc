@@ -77,16 +77,16 @@ EOF
     run atc run swot --param competitor=Acme --param name=Test --dry-run
     assert_success
     assert_output --partial "Worktree:    none"
-    assert_output --partial "none--swot"
+    assert_output --partial "tpl--none--swot"
 }
 
-@test "atc run swot --dry-run branch is stable (no synthetic tpl--)" {
+@test "atc run swot --dry-run branch is stable (no synthetic timestamp)" {
     setup_atc_dir
     cd "$TEST_TMPDIR"
     run atc run swot --param competitor=Acme --param name=Test --dry-run
     assert_success
-    # Branch should be none--swot, not tpl--swot-<timestamp>
-    assert_output --partial "Branch:      none--swot"
+    # Branch should be tpl--none--swot, not tpl--swot-<timestamp>
+    assert_output --partial "Branch:      tpl--none--swot"
 }
 
 # ---------------------------------------------------------------------------

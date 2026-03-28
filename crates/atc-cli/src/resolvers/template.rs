@@ -235,28 +235,22 @@ impl InputResolver for TemplateResolver {
         // |----------|-----------------------------------------------------------------|
         // | branch   | PR head → param → current branch → synthetic fallback           |
         // | document | Current branch (or stable slug-based); pipeline may override     |
-        // | none     | Stable `none--<template>` branch (for dispatch ID only)          |
+        // | none     | Stable `tpl--none--<template>` branch (for dispatch ID only)     |
         // | current  | Current git branch; never fall back to synthetic                 |
         let branch = match worktree_policy {
             WorktreePolicy::None => {
                 // Stable branch name for dispatch ID generation; no worktree created.
-                format!("none--{}", input)
+                // Uses tpl-- prefix to stay in the template namespace and avoid
+                // collisions with task-derived branches.
+                format!("tpl--none--{}", input)
             }
             WorktreePolicy::Current => {
                 // Use current git branch, never fall back to synthetic.
-                let current = get_current_branch().await;
-                match current {
-                    Some(b) => {
-                        info!(branch = %b, "using current git branch for current-policy dispatch");
-                        b
-                    }
-                    None => {
-                        // On main/master or detached HEAD — still use it as-is.
-                        get_current_branch_any()
-                            .await
-                            .unwrap_or_else(|| "main".to_string())
-                    }
-                }
+                let branch = get_current_branch_any().await.context(
+                    "worktree: current requires running inside a git checkout on a named branch",
+                )?;
+                info!(branch = %branch, "using current git branch for current-policy dispatch");
+                branch
             }
             WorktreePolicy::Document => {
                 // Use current branch if available (non-main); otherwise stable slug-based.
@@ -965,10 +959,10 @@ mod tests {
 
         assert_eq!(result.directive, Directive::Research);
         assert_eq!(result.worktree_policy, Some(WorktreePolicy::None));
-        assert_eq!(result.branch, "none--swot");
+        assert_eq!(result.branch, "tpl--none--swot");
         assert!(
-            !result.branch.starts_with("tpl--"),
-            "none policy should not produce synthetic branch, got: {}",
+            result.branch.starts_with("tpl--"),
+            "none policy should use tpl-- namespace prefix, got: {}",
             result.branch
         );
     }

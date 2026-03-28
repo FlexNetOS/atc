@@ -132,6 +132,13 @@ impl<'a> DispatchPipeline<'a> {
             );
         }
 
+        // Determine effective worktree policy early so dry_run can display it.
+        let worktree_policy = if opts.no_worktree {
+            WorktreePolicy::Current
+        } else {
+            resolved.worktree_policy.unwrap_or(WorktreePolicy::Branch)
+        };
+
         // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
         //    when dry_run is set), so we can return immediately.
         if opts.dry_run {
@@ -154,6 +161,7 @@ impl<'a> DispatchPipeline<'a> {
                 resolver.name(),
                 &provider_names,
                 opts.ephemeral,
+                worktree_policy,
             );
         }
 
@@ -230,14 +238,6 @@ impl<'a> DispatchPipeline<'a> {
         // Use resolver-discovered KB root when available (e.g. multi-KB discovery),
         // falling back to workspace_root for resolvers that don't set it.
         let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
-
-        // Determine effective worktree policy:
-        // --no-worktree CLI flag forces Current policy regardless of template.
-        let worktree_policy = if opts.no_worktree {
-            WorktreePolicy::Current
-        } else {
-            resolved.worktree_policy.unwrap_or(WorktreePolicy::Branch)
-        };
 
         let (worktree_path, wt_created, wt_is_meta, repos_for_context) = match worktree_policy {
             WorktreePolicy::Current => {
@@ -929,6 +929,7 @@ impl<'a> DispatchPipeline<'a> {
         resolver_name: &str,
         providers: &[&str],
         ephemeral: bool,
+        worktree_policy: WorktreePolicy,
     ) -> Result<DispatchOutcome> {
         if ephemeral {
             println!("=== DRY RUN (ephemeral) ===");
@@ -946,13 +947,7 @@ impl<'a> DispatchPipeline<'a> {
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
-        println!(
-            "Worktree:    {}",
-            resolved
-                .worktree_policy
-                .map(|p| p.as_str())
-                .unwrap_or("branch (default)")
-        );
+        println!("Worktree:    {}", worktree_policy.as_str());
         if ephemeral {
             println!("Providers:   (skipped — ephemeral)");
             println!("System:      (skipped — ephemeral)");
