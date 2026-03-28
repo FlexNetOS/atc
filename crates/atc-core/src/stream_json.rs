@@ -193,9 +193,9 @@ fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
     use regex::Regex;
     use std::sync::LazyLock;
 
-    // Match GitHub PR URLs precisely: owner/repo/pull/number with optional
-    // fragment (#issuecomment-123) or query params. Rejects URLs embedded in
-    // code literals like `"https://github.com/org/repo/pull/42".to_string()`.
+    // Match GitHub PR URLs: extracts the bare PR URL (owner/repo/pull/number)
+    // with an optional fragment (e.g. #issuecomment-123). Query parameters are
+    // not preserved. URLs inside Rust string literals are still extracted.
     static PR_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"https://github\.com/[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+/pull/[0-9]+(?:#[a-zA-Z0-9_-]+(?:-[0-9]+)*)?"

@@ -525,18 +525,26 @@ pub fn generate_triage(
                 entry.author
             ));
 
-            // Full comment body (trimmed, up to 2000 chars to avoid giant dumps)
+            // Full comment body (trimmed, up to 2000 chars to avoid giant dumps).
+            // Wrapped in a dynamic fence to contain any markdown/HTML in the body.
             let body = entry.body.trim();
-            if body.chars().count() > 2000 {
-                let truncated: String = body.chars().take(2000).collect();
-                md.push_str(&truncated);
-                md.push_str(
-                    "\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]\n\n",
+            let rendered_body = if body.chars().count() > 2000 {
+                let mut truncated: String = body.chars().take(2000).collect();
+                truncated.push_str(
+                    "\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]",
                 );
+                truncated
             } else {
-                md.push_str(body);
-                md.push_str("\n\n");
-            }
+                body.to_string()
+            };
+
+            let max_backticks = rendered_body
+                .split(|c| c != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            let fence = "`".repeat(max_backticks.max(3) + 1);
+            md.push_str(&format!("{fence}text\n{rendered_body}\n{fence}\n\n"));
 
             // Pre-built commands
             if !entry.comment_id.is_empty() && entry.comment_id != "unknown" {
@@ -669,15 +677,24 @@ fn count_thread_resolution(threads: &Value) -> (usize, usize) {
 
     match nodes {
         Some(arr) => {
-            let resolved = arr
-                .iter()
-                .filter(|t| {
-                    t.get("isResolved")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                })
-                .count();
-            (resolved, arr.len() - resolved)
+            let mut resolved = 0usize;
+            let mut unresolved = 0usize;
+            for t in arr {
+                let is_resolved = t
+                    .get("isResolved")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let is_outdated = t
+                    .get("isOutdated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_resolved || is_outdated {
+                    resolved += 1;
+                } else {
+                    unresolved += 1;
+                }
+            }
+            (resolved, unresolved)
         }
         None => (0, 0),
     }
@@ -1103,6 +1120,99 @@ mod tests {
             text.contains("c1") && text.contains("c2"),
             "expected c1, c2 in result, got: {}",
             text
+        );
+    }
+
+    #[test]
+    fn test_triage_body_fenced_contains_markdown() {
+        // Regression: comment bodies with markdown headings, fences, or HTML
+        // must be contained so they don't break the triage document structure.
+        let comments = Value::Array(vec![]);
+        let threads = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "T_fence",
+                                    "isResolved": false,
+                                    "isOutdated": false,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "id": "C_fence",
+                                                "databaseId": 300,
+                                                "author": { "login": "bot" },
+                                                "body": "## Heading\n\n```rust\nfn main() {}\n```\n\n<details><summary>More</summary>stuff</details>",
+                                                "path": "src/lib.rs",
+                                                "line": 1,
+                                                "createdAt": "2024-01-01T00:00:00Z"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let triage = generate_triage(&comments, &threads, "owner", "repo", 1);
+
+        // The body should be inside a fence block (````text)
+        assert!(
+            triage.contains("````text\n"),
+            "body should be wrapped in a fence longer than the inner ```"
+        );
+        // The inner ``` should appear inside the fence, not break the document
+        assert!(
+            triage.contains("```rust"),
+            "inner fence should be preserved inside the containing fence"
+        );
+    }
+
+    #[test]
+    fn test_summary_outdated_threads_count_as_resolved() {
+        // Regression: outdated threads should not inflate the unresolved count
+        // in summary.md, matching the triage.md filtering.
+        let metadata = serde_json::json!({
+            "title": "Test PR",
+            "state": "OPEN",
+            "additions": 10,
+            "deletions": 5
+        });
+        let reviews = Value::Array(vec![]);
+        let comments = Value::Array(vec![]);
+        let threads = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                { "id": "t1", "isResolved": false, "isOutdated": false },
+                                { "id": "t2", "isResolved": false, "isOutdated": true },
+                                { "id": "t3", "isResolved": true, "isOutdated": false }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let summary = generate_summary(&metadata, &reviews, &comments, &threads);
+
+        // t1 is the only truly unresolved thread; t2 is outdated, t3 is resolved
+        assert!(
+            summary.contains("Resolved threads: 2"),
+            "outdated + resolved should be 2, got: {}",
+            summary
+        );
+        assert!(
+            summary.contains("Unresolved threads: 1"),
+            "only non-outdated unresolved should count, got: {}",
+            summary
         );
     }
 }

@@ -938,7 +938,8 @@ fn render_pr_start_comment(
     } else {
         // Remove the entire {{#if task}}...{{/if}} block
         while let Some(start) = out.find("{{#if task}}") {
-            if let Some(end) = out.find("{{/if}}") {
+            if let Some(rel_end) = out[start..].find("{{/if}}") {
+                let end = start + rel_end;
                 out.replace_range(start..end + "{{/if}}".len(), "");
             } else {
                 break;
