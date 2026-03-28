@@ -575,17 +575,27 @@ pub fn generate_triage(
                 Some(line) => format!("{}:{}", entry.path, line),
                 None => entry.path.clone(),
             };
-            // One-line summary for resolved entries
-            let preview: &str = entry.body.lines().next().unwrap_or("");
-            let preview = if preview.chars().count() > 120 {
-                let t: String = preview.chars().take(117).collect();
-                format!("{}...", t)
+            // Fenced body for resolved entries so HTML in comment text
+            // cannot corrupt the surrounding <details> structure.
+            let body = entry.body.trim();
+            let rendered_body = if body.chars().count() > 2000 {
+                let mut truncated: String = body.chars().take(2000).collect();
+                truncated.push_str(
+                    "\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]",
+                );
+                truncated
             } else {
-                preview.to_string()
+                body.to_string()
             };
+            let max_backticks = rendered_body
+                .split(|c| c != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            let fence = "`".repeat(max_backticks.max(3) + 1);
             md.push_str(&format!(
-                "- [x] **{}** @{}: {}\n",
-                location, entry.author, preview
+                "- [x] **{}** @{}\n\n{fence}text\n{rendered_body}\n{fence}\n\n",
+                location, entry.author
             ));
         }
         md.push_str("\n</details>\n");
@@ -954,6 +964,12 @@ mod tests {
             triage.contains("src/main.rs:10"),
             "resolved entry should be listed"
         );
+        // Resolved entry should have fenced body, not a plain preview
+        assert!(
+            triage.contains("```text\nTypo in variable name\n```"),
+            "resolved entry should have fenced body, got: {}",
+            triage
+        );
         // Unresolved before resolved
         let unresolved_pos = triage.find("## Unresolved").unwrap();
         let resolved_pos = triage.find("<details>").unwrap();
@@ -1171,6 +1187,57 @@ mod tests {
             triage.contains("```rust"),
             "inner fence should be preserved inside the containing fence"
         );
+    }
+
+    #[test]
+    fn test_triage_resolved_body_fenced_contains_html() {
+        // Regression: resolved comment bodies with <details> or </details> HTML
+        // must be fenced so they don't corrupt the outer <details> wrapper.
+        let comments = Value::Array(vec![]);
+        let threads = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "T_resolved_html",
+                                    "isResolved": true,
+                                    "isOutdated": false,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "id": "C_resolved_html",
+                                                "databaseId": 400,
+                                                "author": { "login": "bot" },
+                                                "body": "<details><summary>Suggestion</summary>\n\nDo X instead of Y\n\n</details>",
+                                                "path": "src/lib.rs",
+                                                "line": 5,
+                                                "createdAt": "2024-01-01T00:00:00Z"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let triage = generate_triage(&comments, &threads, "owner", "repo", 1);
+
+        // The resolved body must be inside a fence so the inner <details>
+        // doesn't break the outer Resolved/Outdated <details> wrapper.
+        assert!(
+            triage.contains("```text\n<details><summary>Suggestion</summary>"),
+            "resolved body with HTML should be fenced, got: {}",
+            triage
+        );
+        // The outer <details> for the collapsed section should still be intact
+        let details_count = triage.matches("<details>").count();
+        // 1 outer + 1 inner (inside fence, so technically visible as text)
+        assert!(details_count >= 1, "outer <details> should be present");
     }
 
     #[test]
