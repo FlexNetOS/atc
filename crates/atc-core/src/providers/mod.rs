@@ -287,11 +287,23 @@ mod tests {
     }
 
     #[test]
-    fn test_all_deferred_template_vars_includes_prefetch() {
+    fn test_all_deferred_template_vars_includes_all_provider_vars() {
         let vars = all_deferred_template_vars();
+        // pr-context declares "prefetch"
         assert!(
             vars.contains(&"prefetch".to_string()),
             "expected 'prefetch' in deferred vars, got: {:?}",
+            vars
+        );
+        // rebase declares "default_branch" and "rebase_behind_count"
+        assert!(
+            vars.contains(&"default_branch".to_string()),
+            "expected 'default_branch' in deferred vars, got: {:?}",
+            vars
+        );
+        assert!(
+            vars.contains(&"rebase_behind_count".to_string()),
+            "expected 'rebase_behind_count' in deferred vars, got: {:?}",
             vars
         );
     }
@@ -309,8 +321,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rebase_declares_no_template_vars() {
+    fn test_rebase_declares_template_vars() {
         let provider = make_provider("rebase").unwrap();
-        assert!(provider.declared_template_vars().is_empty());
+        let vars = provider.declared_template_vars();
+        assert!(vars.contains(&"default_branch"));
+        assert!(vars.contains(&"rebase_behind_count"));
     }
 }

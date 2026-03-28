@@ -464,6 +464,9 @@ impl<'a> DispatchPipeline<'a> {
         }
 
         // 7c. Post-process: {{worktree}} auto-population and meta context injection
+        //
+        // Note: {{default_branch}} is handled by the rebase provider's template_vars,
+        // substituted in step 7b above via the deferred placeholder mechanism.
         {
             let wt_path_str = worktree_path.to_string_lossy();
             let deferred_wt = atc_core::prompt_engine::deferred_placeholder("worktree");
