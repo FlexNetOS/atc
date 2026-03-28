@@ -36,28 +36,7 @@ fn is_ref_safe(s: &str) -> bool {
         })
 }
 
-/// Get the current git branch, returning None if on main/master or detached HEAD.
-async fn get_current_branch() -> Option<String> {
-    tokio::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .output()
-        .await
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !b.is_empty() && b != "main" && b != "master" {
-                    Some(b)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-}
-
-/// Get the current git branch including main/master. Returns None only for detached HEAD.
+/// Get the current git branch. Returns None only for detached HEAD.
 async fn get_current_branch_any() -> Option<String> {
     tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
@@ -76,6 +55,13 @@ async fn get_current_branch_any() -> Option<String> {
                 None
             }
         })
+}
+
+/// Get the current git branch, returning None if on main/master or detached HEAD.
+async fn get_current_branch() -> Option<String> {
+    get_current_branch_any()
+        .await
+        .filter(|b| b != "main" && b != "master")
 }
 
 /// Resolver for template-based dispatches.

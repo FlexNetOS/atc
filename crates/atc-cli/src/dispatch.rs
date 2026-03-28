@@ -498,7 +498,7 @@ pub fn find_worktree_for_branch(
     let sanitized = branch.replace('/', "--");
 
     // 1. Check configured worktree_base (default: /tmp/worktrees/)
-    for name in [&sanitized, &branch.to_string()] {
+    for name in [sanitized.as_str(), branch] {
         let path = worktree_base.join(name);
         if path.exists() {
             return Some(path);
@@ -506,7 +506,7 @@ pub fn find_worktree_for_branch(
     }
 
     // 2. Check local .worktrees/ directory
-    for name in [&sanitized, &branch.to_string()] {
+    for name in [sanitized.as_str(), branch] {
         let path = workspace_root.join(".worktrees").join(name);
         if path.exists() {
             return Some(path);

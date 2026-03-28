@@ -681,20 +681,12 @@ impl<'a> DispatchPipeline<'a> {
                 env.insert("GITKB_WORKSPACE".to_string(), "main".to_string());
             }
             WorktreePolicy::Current => {
-                // Use current branch name as workspace
-                if let Ok(output) = tokio::process::Command::new("git")
-                    .args(["branch", "--show-current"])
-                    .output()
-                    .await
-                {
-                    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !branch.is_empty() {
-                        env.insert(
-                            "GITKB_WORKSPACE".to_string(),
-                            crate::dispatch::sanitize_slashes(&branch),
-                        );
-                    }
-                }
+                // Reuse the branch already resolved by the template resolver
+                // instead of spawning another git subprocess.
+                env.insert(
+                    "GITKB_WORKSPACE".to_string(),
+                    crate::dispatch::sanitize_slashes(&resolved.branch),
+                );
             }
             _ => {
                 // Branch policy: GITKB_WORKSPACE is set by the task resolver or
