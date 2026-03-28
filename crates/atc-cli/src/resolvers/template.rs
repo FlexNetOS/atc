@@ -1022,8 +1022,21 @@ mod tests {
         // Serialize CWD changes to avoid races with other tests.
         let _guard = CWD_LOCK.lock().await;
         let _cwd = RestoreCwd(std::env::current_dir().unwrap());
+        // Clear GIT_DIR/GIT_WORK_TREE so the subprocess discovers the temp repo
+        // via CWD rather than inheriting the hook's repo context.
+        let saved_git_dir = std::env::var("GIT_DIR").ok();
+        let saved_git_work_tree = std::env::var("GIT_WORK_TREE").ok();
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
         std::env::set_current_dir(repo_dir.path()).unwrap();
         let result = resolver.resolve("branch-review", &opts, &config).await;
+        // Restore git env vars
+        if let Some(v) = saved_git_dir {
+            std::env::set_var("GIT_DIR", v);
+        }
+        if let Some(v) = saved_git_work_tree {
+            std::env::set_var("GIT_WORK_TREE", v);
+        }
         let result = result.unwrap();
 
         assert_eq!(result.directive, Directive::ReviewFix);
