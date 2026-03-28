@@ -439,8 +439,14 @@ pub struct DocumentWorkspace {
 
 /// Resolve where a document lives and where the agent should work.
 ///
-/// Phase 1: Find which KB workspace contains the slug.
-/// Phase 2: If non-main, find the corresponding code worktree.
+/// Phase 1: Collect all KB workspaces that contain the slug.
+///
+/// Phase 2: Select the best match using priority rules:
+///   1. Current branch (if the slug is checked out there)
+///   2. Non-main branch (if exactly one; ambiguity is an error)
+///   3. Main workspace (fallback)
+///
+/// Phase 3: If non-main, find the corresponding code worktree.
 ///
 /// Returns `None` if the document isn't checked out in any workspace.
 pub fn resolve_document_workspace(
@@ -451,36 +457,100 @@ pub fn resolve_document_workspace(
 ) -> Option<DocumentWorkspace> {
     let workspaces_dir = kb_root.join(".kb/workspaces");
 
-    // Phase 1: Find which KB workspace contains this slug
-    // Check main first (most common case)
+    // Phase 1: Collect all workspaces that contain this slug.
+    let mut matches: Vec<String> = Vec::new();
+
     let main_path = workspaces_dir.join("main").join(format!("{}.md", slug));
     if main_path.exists() {
-        return Some(DocumentWorkspace {
+        matches.push("main".to_string());
+    }
+
+    if let Ok(entries) = std::fs::read_dir(&workspaces_dir) {
+        for entry in entries.flatten() {
+            let branch_name = entry.file_name().to_string_lossy().into_owned();
+            if branch_name == "main" {
+                continue;
+            }
+            let doc_path = entry.path().join(format!("{}.md", slug));
+            if doc_path.exists() {
+                matches.push(branch_name);
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return None;
+    }
+
+    // Phase 2: Select best match.
+    // Prefer the current git branch if it's among the matches.
+    let current_branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
+
+    let selected = if let Some(ref current) = current_branch {
+        let sanitized_current = current.replace('/', "--");
+        if matches
+            .iter()
+            .any(|m| m == current || m == &sanitized_current)
+        {
+            // Current branch takes priority.
+            sanitized_current
+        } else {
+            select_from_matches(&matches, slug)?
+        }
+    } else {
+        select_from_matches(&matches, slug)?
+    };
+
+    // Phase 3: Resolve code worktree for non-main branches.
+    if selected == "main" {
+        Some(DocumentWorkspace {
             cwd: workspace_root.to_path_buf(),
             workspace_branch: "main".to_string(),
-        });
+        })
+    } else {
+        let cwd = find_worktree_for_branch(&selected, worktree_base, workspace_root)
+            .unwrap_or_else(|| workspace_root.to_path_buf());
+        Some(DocumentWorkspace {
+            cwd,
+            workspace_branch: selected,
+        })
     }
+}
 
-    // Scan other workspaces (worktree branches)
-    let entries = std::fs::read_dir(&workspaces_dir).ok()?;
-    for entry in entries.flatten() {
-        let branch_name = entry.file_name().to_string_lossy().into_owned();
-        if branch_name == "main" {
-            continue;
+/// Pick a single workspace from the match set, logging ambiguity.
+fn select_from_matches(matches: &[String], slug: &str) -> Option<String> {
+    let non_main: Vec<&String> = matches.iter().filter(|m| m.as_str() != "main").collect();
+    match non_main.len() {
+        0 => {
+            // Only main matched.
+            Some("main".to_string())
         }
-        let doc_path = entry.path().join(format!("{}.md", slug));
-        if doc_path.exists() {
-            // Phase 2: Find the code worktree for this branch
-            let cwd = find_worktree_for_branch(&branch_name, worktree_base, workspace_root)
-                .unwrap_or_else(|| workspace_root.to_path_buf());
-            return Some(DocumentWorkspace {
-                cwd,
-                workspace_branch: branch_name,
-            });
+        1 => Some(non_main[0].clone()),
+        _ => {
+            // Ambiguous: slug is in multiple non-main workspaces and the current
+            // branch didn't resolve the tie. Warn and pick the first alphabetically
+            // for determinism rather than silently using filesystem order.
+            let mut sorted: Vec<&String> = non_main;
+            sorted.sort();
+            warn!(
+                slug,
+                workspaces = ?sorted,
+                "document found in multiple workspaces; selecting first alphabetically"
+            );
+            Some(sorted[0].clone())
         }
     }
-
-    None
 }
 
 /// Find a code worktree corresponding to a KB workspace branch.
@@ -520,12 +590,20 @@ pub fn find_worktree_for_branch(
 /// Auto-checkout a document to the main KB workspace.
 pub async fn auto_checkout_to_main(slug: &str, kb_root: &Path) -> Result<()> {
     info!(slug, kb_root = %kb_root.display(), "auto-checking out document to main workspace");
-    let output = tokio::process::Command::new("git-kb")
+    let child = tokio::process::Command::new("git-kb")
         .args(["checkout", slug])
         .env("GITKB_ROOT", kb_root)
         .env("GITKB_WORKSPACE", "main")
-        .output()
-        .await?;
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let output = tokio::time::timeout(SUBPROCESS_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("git-kb checkout timed out after {:?}", SUBPROCESS_TIMEOUT)
+        })??;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

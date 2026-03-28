@@ -291,9 +291,10 @@ impl<'a> DispatchPipeline<'a> {
                         }
                     }
                     None => {
-                        // No slug found in params — fall back to CWD
-                        warn!("worktree: document but no slug found in params, using CWD");
-                        (cwd.clone(), false, false, Vec::new())
+                        anyhow::bail!(
+                            "worktree: document requires a task or slug parameter to resolve \
+                             the document workspace (set --param task=<slug> or use a task dispatch)"
+                        );
                     }
                 }
             }
@@ -675,7 +676,8 @@ impl<'a> DispatchPipeline<'a> {
             kb_root.to_string_lossy().into_owned(),
         );
 
-        // GITKB_WORKSPACE per policy (document policy sets it above in the routing match).
+        // GITKB_WORKSPACE per policy — re-assert after all env merging so that
+        // provider env cannot override the policy-derived workspace identity.
         match worktree_policy {
             WorktreePolicy::None => {
                 env.insert("GITKB_WORKSPACE".to_string(), "main".to_string());
@@ -688,10 +690,20 @@ impl<'a> DispatchPipeline<'a> {
                     crate::dispatch::sanitize_slashes(&resolved.branch),
                 );
             }
-            _ => {
+            WorktreePolicy::Document => {
+                // Re-assert the workspace that was resolved in step 5 routing.
+                // Provider env (merged in step 7b) could have overwritten it.
+                if let Some(ws) = resolved.env_overrides.get("GITKB_WORKSPACE") {
+                    env.insert("GITKB_WORKSPACE".to_string(), ws.clone());
+                }
+            }
+            WorktreePolicy::Branch => {
                 // Branch policy: GITKB_WORKSPACE is set by the task resolver or
-                // derived from the worktree branch name.
-                // Document policy: already set in the routing match above.
+                // derived from the worktree branch name. Re-assert from resolved
+                // env_overrides if present.
+                if let Some(ws) = resolved.env_overrides.get("GITKB_WORKSPACE") {
+                    env.insert("GITKB_WORKSPACE".to_string(), ws.clone());
+                }
             }
         }
 

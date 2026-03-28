@@ -219,8 +219,14 @@ impl InputResolver for TemplateResolver {
             Directive::Implement
         };
 
-        // Resolve worktree policy from frontmatter (default: Branch for backward compat)
-        let worktree_policy = output.worktree_policy.unwrap_or(WorktreePolicy::Branch);
+        // Resolve worktree policy from frontmatter (default: Branch for backward compat).
+        // When --no-worktree is set, override to Current so branch selection matches
+        // the runtime semantics the pipeline will enforce.
+        let worktree_policy = if opts.no_worktree {
+            WorktreePolicy::Current
+        } else {
+            output.worktree_policy.unwrap_or(WorktreePolicy::Branch)
+        };
 
         info!(
             template = input,
