@@ -36,10 +36,13 @@ fn is_ref_safe(s: &str) -> bool {
         })
 }
 
-/// Get the current git branch. Returns None only for detached HEAD.
+/// Get the current git branch from the current CWD.
+/// Returns None when detached, outside a git repo, or if the command fails.
 async fn get_current_branch_any() -> Option<String> {
     tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .output()
         .await
         .ok()
@@ -939,7 +942,7 @@ mod tests {
         );
     }
 
-    /// Test `worktree: none` suppresses synthetic branch (uses stable `none--<name>`).
+    /// Test `worktree: none` suppresses synthetic branch (uses stable `tpl--none--<name>`).
     #[tokio::test]
     async fn test_resolve_worktree_none_stable_branch() {
         let dir = tempfile::tempdir().unwrap();
@@ -979,6 +982,25 @@ mod tests {
         }
     }
 
+    /// RAII guard that restores GIT_DIR/GIT_WORK_TREE on drop (including panics).
+    struct RestoreGitEnv {
+        git_dir: Option<String>,
+        git_work_tree: Option<String>,
+    }
+    impl Drop for RestoreGitEnv {
+        #[allow(deprecated)] // set_var/remove_var deprecation in nightly
+        fn drop(&mut self) {
+            match &self.git_dir {
+                Some(v) => std::env::set_var("GIT_DIR", v),
+                None => std::env::remove_var("GIT_DIR"),
+            }
+            match &self.git_work_tree {
+                Some(v) => std::env::set_var("GIT_WORK_TREE", v),
+                None => std::env::remove_var("GIT_WORK_TREE"),
+            }
+        }
+    }
+
     /// Test `worktree: current` uses current git branch (doesn't create synthetic).
     ///
     /// This test creates a temporary git repo with a named branch so it is
@@ -1002,8 +1024,11 @@ mod tests {
 
         // Clear GIT_DIR/GIT_WORK_TREE so git subprocesses (both setup and
         // resolve) discover the temp repo via CWD, not the hook's context.
-        let saved_git_dir = std::env::var("GIT_DIR").ok();
-        let saved_git_work_tree = std::env::var("GIT_WORK_TREE").ok();
+        // Use RAII guard so env is restored even on panic.
+        let _git_env = RestoreGitEnv {
+            git_dir: std::env::var("GIT_DIR").ok(),
+            git_work_tree: std::env::var("GIT_WORK_TREE").ok(),
+        };
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_WORK_TREE");
 
@@ -1031,15 +1056,10 @@ mod tests {
         let resolver = TemplateResolver;
 
         std::env::set_current_dir(repo_dir.path()).unwrap();
-        let result = resolver.resolve("branch-review", &opts, &config).await;
-        // Restore git env vars
-        if let Some(v) = saved_git_dir {
-            std::env::set_var("GIT_DIR", v);
-        }
-        if let Some(v) = saved_git_work_tree {
-            std::env::set_var("GIT_WORK_TREE", v);
-        }
-        let result = result.unwrap();
+        let result = resolver
+            .resolve("branch-review", &opts, &config)
+            .await
+            .unwrap();
 
         assert_eq!(result.directive, Directive::ReviewFix);
         assert_eq!(result.worktree_policy, Some(WorktreePolicy::Current));
@@ -1108,22 +1128,47 @@ mod tests {
         )
         .unwrap();
 
+        // Serialize CWD + env changes to avoid races with other tests.
+        let _guard = CWD_LOCK.lock().await;
+        let _cwd = RestoreCwd(std::env::current_dir().unwrap());
+        let _git_env = RestoreGitEnv {
+            git_dir: std::env::var("GIT_DIR").ok(),
+            git_work_tree: std::env::var("GIT_WORK_TREE").ok(),
+        };
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+
+        // Set up a temp git repo so current-policy branch resolution works.
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "test-branch"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+
         let mut params = std::collections::HashMap::new();
         params.insert("task".to_string(), "tasks/harmony-350".to_string());
         let mut opts = test_opts("close", params);
         opts.no_worktree = true;
         let resolver = TemplateResolver;
-        let result = resolver.resolve("close", &opts, &config).await;
-        // Current policy requires being in a git repo; the test may fail on
-        // resolve if not in one, but the worktree_policy override should apply
-        // regardless. If it succeeds, verify policy is Current.
-        if let Ok(result) = result {
-            assert_eq!(
-                result.worktree_policy,
-                Some(WorktreePolicy::Current),
-                "--no-worktree should override frontmatter worktree policy to Current"
-            );
-        }
+        let result = resolver.resolve("close", &opts, &config).await.unwrap();
+        assert_eq!(
+            result.worktree_policy,
+            Some(WorktreePolicy::Current),
+            "--no-worktree should override frontmatter worktree policy to Current"
+        );
     }
 
     /// Test `worktree: branch` preserves current behavior (explicit in frontmatter).

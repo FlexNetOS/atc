@@ -457,13 +457,38 @@ pub async fn resolve_document_workspace(
     worktree_base: &Path,
     workspace_root: &Path,
 ) -> Result<Option<DocumentWorkspace>> {
+    // Validate slug before any path join to prevent traversal/injection.
+    let slug_path = Path::new(slug);
+    if slug.is_empty()
+        || slug_path.is_absolute()
+        || slug.contains('\\')
+        || slug.contains('\0')
+        || slug_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        anyhow::bail!("invalid document slug for workspace resolution: {}", slug);
+    }
+
     let workspaces_dir = kb_root.join(".kb/workspaces");
 
     // Phase 1: Collect all workspaces that contain this slug.
     let mut matches: Vec<String> = Vec::new();
 
     let main_path = workspaces_dir.join("main").join(format!("{}.md", slug));
-    if main_path.exists() {
+    if main_path.try_exists().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to stat KB workspace document {}: {}",
+            main_path.display(),
+            e
+        )
+    })? {
         matches.push("main".to_string());
     }
 
@@ -484,7 +509,14 @@ pub async fn resolve_document_workspace(
         }
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read KB workspace entry under {}: {}",
+                workspaces_dir.display(),
+                e
+            )
+        })?;
         let branch_name = entry.file_name().to_string_lossy().into_owned();
         if branch_name == "main" {
             continue;
@@ -499,7 +531,13 @@ pub async fn resolve_document_workspace(
             continue;
         }
         let doc_path = entry.path().join(format!("{}.md", slug));
-        if doc_path.exists() {
+        if doc_path.try_exists().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to stat KB workspace document {}: {}",
+                doc_path.display(),
+                e
+            )
+        })? {
             matches.push(branch_name);
         }
     }
@@ -510,20 +548,25 @@ pub async fn resolve_document_workspace(
 
     // Phase 2: Select best match.
     // Prefer the current git branch if it's among the matches.
-    let current_branch = tokio::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(workspace_root)
-        .output()
-        .await
-        .ok()
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
-        });
+    let current_branch = tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(workspace_root)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|o| {
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    });
 
     let selected = if let Some(ref current) = current_branch {
         let sanitized_current = current.replace('/', "--");
