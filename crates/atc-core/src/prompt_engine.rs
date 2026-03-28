@@ -60,18 +60,17 @@ pub async fn assemble_system_prompt(
 
     // Expand partials in the assembled prompt
     let hbs = build_registry(config, worktree_path).await?;
-    let mut rendered = hbs
-        .render_template(
-            &assembled,
-            &serde_json::json!({
-                "slug": slug,
-                "directive": directive_text,
-                "default_branch": deferred_placeholder("default_branch"),
-            }),
-        )
-        .with_context(|| {
-            format!("failed to expand partials in assembled prompt for directive '{directive_key}'")
-        })?;
+    let mut data = serde_json::json!({
+        "slug": slug,
+        "directive": directive_text,
+    });
+    // Inject all deferred placeholders dynamically, consistent with the template resolver path
+    for var in crate::providers::all_deferred_template_vars() {
+        data[&var] = serde_json::Value::String(deferred_placeholder(&var));
+    }
+    let mut rendered = hbs.render_template(&assembled, &data).with_context(|| {
+        format!("failed to expand partials in assembled prompt for directive '{directive_key}'")
+    })?;
 
     // Append the directive only if not already present — either inlined via
     // {{directive}} in a component or expanded through a partial.

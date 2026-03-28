@@ -47,6 +47,10 @@ impl ContextProvider for RebaseProvider {
         output
             .template_vars
             .insert("default_branch".to_string(), default_branch.clone());
+        // Default to "0"; overwritten with the real count on the happy path.
+        output
+            .template_vars
+            .insert("rebase_behind_count".to_string(), "0".to_string());
 
         // 1. Fetch latest from origin (quiet, time-bounded)
         let fetch_result = tokio::time::timeout(
@@ -69,16 +73,10 @@ impl ContextProvider for RebaseProvider {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
                 warn!(error = %e, "rebase: git fetch failed");
-                output
-                    .template_vars
-                    .insert("rebase_behind_count".to_string(), "0".to_string());
                 return Ok(output);
             }
             Err(_) => {
                 warn!("rebase: git fetch timed out");
-                output
-                    .template_vars
-                    .insert("rebase_behind_count".to_string(), "0".to_string());
                 return Ok(output);
             }
         };
@@ -87,9 +85,6 @@ impl ContextProvider for RebaseProvider {
                 stderr = %String::from_utf8_lossy(&fetch_output.stderr),
                 "rebase: git fetch failed"
             );
-            output
-                .template_vars
-                .insert("rebase_behind_count".to_string(), "0".to_string());
             return Ok(output);
         }
 
@@ -113,25 +108,16 @@ impl ContextProvider for RebaseProvider {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
                 warn!(error = %e, "rebase: git rev-list failed");
-                output
-                    .template_vars
-                    .insert("rebase_behind_count".to_string(), "0".to_string());
                 return Ok(output);
             }
             Err(_) => {
                 warn!("rebase: git rev-list timed out");
-                output
-                    .template_vars
-                    .insert("rebase_behind_count".to_string(), "0".to_string());
                 return Ok(output);
             }
         };
 
         if !count_output.status.success() {
             warn!("rebase: git rev-list --count failed");
-            output
-                .template_vars
-                .insert("rebase_behind_count".to_string(), "0".to_string());
             return Ok(output);
         }
 
@@ -166,7 +152,7 @@ impl ContextProvider for RebaseProvider {
 }
 
 /// Resolve the default branch by probing git, falling back to "main".
-pub async fn resolve_default_branch(worktree: &Path) -> String {
+async fn resolve_default_branch(worktree: &Path) -> String {
     // Try `git symbolic-ref refs/remotes/origin/HEAD` to detect the default branch
     if let Ok(Ok(output)) = tokio::time::timeout(
         GIT_TIMEOUT,
