@@ -63,7 +63,11 @@ pub async fn assemble_system_prompt(
     let mut rendered = hbs
         .render_template(
             &assembled,
-            &serde_json::json!({ "slug": slug, "directive": directive_text }),
+            &serde_json::json!({
+                "slug": slug,
+                "directive": directive_text,
+                "default_branch": deferred_placeholder("default_branch"),
+            }),
         )
         .with_context(|| {
             format!("failed to expand partials in assembled prompt for directive '{directive_key}'")

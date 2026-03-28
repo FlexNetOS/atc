@@ -309,8 +309,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rebase_declares_no_template_vars() {
+    fn test_rebase_declares_template_vars() {
         let provider = make_provider("rebase").unwrap();
-        assert!(provider.declared_template_vars().is_empty());
+        let vars = provider.declared_template_vars();
+        assert!(vars.contains(&"default_branch"));
+        assert!(vars.contains(&"rebase_behind_count"));
     }
 }
