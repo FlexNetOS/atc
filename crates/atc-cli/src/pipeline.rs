@@ -169,7 +169,8 @@ impl<'a> DispatchPipeline<'a> {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
 
-            // Security invariants: clear CLAUDECODE to prevent recursive agent-spawning,
+            // Security invariants (mirrors step 8 in the normal path):
+            // clear CLAUDECODE to prevent recursive agent-spawning,
             // and set AGENT_ALLOWED_PATHS anchored to CWD.
             let mut env = resolved.env_overrides.clone();
             env.remove("CLAUDECODE");

@@ -88,6 +88,28 @@ impl ClaudeExecutor {
         Ok(())
     }
 
+    /// Wait for a child process with an optional timeout.
+    /// On timeout, kills the child and returns exit code 124 (matching `timeout(1)`).
+    async fn wait_with_timeout(
+        child: &mut tokio::process::Child,
+        timeout: Option<u32>,
+        slug: &str,
+    ) -> Result<std::process::ExitStatus> {
+        if let Some(secs) = timeout {
+            match tokio::time::timeout(Duration::from_secs(secs as u64), child.wait()).await {
+                Ok(result) => result.map_err(Into::into),
+                Err(_) => {
+                    warn!(slug = %slug, timeout_secs = secs, "inline spawn timed out, killing child");
+                    let _ = child.kill().await;
+                    // Return a synthetic "timed out" exit status — caller checks inline_exit_code
+                    Err(anyhow::anyhow!("__timeout__"))
+                }
+            }
+        } else {
+            child.wait().await.map_err(Into::into)
+        }
+    }
+
     /// CI mode: run claude synchronously, capture exit code.
     #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
     async fn spawn_inline(&self, opts: &AgentOpts) -> Result<AgentHandle> {
@@ -239,24 +261,11 @@ impl ClaudeExecutor {
                 tracing::warn!(slug = %opts.slug, error = %e, "log stream task failed");
             }
         }
-        let status = if let Some(secs) = opts.timeout {
-            match tokio::time::timeout(Duration::from_secs(secs as u64), child.wait()).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    warn!(slug = %opts.slug, timeout_secs = secs, "inline spawn timed out, killing child");
-                    let _ = child.kill().await;
-                    return Ok(AgentHandle {
-                        session: opts.session_name.clone(),
-                        inline_exit_code: Some(124),
-                    });
-                }
-            }
-        } else {
-            child.wait().await?
+        let exit_code = match Self::wait_with_timeout(&mut child, opts.timeout, &opts.slug).await {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(e) if e.to_string() == "__timeout__" => 124,
+            Err(e) => return Err(e),
         };
-
-        // 9. Extract exit code
-        let exit_code = status.code().unwrap_or(-1);
         info!(slug = %opts.slug, exit_code, "inline spawn completed");
 
         // Temp files cleaned up on drop
@@ -322,24 +331,12 @@ impl ClaudeExecutor {
         info!(slug = %opts.slug, "spawning claude (ephemeral inline)");
         let mut child = cmd.spawn()?;
 
-        // Wait with optional timeout
-        let status = if let Some(secs) = opts.timeout {
-            match tokio::time::timeout(Duration::from_secs(secs as u64), child.wait()).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    warn!(slug = %opts.slug, timeout_secs = secs, "ephemeral spawn timed out, killing child");
-                    let _ = child.kill().await;
-                    return Ok(AgentHandle {
-                        session: opts.session_name.clone(),
-                        inline_exit_code: Some(124),
-                    });
-                }
-            }
-        } else {
-            child.wait().await?
+        // Wait with optional timeout (shared helper)
+        let exit_code = match Self::wait_with_timeout(&mut child, opts.timeout, &opts.slug).await {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(e) if e.to_string() == "__timeout__" => 124,
+            Err(e) => return Err(e),
         };
-
-        let exit_code = status.code().unwrap_or(-1);
         info!(slug = %opts.slug, exit_code, "ephemeral inline spawn completed");
 
         Ok(AgentHandle {

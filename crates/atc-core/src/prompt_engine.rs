@@ -1698,4 +1698,25 @@ Working on PR: {{pr}}
         let tfm = parse_template_frontmatter(raw).unwrap();
         assert_eq!(tfm.max_turns, None);
     }
+
+    #[test]
+    fn test_max_turns_zero_rejected() {
+        let raw = "---\nmax_turns: 0\n---\nBody.";
+        let err = split_frontmatter(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "expected rejection of max_turns: 0, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_max_turns_overflow_rejected() {
+        // u32::MAX + 1 = 4294967296
+        let raw = "---\nmax_turns: 4294967296\n---\nBody.";
+        let err = split_frontmatter(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds u32::MAX"),
+            "expected rejection of overflow, got: {err}"
+        );
+    }
 }
