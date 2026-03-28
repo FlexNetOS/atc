@@ -539,10 +539,18 @@ impl<'a> DispatchPipeline<'a> {
             resolved.system_prompt.clone()
         };
         if !providers.is_empty() {
-            // Pass the policy-derived KB workspace so providers use the correct
-            // workspace identity (e.g. "main" for document-on-main, not the
-            // synthetic dispatch branch).
-            let kb_workspace = resolved.env_overrides.get("GITKB_WORKSPACE").cloned();
+            // Compute the KB workspace for providers. Document policy sets it in
+            // env_overrides during step 5; for None/Current we must derive it here
+            // since the final env block (step 8) hasn't run yet.
+            let kb_workspace = match worktree_policy {
+                WorktreePolicy::Document | WorktreePolicy::Branch => {
+                    resolved.env_overrides.get("GITKB_WORKSPACE").cloned()
+                }
+                WorktreePolicy::None => Some("main".to_string()),
+                WorktreePolicy::Current => {
+                    Some(crate::dispatch::sanitize_slashes(&resolved.branch))
+                }
+            };
             let dispatch_ctx = atc_core::providers::DispatchContext {
                 dispatch_id: resolved.dispatch_id.clone(),
                 task_slug: resolved.task_slug.clone(),
