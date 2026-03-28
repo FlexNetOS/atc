@@ -21,7 +21,7 @@ Evaluate every changed file across these dimensions:
 
 ## Workflow
 
-1. **List all changes**: `git diff main...HEAD --stat` to see scope
+1. **List all changes**: `git diff {{default_branch}}...HEAD --stat` to see scope
 2. **Review each file**: Read the diff, evaluate against every dimension above
 3. **Fix issues as you find them** — don't just list problems, fix them
 4. **Add unit tests** for logic gaps
