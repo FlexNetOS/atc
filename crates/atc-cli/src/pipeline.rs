@@ -263,6 +263,7 @@ impl<'a> DispatchPipeline<'a> {
                         let slug_path = std::path::Path::new(slug);
                         if slug_path.is_absolute()
                             || slug.contains('\\')
+                            || slug.contains('\0')
                             || slug_path.components().any(|c| {
                                 matches!(
                                     c,
@@ -286,9 +287,9 @@ impl<'a> DispatchPipeline<'a> {
                             &worktree_base,
                             &workspace_root,
                         )
-                        .await?
+                        .await
                         {
-                            Some(doc_ws) => {
+                            Ok(Some(doc_ws)) => {
                                 // Set GITKB_WORKSPACE for the document's branch
                                 resolved.env_overrides.insert(
                                     "GITKB_WORKSPACE".to_string(),
@@ -302,7 +303,7 @@ impl<'a> DispatchPipeline<'a> {
                                 );
                                 (doc_ws.cwd, false, false, Vec::new())
                             }
-                            None => {
+                            Ok(None) => {
                                 // Auto-checkout to main, use workspace_root
                                 if let Err(e) = auto_checkout_to_main(slug, kb_root).await {
                                     warn!(slug, error = %e, "auto-checkout failed (non-fatal)");
@@ -311,6 +312,12 @@ impl<'a> DispatchPipeline<'a> {
                                     .env_overrides
                                     .insert("GITKB_WORKSPACE".to_string(), "main".to_string());
                                 (workspace_root.clone(), false, false, Vec::new())
+                            }
+                            Err(e) => {
+                                let tmp_record =
+                                    self.make_tmp_record(&resolved, opts, resolver.name());
+                                resolver.on_cleanup(&tmp_record, self.config, None).await;
+                                return Err(e);
                             }
                         }
                     }
