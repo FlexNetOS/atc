@@ -296,9 +296,16 @@ impl TaskResolver {
     fn primary_kb_root(config: &AtcConfig) -> PathBuf {
         // 1. GITKB_ROOT env var (explicit override, matches dispatch.sh behavior)
         if let Ok(root) = std::env::var("GITKB_ROOT") {
-            let root = root.trim().to_string();
+            let root = root.trim();
             if !root.is_empty() {
-                return PathBuf::from(root);
+                let path = PathBuf::from(root);
+                if path.is_dir() {
+                    return path;
+                }
+                tracing::warn!(
+                    gitkb_root = %path.display(),
+                    "GITKB_ROOT does not exist, falling back to config"
+                );
             }
         }
         // 2. Config: dispatch.meta_workspace_root
