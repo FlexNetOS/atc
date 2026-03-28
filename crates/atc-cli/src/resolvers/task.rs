@@ -294,6 +294,22 @@ impl TaskResolver {
     /// Compute the primary KB root from config, falling back to cwd.
     /// Shared by `resolve()` and `on_cleanup()` so both use the same fallback.
     fn primary_kb_root(config: &AtcConfig) -> PathBuf {
+        // 1. GITKB_ROOT env var (explicit override, matches dispatch.sh behavior)
+        if let Ok(root) = std::env::var("GITKB_ROOT") {
+            let root = root.trim();
+            if !root.is_empty() {
+                let path = PathBuf::from(root);
+                if path.is_dir() {
+                    return path;
+                }
+                tracing::warn!(
+                    gitkb_root = %path.display(),
+                    "GITKB_ROOT does not exist, falling back to config"
+                );
+            }
+        }
+        // 2. Config: dispatch.meta_workspace_root
+        // 3. CWD fallback
         config
             .dispatch
             .resolved_meta_workspace_root(config.config_dir.as_deref())
