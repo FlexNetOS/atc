@@ -1095,3 +1095,46 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_pr_start_comment_with_task() {
+        let out = render_pr_start_comment(
+            "review-fix",
+            Some("tasks/my-task"),
+            "feat/branch",
+            "/tmp/wt/branch",
+            "sess-123",
+        );
+        assert!(out.contains("review-fix"), "should contain directive");
+        assert!(out.contains("tasks/my-task"), "should contain task");
+        assert!(out.contains("feat/branch"), "should contain branch");
+        assert!(out.contains("sess-123"), "should contain session");
+        assert!(
+            out.contains("atc watch --id sess-123"),
+            "should have watch cmd"
+        );
+        // No leftover template syntax
+        assert!(!out.contains("{{"), "no template tags remaining: {}", out);
+    }
+
+    #[test]
+    fn test_render_pr_start_comment_without_task() {
+        let out = render_pr_start_comment(
+            "pr-comments",
+            None,
+            "feat/branch",
+            "/tmp/wt/branch",
+            "sess-456",
+        );
+        assert!(out.contains("pr-comments"), "should contain directive");
+        assert!(!out.contains("Task:"), "task line should be removed");
+        // No triple blank lines
+        assert!(!out.contains("\n\n\n"), "no triple blank lines");
+        // No leftover template syntax
+        assert!(!out.contains("{{"), "no template tags remaining: {}", out);
+    }
+}
