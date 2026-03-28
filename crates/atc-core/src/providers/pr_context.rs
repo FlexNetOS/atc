@@ -75,7 +75,7 @@ impl ContextProvider for PrContextProvider {
         });
 
         // Generate triage.md
-        let triage = generate_triage(&comments, &threads);
+        let triage = generate_triage(&comments, &threads, &owner, &repo, pr_number);
 
         // Generate summary.md
         let mut summary = generate_summary(&metadata, &reviews, &comments, &threads);
@@ -369,7 +369,17 @@ struct TriageEntry {
 }
 
 /// Generate triage.md from comments and threads.
-pub fn generate_triage(comments: &Value, threads: &Value) -> String {
+///
+/// Produces a self-contained markdown document with full comment text and
+/// pre-built `gh api` commands for reply and thread resolution. Agents should
+/// need ONLY this file — no JSON parsing required.
+pub fn generate_triage(
+    comments: &Value,
+    threads: &Value,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> String {
     let mut entries = Vec::new();
 
     // Parse GraphQL threads
@@ -483,49 +493,88 @@ pub fn generate_triage(comments: &Value, threads: &Value) -> String {
             .then_with(|| a.line.cmp(&b.line))
     });
 
-    // Render markdown checklist
+    // Render self-contained triage document
     let mut md = String::from("# PR Comment Triage\n\n");
     if entries.is_empty() {
         md.push_str("No review comments found.\n");
         return md;
     }
 
-    for entry in &entries {
-        let checkbox = if entry.is_resolved { "[x]" } else { "[ ]" };
-        let status = if entry.is_resolved {
-            "resolved"
-        } else {
-            "unresolved"
-        };
-        let location = match entry.line {
-            Some(line) => format!("**{}:{}**", entry.path, line),
-            None => format!("**{}**", entry.path),
-        };
+    let unresolved: Vec<&TriageEntry> = entries.iter().filter(|e| !e.is_resolved).collect();
+    let resolved: Vec<&TriageEntry> = entries.iter().filter(|e| e.is_resolved).collect();
 
-        // Truncate body to first line for checklist
-        let body_preview: &str = entry.body.lines().next().unwrap_or("");
-        let body_truncated = if body_preview.chars().count() > 120 {
-            let truncated: String = body_preview.chars().take(117).collect();
-            format!("{}...", truncated)
-        } else {
-            body_preview.to_string()
-        };
+    // Unresolved section — full detail, agents work through these
+    if !unresolved.is_empty() {
+        md.push_str(&format!("## Unresolved ({})\n\n", unresolved.len()));
+        for (i, entry) in unresolved.iter().enumerate() {
+            let location = match entry.line {
+                Some(line) => format!("{}:{}", entry.path, line),
+                None => entry.path.clone(),
+            };
 
-        md.push_str(&format!(
-            "- {} {} ({}) @{}: \"{}\"\n",
-            checkbox, location, status, entry.author, body_truncated
-        ));
-        if !entry.thread_id.is_empty() || !entry.comment_id.is_empty() {
             md.push_str(&format!(
-                "  Thread ID: {} | Comment ID: {}\n",
-                if entry.thread_id.is_empty() {
-                    "N/A"
-                } else {
-                    &entry.thread_id
-                },
-                entry.comment_id
+                "### {}. {} — @{}\n\n",
+                i + 1,
+                location,
+                entry.author
+            ));
+
+            // Full comment body (trimmed, up to 2000 chars to avoid giant dumps)
+            let body = entry.body.trim();
+            if body.len() > 2000 {
+                let truncated: String = body.chars().take(2000).collect();
+                md.push_str(&truncated);
+                md.push_str(
+                    "\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]\n\n",
+                );
+            } else {
+                md.push_str(body);
+                md.push_str("\n\n");
+            }
+
+            // Pre-built commands
+            if !entry.comment_id.is_empty() && entry.comment_id != "unknown" {
+                md.push_str("```bash\n");
+                md.push_str(&format!(
+                    "# Reply:\ngh api repos/{}/{}/pulls/{}/comments/{}/replies -f body=\"Fixed in <commit>\"\n",
+                    owner, repo, pr_number, entry.comment_id
+                ));
+                if !entry.thread_id.is_empty() && entry.thread_id != "unknown" {
+                    md.push_str(&format!(
+                        "# Resolve thread:\ngh api graphql -f query='mutation {{ resolveReviewThread(input: {{threadId: \"{}\"}}) {{ thread {{ isResolved }} }} }}'\n",
+                        entry.thread_id
+                    ));
+                }
+                md.push_str("```\n\n");
+            }
+        }
+    }
+
+    // Resolved section — collapsed, for reference only
+    if !resolved.is_empty() {
+        md.push_str(&format!(
+            "<details>\n<summary>Resolved ({}) — skip unless verifying a previous fix</summary>\n\n",
+            resolved.len()
+        ));
+        for entry in &resolved {
+            let location = match entry.line {
+                Some(line) => format!("{}:{}", entry.path, line),
+                None => entry.path.clone(),
+            };
+            // One-line summary for resolved entries
+            let preview: &str = entry.body.lines().next().unwrap_or("");
+            let preview = if preview.chars().count() > 120 {
+                let t: String = preview.chars().take(117).collect();
+                format!("{}...", t)
+            } else {
+                preview.to_string()
+            };
+            md.push_str(&format!(
+                "- [x] **{}** @{}: {}\n",
+                location, entry.author, preview
             ));
         }
+        md.push_str("\n</details>\n");
     }
 
     md
@@ -841,16 +890,47 @@ mod tests {
             }
         });
 
-        let triage = generate_triage(&comments, &threads);
+        let triage = generate_triage(&comments, &threads, "test-owner", "test-repo", 42);
 
-        // Unresolved should come first
-        assert!(triage.contains("- [ ] **src/auth.rs:42** (unresolved)"));
-        assert!(triage.contains("- [x] **src/main.rs:10** (resolved)"));
-        // Unresolved first in output
-        let unresolved_pos = triage
-            .find("- [ ] **src/auth.rs:42** (unresolved)")
-            .unwrap();
-        let resolved_pos = triage.find("- [x] **src/main.rs:10** (resolved)").unwrap();
+        // Unresolved section with full body
+        assert!(
+            triage.contains("## Unresolved (1)"),
+            "should have unresolved section"
+        );
+        assert!(
+            triage.contains("### 1. src/auth.rs:42 — @reviewer1"),
+            "should have entry header"
+        );
+        assert!(
+            triage.contains("This needs error handling"),
+            "should have full comment body"
+        );
+        // Pre-built commands
+        assert!(
+            triage.contains("gh api repos/test-owner/test-repo/pulls/42/comments/100/replies"),
+            "should have reply command"
+        );
+        assert!(
+            triage.contains("resolveReviewThread"),
+            "should have resolve command"
+        );
+        assert!(
+            triage.contains("T_001"),
+            "should have thread ID in resolve command"
+        );
+        // Resolved section collapsed
+        assert!(
+            triage.contains("<details>"),
+            "resolved should be in details tag"
+        );
+        assert!(triage.contains("Resolved (1)"), "should count resolved");
+        assert!(
+            triage.contains("src/main.rs:10"),
+            "resolved entry should be listed"
+        );
+        // Unresolved before resolved
+        let unresolved_pos = triage.find("## Unresolved").unwrap();
+        let resolved_pos = triage.find("<details>").unwrap();
         assert!(unresolved_pos < resolved_pos);
     }
 
@@ -858,7 +938,7 @@ mod tests {
     fn test_generate_triage_empty() {
         let comments = Value::Array(vec![]);
         let threads = Value::Null;
-        let triage = generate_triage(&comments, &threads);
+        let triage = generate_triage(&comments, &threads, "test-owner", "test-repo", 42);
         assert!(triage.contains("No review comments found."));
     }
 
@@ -874,9 +954,13 @@ mod tests {
             }
         ]);
         let threads = Value::Null;
-        let triage = generate_triage(&comments, &threads);
-        assert!(triage.contains("**src/lib.rs:5**"));
-        assert!(triage.contains("@alice"));
+        let triage = generate_triage(&comments, &threads, "test-owner", "test-repo", 42);
+        assert!(triage.contains("src/lib.rs:5"), "should have file:line");
+        assert!(triage.contains("@alice"), "should have author");
+        assert!(
+            triage.contains("Consider using a constant here"),
+            "should have full body"
+        );
     }
 
     #[test]

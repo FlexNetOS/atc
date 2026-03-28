@@ -1,18 +1,11 @@
 ### Loading Comments
 
-Read `.dispatch-prefetch/triage.md` — this is your **pre-triaged comment checklist**, already sorted by priority with resolution status, severity, and pre-built `gh api` commands.
+All data is in `.dispatch-prefetch/` — **do NOT call `gh api` to re-fetch**.
 
-If `triage.md` doesn't exist, fall back to raw JSON:
-- `.dispatch-prefetch/comments.json` — all review comments
-- `.dispatch-prefetch/reviews.json` — review summaries with verdicts
-
-If `.dispatch-prefetch/` doesn't exist at all, fetch directly:
-```bash
-PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's|^https://github.com/([^/]+/[^/]+)/pull/.*$|\1|')
-PR_NUMBER=$(printf '%s\n' "$PR_URL" | sed -E 's|^https://github.com/[^/]+/[^/]+/pull/([0-9]+).*$|\1|')
-gh api repos/$PR_REPO/pulls/$PR_NUMBER/comments
-gh api repos/$PR_REPO/pulls/$PR_NUMBER/reviews
-```
+1. `.dispatch-prefetch/triage.md` — **pre-triaged comment checklist**, sorted by priority with resolution status, severity, and pre-built `gh api` reply/resolve commands
+2. `.dispatch-prefetch/comments.json` — full review comments (read for detail when triage entries are truncated)
+3. `.dispatch-prefetch/reviews.json` — review summaries with verdicts
+4. `.dispatch-prefetch/threads.json` — conversation threads with resolution state
 
 ### Working Through the Triage
 
