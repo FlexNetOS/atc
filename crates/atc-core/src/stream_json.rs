@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_pr_urls_rejects_rust_code_literals() {
+    fn test_extract_pr_urls_strips_trailing_rust_syntax() {
         let mut urls = Vec::new();
         // Agent writing test code with PR URLs in string literals
         extract_pr_urls(

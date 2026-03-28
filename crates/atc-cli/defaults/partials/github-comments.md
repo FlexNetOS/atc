@@ -2,7 +2,7 @@
 
 All data is in `.dispatch-prefetch/` — **do NOT call `gh api` to re-fetch**.
 
-1. `.dispatch-prefetch/triage.md` — **pre-triaged comment checklist**, sorted by priority with resolution status, severity, and pre-built `gh api` reply/resolve commands
+1. `.dispatch-prefetch/triage.md` — **pre-triaged comment checklist** with full comment text and pre-built `gh api` reply/resolve commands
 2. `.dispatch-prefetch/comments.json` — full review comments (read for detail when triage entries are truncated)
 3. `.dispatch-prefetch/reviews.json` — review summaries with verdicts
 4. `.dispatch-prefetch/threads.json` — conversation threads with resolution state

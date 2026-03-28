@@ -500,8 +500,14 @@ pub fn generate_triage(
         return md;
     }
 
-    let unresolved: Vec<&TriageEntry> = entries.iter().filter(|e| !e.is_resolved).collect();
-    let resolved: Vec<&TriageEntry> = entries.iter().filter(|e| e.is_resolved).collect();
+    let unresolved: Vec<&TriageEntry> = entries
+        .iter()
+        .filter(|e| !e.is_resolved && !e.is_outdated)
+        .collect();
+    let inactive: Vec<&TriageEntry> = entries
+        .iter()
+        .filter(|e| e.is_resolved || e.is_outdated)
+        .collect();
 
     // Unresolved section — full detail, agents work through these
     if !unresolved.is_empty() {
@@ -521,7 +527,7 @@ pub fn generate_triage(
 
             // Full comment body (trimmed, up to 2000 chars to avoid giant dumps)
             let body = entry.body.trim();
-            if body.len() > 2000 {
+            if body.chars().count() > 2000 {
                 let truncated: String = body.chars().take(2000).collect();
                 md.push_str(&truncated);
                 md.push_str(
@@ -550,13 +556,13 @@ pub fn generate_triage(
         }
     }
 
-    // Resolved section — collapsed, for reference only
-    if !resolved.is_empty() {
+    // Resolved + outdated section — collapsed, for reference only
+    if !inactive.is_empty() {
         md.push_str(&format!(
-            "<details>\n<summary>Resolved ({}) — skip unless verifying a previous fix</summary>\n\n",
-            resolved.len()
+            "<details>\n<summary>Resolved / Outdated ({}) — skip unless verifying a previous fix</summary>\n\n",
+            inactive.len()
         ));
-        for entry in &resolved {
+        for entry in &inactive {
             let location = match entry.line {
                 Some(line) => format!("{}:{}", entry.path, line),
                 None => entry.path.clone(),
@@ -923,7 +929,10 @@ mod tests {
             triage.contains("<details>"),
             "resolved should be in details tag"
         );
-        assert!(triage.contains("Resolved (1)"), "should count resolved");
+        assert!(
+            triage.contains("Resolved / Outdated (1)"),
+            "should count resolved/outdated"
+        );
         assert!(
             triage.contains("src/main.rs:10"),
             "resolved entry should be listed"
