@@ -1476,4 +1476,174 @@ Working on PR: {{pr}}
         assert_eq!(output.required_params, Some(vec!["topic".to_string()]));
         assert_eq!(output.body, "Research: AI safety");
     }
+
+    // --- Deferred provider vars in assemble_system_prompt ---
+
+    #[tokio::test]
+    async fn test_assemble_system_prompt_defers_provider_vars_in_partials() {
+        // Regression test: partials expanded during system prompt assembly may
+        // reference provider-supplied vars like {{default_branch}}. These must
+        // pass Handlebars strict mode via deferred placeholders.
+        let dir = tempfile::tempdir().unwrap();
+
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        // Component that includes a partial referencing a provider var
+        std::fs::write(
+            comp_dir.join("review.md"),
+            "# Agent: Review\n\nReview changes: {{>review-workflow}}",
+        )
+        .unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        // Partial uses {{default_branch}} — a rebase provider template var
+        std::fs::write(
+            partials_dir.join("review-workflow.md"),
+            "1. `git diff {{default_branch}}...HEAD --stat`\n2. Review each file",
+        )
+        .unwrap();
+
+        let mut directives = HashMap::new();
+        directives.insert(
+            "review-fix".to_string(),
+            DirectiveConfig {
+                components: Some(vec!["review".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            directives,
+            ..Default::default()
+        };
+
+        let result = assemble_system_prompt(&Directive::ReviewFix, "test-slug", "", &config, None)
+            .await
+            .unwrap();
+
+        // The partial should be expanded, with default_branch as a deferred placeholder
+        assert!(
+            result.contains(&deferred_placeholder("default_branch")),
+            "expected deferred placeholder for default_branch, got: {result}"
+        );
+        assert!(
+            result.contains("Review each file"),
+            "expected partial content, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_template_with_partial_using_deferred_var() {
+        // End-to-end: template includes a partial that uses {{default_branch}},
+        // which is a provider-declared deferred var.
+        let dir = tempfile::tempdir().unwrap();
+
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        std::fs::write(
+            partials_dir.join("review.md"),
+            "`git diff {{default_branch}}...HEAD`",
+        )
+        .unwrap();
+
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        let tmpl_path = dir.path().join("test.md");
+        std::fs::write(
+            &tmpl_path,
+            "---\ndirective: review-fix\n---\n## Review\n\n{{>review}}",
+        )
+        .unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let params = BTreeMap::new();
+
+        // Without deferred vars — should fail strict mode
+        let err = render_template(&tmpl_path, &params, &config, None)
+            .await
+            .unwrap_err();
+        // Error chain: outer = "failed to render template '...'" → inner = strict mode error
+        let err_chain = format!("{err:#}");
+        assert!(
+            err_chain.contains("default_branch"),
+            "expected strict mode error for default_branch in error chain, got: {err_chain}"
+        );
+
+        // With default_branch deferred — should succeed
+        let output =
+            render_template_with_deferred(&tmpl_path, &params, &["default_branch"], &config, None)
+                .await
+                .unwrap();
+        assert!(
+            output
+                .body
+                .contains(&deferred_placeholder("default_branch")),
+            "expected deferred placeholder, got: {}",
+            output.body
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_param_overrides_deferred_provider_var() {
+        // If the user explicitly passes --param default_branch=develop,
+        // their value should win over the deferred placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        let partials_dir = dir.path().join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        let comp_dir = dir.path().join("components");
+        std::fs::create_dir_all(&comp_dir).unwrap();
+
+        let tmpl_path = dir.path().join("test.md");
+        std::fs::write(
+            &tmpl_path,
+            "---\ndirective: implement\n---\nBranch: {{default_branch}}",
+        )
+        .unwrap();
+
+        let config = AtcConfig {
+            config_dir: Some(dir.path().to_path_buf()),
+            prompt: PromptConfig {
+                components_dir: "components".to_string(),
+                templates_dir: "templates".to_string(),
+                partials_dir: "partials".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert("default_branch".to_string(), "develop".to_string());
+
+        let output =
+            render_template_with_deferred(&tmpl_path, &params, &["default_branch"], &config, None)
+                .await
+                .unwrap();
+        // User value wins — no deferred placeholder
+        assert!(
+            output.body.contains("Branch: develop"),
+            "user param should override deferred var, got: {}",
+            output.body
+        );
+        assert!(
+            !output.body.contains("__ATC_DEFER_"),
+            "should not contain deferred placeholder when user supplies value, got: {}",
+            output.body
+        );
+    }
 }
