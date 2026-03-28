@@ -606,15 +606,14 @@ impl<'a> DispatchPipeline<'a> {
             env.insert("AGENT_ALLOWED_PATHS".to_string(), allowed_paths);
         }
 
-        // GITKB_ROOT: only set for task dispatches where git-kb is needed.
+        // GITKB_ROOT: always set so the agent can use git-kb commands
+        // (show, search, graph, log, board, etc.) regardless of dispatch type.
         // Re-assert from the resolver-validated kb_root so that project env
         // or provider env cannot redirect git-kb to an arbitrary path.
-        if resolved.task_slug.is_some() {
-            env.insert(
-                "GITKB_ROOT".to_string(),
-                kb_root.to_string_lossy().into_owned(),
-            );
-        }
+        env.insert(
+            "GITKB_ROOT".to_string(),
+            kb_root.to_string_lossy().into_owned(),
+        );
 
         // CLAUDECODE: always clear to prevent recursive agent-spawning.
         env.insert("CLAUDECODE".to_string(), String::new());
