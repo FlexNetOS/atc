@@ -463,10 +463,12 @@ impl<'a> DispatchPipeline<'a> {
             }
         }
 
-        // 7c. Post-process: {{worktree}} auto-population and meta context injection
+        // 7c. Post-process: pipeline-level builtins and meta context injection
         //
-        // Note: {{default_branch}} is handled by the rebase provider's template_vars,
-        // substituted in step 7b above via the deferred placeholder mechanism.
+        // {{worktree}} and {{default_branch}} are resolved here as fallbacks.
+        // Providers may have already substituted them in step 7b (e.g. rebase
+        // exports default_branch). This pass catches any remaining placeholders
+        // so templates work regardless of which providers are configured.
         {
             let wt_path_str = worktree_path.to_string_lossy();
             let deferred_wt = atc_core::prompt_engine::deferred_placeholder("worktree");
@@ -478,6 +480,29 @@ impl<'a> DispatchPipeline<'a> {
             if let Some(ref mut body) = resolved.template_body {
                 *body = body.replace(raw_wt, &wt_path_str);
                 *body = body.replace(&deferred_wt, &wt_path_str);
+            }
+
+            // Fallback default_branch resolution — if the rebase provider didn't
+            // run (directive config omits it), resolve from git so templates that
+            // reference {{default_branch}} still work.
+            let deferred_db = atc_core::prompt_engine::deferred_placeholder("default_branch");
+            if rendered_prompt.contains(&deferred_db)
+                || resolved
+                    .template_body
+                    .as_deref()
+                    .is_some_and(|b| b.contains(&deferred_db))
+            {
+                let default_branch =
+                    atc_core::providers::rebase::resolve_default_branch(&worktree_path).await;
+                let raw_db = "{{default_branch}}";
+
+                rendered_prompt = rendered_prompt.replace(&deferred_db, &default_branch);
+                rendered_prompt = rendered_prompt.replace(raw_db, &default_branch);
+
+                if let Some(ref mut body) = resolved.template_body {
+                    *body = body.replace(&deferred_db, &default_branch);
+                    *body = body.replace(raw_db, &default_branch);
+                }
             }
 
             // Inject meta workspace context for meta worktrees
