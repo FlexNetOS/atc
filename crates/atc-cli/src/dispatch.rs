@@ -489,6 +489,15 @@ pub async fn resolve_document_workspace(
         if branch_name == "main" {
             continue;
         }
+        // Reject directory names that could escape the workspaces path.
+        if branch_name.contains('/')
+            || branch_name.contains('\\')
+            || branch_name == ".."
+            || branch_name == "."
+        {
+            warn!(branch_name, "skipping unsafe workspace directory name");
+            continue;
+        }
         let doc_path = entry.path().join(format!("{}.md", slug));
         if doc_path.exists() {
             matches.push(branch_name);
@@ -503,6 +512,7 @@ pub async fn resolve_document_workspace(
     // Prefer the current git branch if it's among the matches.
     let current_branch = tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
+        .current_dir(workspace_root)
         .output()
         .await
         .ok()
@@ -545,7 +555,10 @@ pub async fn resolve_document_workspace(
         }))
     } else {
         let cwd = find_worktree_for_branch(&selected, worktree_base, workspace_root)
-            .unwrap_or_else(|| workspace_root.to_path_buf());
+            .unwrap_or_else(|| {
+                warn!(branch = %selected, "no worktree found for branch, falling back to workspace_root");
+                workspace_root.to_path_buf()
+            });
         Ok(Some(DocumentWorkspace {
             cwd,
             workspace_branch: selected,
