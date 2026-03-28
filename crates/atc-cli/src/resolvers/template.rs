@@ -240,7 +240,7 @@ impl InputResolver for TemplateResolver {
         // | Policy   | Resolver branch behavior                                        |
         // |----------|-----------------------------------------------------------------|
         // | branch   | PR head → param → current branch → synthetic fallback           |
-        // | document | Current branch (or stable slug-based); pipeline may override     |
+        // | document | Deterministic `doc--<slug>` branch                               |
         // | none     | Stable `tpl--none--<template>` branch (for dispatch ID only)     |
         // | current  | Current git branch; never fall back to synthetic                 |
         let branch = match worktree_policy {
@@ -968,6 +968,17 @@ mod tests {
         );
     }
 
+    /// Process-global mutex to serialize tests that mutate CWD.
+    static CWD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// RAII guard that restores the original CWD on drop (including panics).
+    struct RestoreCwd(std::path::PathBuf);
+    impl Drop for RestoreCwd {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
     /// Test `worktree: current` uses current git branch (doesn't create synthetic).
     ///
     /// This test creates a temporary git repo with a named branch so it is
@@ -976,9 +987,6 @@ mod tests {
     /// parallel tests.
     #[tokio::test]
     async fn test_resolve_worktree_current_uses_git_branch() {
-        use tokio::sync::Mutex;
-        static CWD_LOCK: Mutex<()> = Mutex::const_new(());
-
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(dir.path());
 
@@ -1013,11 +1021,9 @@ mod tests {
 
         // Serialize CWD changes to avoid races with other tests.
         let _guard = CWD_LOCK.lock().await;
-        let original_dir = std::env::current_dir().unwrap();
+        let _cwd = RestoreCwd(std::env::current_dir().unwrap());
         std::env::set_current_dir(repo_dir.path()).unwrap();
         let result = resolver.resolve("branch-review", &opts, &config).await;
-        std::env::set_current_dir(&original_dir).unwrap();
-        drop(_guard);
         let result = result.unwrap();
 
         assert_eq!(result.directive, Directive::ReviewFix);
@@ -1028,7 +1034,7 @@ mod tests {
         );
     }
 
-    /// Test `worktree: document` uses current branch or slug-based fallback.
+    /// Test `worktree: document` always uses the deterministic slug-based branch.
     #[tokio::test]
     async fn test_resolve_worktree_document_slug_fallback() {
         let dir = tempfile::tempdir().unwrap();
@@ -1048,13 +1054,7 @@ mod tests {
 
         assert_eq!(result.directive, Directive::Close);
         assert_eq!(result.worktree_policy, Some(WorktreePolicy::Document));
-        // On main/master, should fall back to slug-based branch
-        // (or use current branch if we happen to be on one)
-        assert!(
-            !result.branch.starts_with("tpl--"),
-            "document policy should not produce synthetic branch, got: {}",
-            result.branch
-        );
+        assert_eq!(result.branch, "doc--tasks--harmony-350");
     }
 
     /// Test `worktree: branch` preserves current behavior (explicit in frontmatter).

@@ -448,13 +448,15 @@ pub struct DocumentWorkspace {
 ///
 /// Phase 3: If non-main, find the corresponding code worktree.
 ///
-/// Returns `None` if the document isn't checked out in any workspace.
+/// Returns `Ok(None)` if the document isn't checked out in any workspace.
+/// Returns `Err` on I/O failures (permission denied, etc.) so callers can
+/// distinguish a genuine miss from a scan failure.
 pub async fn resolve_document_workspace(
     slug: &str,
     kb_root: &Path,
     worktree_base: &Path,
     workspace_root: &Path,
-) -> Option<DocumentWorkspace> {
+) -> Result<Option<DocumentWorkspace>> {
     let workspaces_dir = kb_root.join(".kb/workspaces");
 
     // Phase 1: Collect all workspaces that contain this slug.
@@ -465,21 +467,36 @@ pub async fn resolve_document_workspace(
         matches.push("main".to_string());
     }
 
-    if let Ok(entries) = std::fs::read_dir(&workspaces_dir) {
-        for entry in entries.flatten() {
-            let branch_name = entry.file_name().to_string_lossy().into_owned();
-            if branch_name == "main" {
-                continue;
-            }
-            let doc_path = entry.path().join(format!("{}.md", slug));
-            if doc_path.exists() {
-                matches.push(branch_name);
-            }
+    // Propagate read_dir errors (permission denied, etc.) instead of silently
+    // falling through to the "not found" path.
+    let entries = match std::fs::read_dir(&workspaces_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Workspaces dir doesn't exist yet — that's a genuine miss.
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to scan KB workspaces at {}: {}",
+                workspaces_dir.display(),
+                e
+            ));
+        }
+    };
+
+    for entry in entries.flatten() {
+        let branch_name = entry.file_name().to_string_lossy().into_owned();
+        if branch_name == "main" {
+            continue;
+        }
+        let doc_path = entry.path().join(format!("{}.md", slug));
+        if doc_path.exists() {
+            matches.push(branch_name);
         }
     }
 
     if matches.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // Phase 2: Select best match.
@@ -508,25 +525,31 @@ pub async fn resolve_document_workspace(
         {
             matched.clone()
         } else {
-            select_from_matches(&matches, slug)?
+            match select_from_matches(&matches, slug) {
+                Some(s) => s,
+                None => return Ok(None),
+            }
         }
     } else {
-        select_from_matches(&matches, slug)?
+        match select_from_matches(&matches, slug) {
+            Some(s) => s,
+            None => return Ok(None),
+        }
     };
 
     // Phase 3: Resolve code worktree for non-main branches.
     if selected == "main" {
-        Some(DocumentWorkspace {
+        Ok(Some(DocumentWorkspace {
             cwd: workspace_root.to_path_buf(),
             workspace_branch: "main".to_string(),
-        })
+        }))
     } else {
         let cwd = find_worktree_for_branch(&selected, worktree_base, workspace_root)
             .unwrap_or_else(|| workspace_root.to_path_buf());
-        Some(DocumentWorkspace {
+        Ok(Some(DocumentWorkspace {
             cwd,
             workspace_branch: selected,
-        })
+        }))
     }
 }
 
@@ -1112,7 +1135,8 @@ mod tests {
             Path::new("/tmp/worktrees"),
             kb_root,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(result.is_some());
         let ws = result.unwrap();
         assert_eq!(ws.workspace_branch, "main");
@@ -1134,8 +1158,9 @@ mod tests {
         let wt_path = wt_base.join("tasks--harmony-350");
         std::fs::create_dir_all(&wt_path).unwrap();
 
-        let result =
-            resolve_document_workspace("tasks/harmony-350", kb_root, &wt_base, kb_root).await;
+        let result = resolve_document_workspace("tasks/harmony-350", kb_root, &wt_base, kb_root)
+            .await
+            .unwrap();
         assert!(result.is_some());
         let ws = result.unwrap();
         assert_eq!(ws.workspace_branch, "tasks--harmony-350");
@@ -1157,7 +1182,8 @@ mod tests {
             Path::new("/tmp/worktrees"),
             kb_root,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(result.is_none());
     }
 
@@ -1179,7 +1205,8 @@ mod tests {
             Path::new("/tmp/worktrees"),
             kb_root,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(result.is_some());
         let ws = result.unwrap();
         // Should pick first alphabetically

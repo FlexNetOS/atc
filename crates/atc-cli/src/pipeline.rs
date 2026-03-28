@@ -272,6 +272,8 @@ impl<'a> DispatchPipeline<'a> {
                                 )
                             })
                         {
+                            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                            resolver.on_cleanup(&tmp_record, self.config, None).await;
                             anyhow::bail!(
                                 "invalid slug for document policy: unsafe path '{}'",
                                 slug
@@ -284,7 +286,7 @@ impl<'a> DispatchPipeline<'a> {
                             &worktree_base,
                             &workspace_root,
                         )
-                        .await
+                        .await?
                         {
                             Some(doc_ws) => {
                                 // Set GITKB_WORKSPACE for the document's branch
@@ -313,6 +315,8 @@ impl<'a> DispatchPipeline<'a> {
                         }
                     }
                     None => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
                         anyhow::bail!(
                             "worktree: document requires a task or slug parameter to resolve \
                              the document workspace (set --param task=<slug> or use a task dispatch)"
@@ -535,6 +539,10 @@ impl<'a> DispatchPipeline<'a> {
             resolved.system_prompt.clone()
         };
         if !providers.is_empty() {
+            // Pass the policy-derived KB workspace so providers use the correct
+            // workspace identity (e.g. "main" for document-on-main, not the
+            // synthetic dispatch branch).
+            let kb_workspace = resolved.env_overrides.get("GITKB_WORKSPACE").cloned();
             let dispatch_ctx = atc_core::providers::DispatchContext {
                 dispatch_id: resolved.dispatch_id.clone(),
                 task_slug: resolved.task_slug.clone(),
@@ -548,6 +556,7 @@ impl<'a> DispatchPipeline<'a> {
                 config: std::sync::Arc::new(self.config.clone()),
                 comment_id: comment_id.clone(),
                 comment_type: comment_type.clone(),
+                kb_workspace,
             };
 
             let provider_output =

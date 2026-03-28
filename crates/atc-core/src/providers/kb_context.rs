@@ -41,14 +41,18 @@ impl ContextProvider for KbContextProvider {
         let mut output = ContextOutput::default();
         let kb_root = &ctx.kb_root;
 
+        // Prefer the policy-derived KB workspace (set for document/none policies)
+        // over the resolver branch, which may be a synthetic dispatch branch.
+        let workspace = ctx.kb_workspace.as_deref().unwrap_or(&ctx.branch);
+
         // 1. Fetch related docs via `git kb graph`
-        let related_context = fetch_related_context(&task_slug, kb_root, &ctx.branch).await;
+        let related_context = fetch_related_context(&task_slug, kb_root, workspace).await;
         if let Some(context_section) = related_context {
             output.preamble_sections.push(context_section);
         }
 
         // 2. Fetch active context summary
-        let active_context = fetch_active_context(kb_root, &ctx.branch).await;
+        let active_context = fetch_active_context(kb_root, workspace).await;
         if let Some(active_section) = active_context {
             output.preamble_sections.push(active_section);
         }
@@ -208,6 +212,7 @@ mod tests {
             config: Arc::new(AtcConfig::default()),
             comment_id: None,
             comment_type: None,
+            kb_workspace: None,
         }
     }
 
