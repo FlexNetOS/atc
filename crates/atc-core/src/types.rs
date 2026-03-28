@@ -176,9 +176,10 @@ impl std::fmt::Display for Directive {
 /// - `Document`: resolve CWD from where the target document is checked out
 /// - `None`: run in canonical repo root, no worktree creation
 /// - `Current`: run in the current working directory as-is
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorktreePolicy {
+    #[default]
     Branch,
     Document,
     None,
@@ -212,12 +213,6 @@ impl std::str::FromStr for WorktreePolicy {
 impl std::fmt::Display for WorktreePolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-impl Default for WorktreePolicy {
-    fn default() -> Self {
-        WorktreePolicy::Branch
     }
 }
 
