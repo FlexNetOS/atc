@@ -16,12 +16,12 @@ pub struct AgentOpts {
     pub worktree_path: PathBuf,
     pub prompt: String, // rendered system prompt for the directive
     pub directive: Directive,
-    pub log_file: PathBuf,            // stream-json output destination
+    pub log_file: Option<PathBuf>, // stream-json output destination (None for ephemeral)
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
-    pub session_name: String,         // tmux session name (derived from slug)
-    pub dispatch_id: String,          // stable registry ID (used for post-complete --id)
-    pub sandbox: bool, // false = pass --settings with sandbox.enabled=false to claude
-    pub inline: bool,  // true = CI mode, no tmux, run synchronously
+    pub session_name: String,      // tmux session name (derived from slug)
+    pub dispatch_id: String,       // stable registry ID (used for post-complete --id)
+    pub sandbox: bool,             // false = pass --settings with sandbox.enabled=false to claude
+    pub inline: bool,              // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
     pub max_budget_usd: f64,
     /// Pre-built stdin content from the pipeline (for non-task dispatches).
@@ -141,7 +141,10 @@ impl ClaudeExecutor {
         };
 
         // 2. Create log file parent dirs
-        if let Some(parent) = opts.log_file.parent() {
+        let log_file = opts.log_file.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("log_file required for non-ephemeral inline dispatch")
+        })?;
+        if let Some(parent) = log_file.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
@@ -215,7 +218,7 @@ impl ClaudeExecutor {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let log_file_handle = tokio::fs::File::create(&opts.log_file).await?;
+        let log_file_handle = tokio::fs::File::create(log_file).await?;
         let log_writer = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(
             log_file_handle,
         )));
@@ -358,7 +361,11 @@ impl ClaudeExecutor {
     ) -> Result<String> {
         let user_prompt = Self::build_user_prompt(opts);
         let prompt_path_str = prompt_path.to_string_lossy();
-        let log_file_str = opts.log_file.to_string_lossy();
+        let log_file = opts
+            .log_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("log_file required for tmux dispatch"))?;
+        let log_file_str = log_file.to_string_lossy();
         let worktree_str = opts.worktree_path.to_string_lossy();
         let claude_bin_str = self.claude_bin.to_string_lossy();
         let task_doc_path_str = task_doc_path.to_string_lossy();
@@ -478,8 +485,11 @@ impl ClaudeExecutor {
         use tokio::process::Command;
 
         // 1. Write system prompt to a stable path (must outlive this process)
-        let log_dir = opts
+        let log_file = opts
             .log_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("log_file required for tmux dispatch"))?;
+        let log_dir = log_file
             .parent()
             .unwrap_or_else(|| std::path::Path::new("/tmp"));
         tokio::fs::create_dir_all(log_dir).await?;
@@ -658,7 +668,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/worktrees/gitkb/core"),
             prompt: String::new(),
             directive: Directive::Implement,
-            log_file: PathBuf::from("/tmp/log.jsonl"),
+            log_file: Some(PathBuf::from("/tmp/log.jsonl")),
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
@@ -684,7 +694,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/worktrees/test"),
             prompt: String::new(),
             directive: Directive::Implement,
-            log_file: PathBuf::from("/tmp/log.jsonl"),
+            log_file: Some(PathBuf::from("/tmp/log.jsonl")),
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
@@ -767,7 +777,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/test"),
             prompt: "test system prompt".to_string(),
             directive: Directive::Implement,
-            log_file: PathBuf::from("/tmp/test.jsonl"),
+            log_file: Some(PathBuf::from("/tmp/test.jsonl")),
             env,
             session_name: "test-session".to_string(),
             dispatch_id: "test-dispatch".to_string(),
@@ -791,7 +801,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let opts = AgentOpts {
-            log_file: tmp.path().join("test.jsonl"),
+            log_file: Some(tmp.path().join("test.jsonl")),
             worktree_path: tmp.path().to_path_buf(),
             ..make_test_opts(
                 Some("Hello from stdin content".to_string()),
@@ -998,7 +1008,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp"),
             prompt: String::new(),
             directive: Directive::Implement,
-            log_file: PathBuf::from("/dev/null"),
+            log_file: None,
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),

@@ -613,6 +613,33 @@ mod tests {
             fm.required_params,
             Some(vec!["competitor".to_string(), "name".to_string()])
         );
+
+        // commit-message.md → no directive, required_params: [slug, diff], max_turns: 1
+        let c =
+            std::fs::read_to_string(dir.path().join(".atc/templates/commit-message.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(
+            fm.directive, None,
+            "commit-message should have no directive"
+        );
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["slug".to_string(), "diff".to_string()])
+        );
+        assert_eq!(
+            fm.max_turns,
+            Some(1),
+            "commit-message should have max_turns: 1"
+        );
+
+        // doc-edit.md → directive: implement, required_params: [slug, directive]
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/doc-edit.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("implement"));
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["slug".to_string(), "directive".to_string()])
+        );
     }
 
     #[tokio::test]

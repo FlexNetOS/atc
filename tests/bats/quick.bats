@@ -33,7 +33,7 @@ Edit the GitKB document at {{slug}}.
 User directive: {{directive}}
 EOF
     # Write minimal atc.toml
-    cat > "$TEST_TMPDIR/.atc/atc.toml" <<'EOF'
+    cat > "$TEST_TMPDIR/.atc/config.toml" <<'EOF'
 [prompt]
 templates_dir = ".atc/templates"
 components_dir = ".atc/components"

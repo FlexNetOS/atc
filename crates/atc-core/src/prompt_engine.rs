@@ -348,10 +348,17 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
                 .collect()
         });
 
-    let max_turns = yaml
-        .get("max_turns")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+    let max_turns = match yaml.get("max_turns") {
+        Some(v) => {
+            let val = v
+                .as_u64()
+                .with_context(|| "max_turns must be a positive integer")?;
+            let val_u32 = u32::try_from(val)
+                .with_context(|| format!("max_turns value {} exceeds u32::MAX", val))?;
+            Some(val_u32)
+        }
+        None => None,
+    };
 
     Ok((
         Frontmatter {

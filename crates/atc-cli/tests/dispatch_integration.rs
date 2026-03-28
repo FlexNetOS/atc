@@ -18,10 +18,12 @@ struct StubExecutor {
 #[async_trait::async_trait]
 impl AgentExecutor for StubExecutor {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
-        if let Some(parent) = opts.log_file.parent() {
-            std::fs::create_dir_all(parent).ok();
+        if let Some(ref log_file) = opts.log_file {
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(log_file, b"").ok();
         }
-        std::fs::write(&opts.log_file, b"").ok();
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),
@@ -48,10 +50,12 @@ impl AgentExecutor for RecordingExecutor {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         *self.prompt.lock().await = Some(opts.prompt.clone());
 
-        if let Some(parent) = opts.log_file.parent() {
-            std::fs::create_dir_all(parent).ok();
+        if let Some(ref log_file) = opts.log_file {
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(log_file, b"").ok();
         }
-        std::fs::write(&opts.log_file, b"").ok();
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),

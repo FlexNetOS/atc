@@ -657,9 +657,11 @@ pub async fn run(
                 timeout: Some(*timeout),
             };
 
-            let all_resolvers = resolvers::build_resolvers(config);
+            // Quick is template-only — don't allow fallthrough to prompt/task resolvers.
+            let template_resolver: Vec<Box<dyn atc_core::resolver::InputResolver>> =
+                vec![Box::new(resolvers::template::TemplateResolver)];
             let pipeline = pipeline::DispatchPipeline {
-                resolvers: all_resolvers,
+                resolvers: template_resolver,
                 config,
                 registry: registry.as_ref(),
                 executor: executor.as_ref(),
