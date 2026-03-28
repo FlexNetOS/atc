@@ -1,6 +1,7 @@
 ---
 description: Fix specific PR comments without full review — lightweight and fast
 directive: pr-comments
+worktree: branch
 required_params: [pr]
 ---
 

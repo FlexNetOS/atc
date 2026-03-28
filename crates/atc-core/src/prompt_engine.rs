@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{expand_tilde, AtcConfig};
-use crate::types::Directive;
+use crate::types::{Directive, WorktreePolicy};
 
 /// Result of rendering a template: the rendered body and a list of directive/component names.
 #[derive(Debug, Clone)]
@@ -17,6 +17,8 @@ pub struct TemplateOutput {
     pub required_params: Option<Vec<String>>,
     /// Max turns override from frontmatter `max_turns:` field.
     pub max_turns: Option<u32>,
+    /// Worktree routing policy from frontmatter `worktree:` field.
+    pub worktree_policy: Option<WorktreePolicy>,
 }
 
 /// Assemble a system prompt from component `.md` files listed in the directive config.
@@ -174,6 +176,7 @@ pub async fn render_template_with_deferred(
         directive: frontmatter.directive,
         required_params: frontmatter.required_params,
         max_turns: frontmatter.max_turns,
+        worktree_policy: frontmatter.worktree_policy,
     })
 }
 
@@ -273,6 +276,8 @@ struct Frontmatter {
     required_params: Option<Vec<String>>,
     /// Max turns override from `max_turns:` frontmatter field.
     max_turns: Option<u32>,
+    /// Worktree routing policy from `worktree:` frontmatter field.
+    worktree_policy: Option<WorktreePolicy>,
 }
 
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
@@ -361,6 +366,20 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
         None => None,
     };
 
+    let worktree_policy = match yaml.get("worktree") {
+        Some(v) => {
+            let s = v
+                .as_str()
+                .with_context(|| "worktree must be a string (branch, document, none, current)")?;
+            Some(s.parse::<WorktreePolicy>().with_context(|| {
+                format!(
+                    "invalid worktree policy '{s}': expected branch, document, none, or current"
+                )
+            })?)
+        }
+        None => None,
+    };
+
     Ok((
         Frontmatter {
             description,
@@ -368,6 +387,7 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
             directive,
             required_params,
             max_turns,
+            worktree_policy,
         },
         body,
     ))
@@ -379,6 +399,7 @@ pub struct TemplateFrontmatter {
     pub directive: Option<String>,
     pub required_params: Option<Vec<String>>,
     pub max_turns: Option<u32>,
+    pub worktree_policy: Option<WorktreePolicy>,
 }
 
 /// Parse only the frontmatter of a raw template string, without rendering.
@@ -389,6 +410,7 @@ pub fn parse_template_frontmatter(raw: &str) -> Result<TemplateFrontmatter> {
         directive: fm.directive,
         required_params: fm.required_params,
         max_turns: fm.max_turns,
+        worktree_policy: fm.worktree_policy,
     })
 }
 
@@ -1718,5 +1740,61 @@ Working on PR: {{pr}}
             err.to_string().contains("exceeds u32::MAX"),
             "expected rejection of overflow, got: {err}"
         );
+    }
+
+    // --- worktree policy frontmatter tests ---
+
+    #[test]
+    fn test_worktree_policy_parsed_from_frontmatter() {
+        let raw = "---\ndirective: close\nworktree: document\n---\nBody.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.worktree_policy, Some(WorktreePolicy::Document));
+        assert_eq!(fm.directive.as_deref(), Some("close"));
+        assert_eq!(body, "Body.");
+    }
+
+    #[test]
+    fn test_worktree_policy_all_values() {
+        for (value, expected) in [
+            ("branch", WorktreePolicy::Branch),
+            ("document", WorktreePolicy::Document),
+            ("none", WorktreePolicy::None),
+            ("current", WorktreePolicy::Current),
+        ] {
+            let raw = format!("---\nworktree: {}\n---\nBody.", value);
+            let (fm, _) = split_frontmatter(&raw).unwrap();
+            assert_eq!(
+                fm.worktree_policy,
+                Some(expected),
+                "failed for worktree: {}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_worktree_policy_absent_is_none() {
+        let raw = "---\ndirective: implement\n---\nBody.";
+        let (fm, _) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.worktree_policy, None);
+    }
+
+    #[test]
+    fn test_worktree_policy_invalid_rejected() {
+        let raw = "---\nworktree: invalid-value\n---\nBody.";
+        let err = split_frontmatter(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid worktree policy"),
+            "expected rejection of invalid worktree policy, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_template_frontmatter_includes_worktree() {
+        let raw = "---\ndirective: close\nworktree: document\nrequired_params: [task]\n---\nBody.";
+        let fm = parse_template_frontmatter(raw).unwrap();
+        assert_eq!(fm.directive.as_deref(), Some("close"));
+        assert_eq!(fm.worktree_policy, Some(WorktreePolicy::Document));
+        assert_eq!(fm.required_params, Some(vec!["task".to_string()]));
     }
 }

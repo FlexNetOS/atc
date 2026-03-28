@@ -27,6 +27,9 @@ pub struct DispatchContext {
     pub comment_id: Option<String>,
     /// Comment type: "issue", "review_comment", or "review".
     pub comment_type: Option<String>,
+    /// Policy-derived KB workspace branch. Providers should prefer this over
+    /// `branch` when setting GITKB_WORKSPACE, falling back to `branch` when None.
+    pub kb_workspace: Option<String>,
 }
 
 /// Output from a provider — merged into dispatch.
@@ -208,6 +211,7 @@ mod tests {
             config: Arc::new(AtcConfig::default()),
             comment_id: None,
             comment_type: None,
+            kb_workspace: None,
         }
     }
 

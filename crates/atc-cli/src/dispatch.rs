@@ -428,6 +428,275 @@ async fn check_worktree_collision(
     Ok(())
 }
 
+/// Result of resolving a document's workspace location.
+#[derive(Debug, Clone)]
+pub struct DocumentWorkspace {
+    /// Filesystem path for agent CWD.
+    pub cwd: PathBuf,
+    /// KB workspace branch name (e.g., "main", "tasks--harmony-350").
+    pub workspace_branch: String,
+}
+
+/// Resolve where a document lives and where the agent should work.
+///
+/// Phase 1: Collect all KB workspaces that contain the slug.
+///
+/// Phase 2: Select the best match using priority rules:
+///   1. Current branch (if the slug is checked out there)
+///   2. Non-main branch (if exactly one; ambiguity is warned)
+///   3. Main workspace (fallback)
+///
+/// Phase 3: If non-main, find the corresponding code worktree.
+///
+/// Returns `Ok(None)` if the document isn't checked out in any workspace.
+/// Returns `Err` on I/O failures (permission denied, etc.) so callers can
+/// distinguish a genuine miss from a scan failure.
+pub async fn resolve_document_workspace(
+    slug: &str,
+    kb_root: &Path,
+    worktree_base: &Path,
+    workspace_root: &Path,
+) -> Result<Option<DocumentWorkspace>> {
+    // Validate slug before any path join to prevent traversal/injection.
+    let slug_path = Path::new(slug);
+    if slug.is_empty()
+        || slug_path.is_absolute()
+        || slug.contains('\\')
+        || slug.contains('\0')
+        || slug_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        anyhow::bail!("invalid document slug for workspace resolution: {}", slug);
+    }
+
+    let workspaces_dir = kb_root.join(".kb/workspaces");
+
+    // Phase 1: Collect all workspaces that contain this slug.
+    let mut matches: Vec<String> = Vec::new();
+
+    let main_path = workspaces_dir.join("main").join(format!("{}.md", slug));
+    if main_path.try_exists().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to stat KB workspace document {}: {}",
+            main_path.display(),
+            e
+        )
+    })? {
+        matches.push("main".to_string());
+    }
+
+    // Propagate read_dir errors (permission denied, etc.) instead of silently
+    // falling through to the "not found" path.
+    let entries = match std::fs::read_dir(&workspaces_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Workspaces dir doesn't exist yet — that's a genuine miss.
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to scan KB workspaces at {}: {}",
+                workspaces_dir.display(),
+                e
+            ));
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read KB workspace entry under {}: {}",
+                workspaces_dir.display(),
+                e
+            )
+        })?;
+        let branch_name = entry.file_name().to_string_lossy().into_owned();
+        if branch_name == "main" {
+            continue;
+        }
+        // Reject directory names that could escape the workspaces path.
+        if branch_name.contains('/')
+            || branch_name.contains('\\')
+            || branch_name == ".."
+            || branch_name == "."
+        {
+            warn!(branch_name, "skipping unsafe workspace directory name");
+            continue;
+        }
+        let doc_path = entry.path().join(format!("{}.md", slug));
+        if doc_path.try_exists().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to stat KB workspace document {}: {}",
+                doc_path.display(),
+                e
+            )
+        })? {
+            matches.push(branch_name);
+        }
+    }
+
+    if matches.is_empty() {
+        return Ok(None);
+    }
+
+    // Phase 2: Select best match.
+    // Prefer the current git branch if it's among the matches.
+    let current_branch = tokio::time::timeout(
+        SUBPROCESS_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(workspace_root)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|o| {
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    });
+
+    let selected = if let Some(ref current) = current_branch {
+        let sanitized_current = current.replace('/', "--");
+        // Find the actual matched value from the vector (may be the original
+        // or sanitized form depending on workspace directory naming).
+        if let Some(matched) = matches
+            .iter()
+            .find(|m| *m == current || *m == &sanitized_current)
+        {
+            matched.clone()
+        } else {
+            match select_from_matches(&matches, slug) {
+                Some(s) => s,
+                None => return Ok(None),
+            }
+        }
+    } else {
+        match select_from_matches(&matches, slug) {
+            Some(s) => s,
+            None => return Ok(None),
+        }
+    };
+
+    // Phase 3: Resolve code worktree for non-main branches.
+    if selected == "main" {
+        Ok(Some(DocumentWorkspace {
+            cwd: workspace_root.to_path_buf(),
+            workspace_branch: "main".to_string(),
+        }))
+    } else {
+        let cwd = find_worktree_for_branch(&selected, worktree_base, workspace_root)
+            .unwrap_or_else(|| {
+                warn!(branch = %selected, "no worktree found for branch, falling back to workspace_root");
+                workspace_root.to_path_buf()
+            });
+        Ok(Some(DocumentWorkspace {
+            cwd,
+            workspace_branch: selected,
+        }))
+    }
+}
+
+/// Pick a single workspace from the match set, logging ambiguity.
+fn select_from_matches(matches: &[String], slug: &str) -> Option<String> {
+    let non_main: Vec<&String> = matches.iter().filter(|m| m.as_str() != "main").collect();
+    match non_main.len() {
+        0 => {
+            // Only main matched.
+            Some("main".to_string())
+        }
+        1 => Some(non_main[0].clone()),
+        _ => {
+            // Ambiguous: slug is in multiple non-main workspaces and the current
+            // branch didn't resolve the tie. Warn and pick the first alphabetically
+            // for determinism rather than silently using filesystem order.
+            let mut sorted: Vec<&String> = non_main;
+            sorted.sort();
+            warn!(
+                slug,
+                workspaces = ?sorted,
+                "document found in multiple workspaces; selecting first alphabetically"
+            );
+            Some(sorted[0].clone())
+        }
+    }
+}
+
+/// Find a code worktree corresponding to a KB workspace branch.
+///
+/// Search order:
+/// 1. `<worktree_base>/<branch>/` — meta git worktrees (e.g., /tmp/worktrees/tasks--harmony-350/)
+/// 2. `<workspace_root>/.worktrees/<branch>/` — local git worktrees
+///
+/// Returns `None` if no worktree exists for this branch.
+pub fn find_worktree_for_branch(
+    branch: &str,
+    worktree_base: &Path,
+    workspace_root: &Path,
+) -> Option<PathBuf> {
+    let sanitized = branch.replace('/', "--");
+
+    // 1. Check configured worktree_base (default: /tmp/worktrees/)
+    for name in [sanitized.as_str(), branch] {
+        let path = worktree_base.join(name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 2. Check local .worktrees/ directory
+    for name in [sanitized.as_str(), branch] {
+        let path = workspace_root.join(".worktrees").join(name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 3. No worktree found — agent works in canonical repo on this branch
+    None
+}
+
+/// Auto-checkout a document to the main KB workspace.
+pub async fn auto_checkout_to_main(slug: &str, kb_root: &Path) -> Result<()> {
+    info!(slug, kb_root = %kb_root.display(), "auto-checking out document to main workspace");
+    let child = tokio::process::Command::new("git-kb")
+        .args(["checkout", slug])
+        .env("GITKB_ROOT", kb_root)
+        .env("GITKB_WORKSPACE", "main")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let output = tokio::time::timeout(SUBPROCESS_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("git-kb checkout timed out after {:?}", SUBPROCESS_TIMEOUT)
+        })??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            slug,
+            stderr = %stderr,
+            "git-kb checkout failed for document (non-fatal)"
+        );
+    }
+    Ok(())
+}
+
 /// Parameters for worktree creation/reuse.
 pub struct WorktreeOpts<'a> {
     pub worktree_base: &'a Path,
@@ -906,5 +1175,137 @@ mod tests {
             derive_pr_url_from_comment("https://github.com/org/repo/issues/42#issuecomment-123"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_document_workspace_finds_in_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+        let main_ws = kb_root.join(".kb/workspaces/main/tasks");
+        std::fs::create_dir_all(&main_ws).unwrap();
+        std::fs::write(main_ws.join("harmony-350.md"), "---\ntitle: test\n---\n").unwrap();
+
+        let result = resolve_document_workspace(
+            "tasks/harmony-350",
+            kb_root,
+            Path::new("/tmp/worktrees"),
+            kb_root,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_some());
+        let ws = result.unwrap();
+        assert_eq!(ws.workspace_branch, "main");
+        assert_eq!(ws.cwd, kb_root);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_document_workspace_finds_in_worktree_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+
+        // Create a non-main workspace with the doc
+        let branch_ws = kb_root.join(".kb/workspaces/tasks--harmony-350/tasks");
+        std::fs::create_dir_all(&branch_ws).unwrap();
+        std::fs::write(branch_ws.join("harmony-350.md"), "---\ntitle: test\n---\n").unwrap();
+
+        // Create a worktree directory that matches
+        let wt_base = dir.path().join("worktrees");
+        let wt_path = wt_base.join("tasks--harmony-350");
+        std::fs::create_dir_all(&wt_path).unwrap();
+
+        let result = resolve_document_workspace("tasks/harmony-350", kb_root, &wt_base, kb_root)
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        let ws = result.unwrap();
+        assert_eq!(ws.workspace_branch, "tasks--harmony-350");
+        assert_eq!(ws.cwd, wt_path);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_document_workspace_returns_none_when_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+
+        // Create main workspace but without the target doc
+        let main_ws = kb_root.join(".kb/workspaces/main");
+        std::fs::create_dir_all(&main_ws).unwrap();
+
+        let result = resolve_document_workspace(
+            "tasks/nonexistent",
+            kb_root,
+            Path::new("/tmp/worktrees"),
+            kb_root,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_document_workspace_ambiguous_warns_and_picks_alphabetically() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+
+        // Create doc in two non-main workspaces (branch-b and branch-a)
+        for branch in &["branch-b", "branch-a"] {
+            let ws = kb_root.join(format!(".kb/workspaces/{}/tasks", branch));
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(ws.join("harmony-999.md"), "---\ntitle: test\n---\n").unwrap();
+        }
+
+        let result = resolve_document_workspace(
+            "tasks/harmony-999",
+            kb_root,
+            Path::new("/tmp/worktrees"),
+            kb_root,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_some());
+        let ws = result.unwrap();
+        // Should pick first alphabetically
+        assert_eq!(ws.workspace_branch, "branch-a");
+    }
+
+    #[test]
+    fn test_find_worktree_for_branch_worktree_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt_base = dir.path().join("worktrees");
+        let wt_path = wt_base.join("tasks--foo");
+        std::fs::create_dir_all(&wt_path).unwrap();
+
+        let workspace_root = dir.path().join("repo");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+
+        let result = find_worktree_for_branch("tasks--foo", &wt_base, &workspace_root);
+        assert_eq!(result, Some(wt_path));
+    }
+
+    #[test]
+    fn test_find_worktree_for_branch_local_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("repo");
+        let local_wt = workspace_root.join(".worktrees/tasks--bar");
+        std::fs::create_dir_all(&local_wt).unwrap();
+
+        let wt_base = dir.path().join("empty-base");
+        std::fs::create_dir_all(&wt_base).unwrap();
+
+        let result = find_worktree_for_branch("tasks--bar", &wt_base, &workspace_root);
+        assert_eq!(result, Some(local_wt));
+    }
+
+    #[test]
+    fn test_find_worktree_for_branch_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt_base = dir.path().join("empty");
+        std::fs::create_dir_all(&wt_base).unwrap();
+        let workspace_root = dir.path().join("repo");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+
+        let result = find_worktree_for_branch("nonexistent", &wt_base, &workspace_root);
+        assert_eq!(result, None);
     }
 }

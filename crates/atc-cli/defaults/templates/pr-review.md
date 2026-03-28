@@ -1,6 +1,7 @@
 ---
 description: Review and fix PR — iterative flywheel until confident
 directive: review-fix
+worktree: branch
 required_params: [pr]
 ---
 
