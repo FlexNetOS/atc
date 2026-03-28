@@ -260,6 +260,10 @@ pub struct RunOpts {
     pub retries: u32,
     /// List available templates instead of dispatching.
     pub list: bool,
+    /// Ephemeral mode: skip registry, logs, system prompt, providers.
+    pub ephemeral: bool,
+    /// Inline timeout in seconds.
+    pub timeout: Option<u32>,
 }
 
 /// Outcome of a successful dispatch.
@@ -268,4 +272,33 @@ pub struct DispatchOutcome {
     pub id: String,
     pub session: String,
     pub inline_exit_code: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_opts_ephemeral_defaults() {
+        let opts = RunOpts {
+            input: "test".to_string(),
+            directive: None,
+            params: std::collections::HashMap::new(),
+            pr_url: None,
+            repos: vec![],
+            inline: false,
+            force: false,
+            dry_run: false,
+            directives: None,
+            no_worktree: false,
+            max_budget_usd: None,
+            max_turns: None,
+            retries: 0,
+            list: false,
+            ephemeral: false,
+            timeout: None,
+        };
+        assert!(!opts.ephemeral, "ephemeral should default to false");
+        assert_eq!(opts.timeout, None, "timeout should default to None");
+    }
 }

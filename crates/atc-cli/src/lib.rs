@@ -88,6 +88,12 @@ mod args {
             /// Override max turns for this dispatch
             #[arg(long)]
             max_turns: Option<u32>,
+            /// Ephemeral mode: skip registry, logs, system prompt, providers (requires --inline)
+            #[arg(long)]
+            ephemeral: bool,
+            /// Timeout in seconds for inline execution (kill after N seconds)
+            #[arg(long)]
+            timeout: Option<u32>,
         },
         /// Check health of all active dispatches
         Health {
@@ -274,6 +280,27 @@ mod args {
             #[arg(long, default_value = "default")]
             name: String,
         },
+        /// Lightweight AI dispatch — prompt in, text out. No worktree, registry, or system prompt.
+        /// Equivalent to: atc run <template> --inline --no-worktree --ephemeral --timeout <N>
+        Quick {
+            /// Template name (e.g., "commit-message")
+            template: Option<String>,
+            /// Template parameters
+            #[arg(long = "param", action = clap::ArgAction::Append)]
+            param: Vec<String>,
+            /// Timeout in seconds (default 15)
+            #[arg(long, default_value = "15")]
+            timeout: u32,
+            /// Max budget in USD (default 0.50)
+            #[arg(long, default_value = "0.50")]
+            max_budget_usd: f64,
+            /// List available templates
+            #[arg(long)]
+            list: bool,
+            /// Preview without dispatching
+            #[arg(long)]
+            dry_run: bool,
+        },
         /// Run the continuous dispatch daemon
         Daemon {
             #[command(subcommand)]
@@ -341,6 +368,8 @@ pub async fn run(
             no_worktree,
             max_budget_usd,
             max_turns,
+            ephemeral,
+            timeout,
         } => {
             // Handle --list
             if *list {
@@ -397,6 +426,8 @@ pub async fn run(
                 max_turns: *max_turns,
                 retries: 0,
                 list: false,
+                ephemeral: *ephemeral,
+                timeout: *timeout,
             };
 
             // Build resolver chain
@@ -580,6 +611,70 @@ pub async fn run(
             }
             None => queue_cmd::run_queue_list(registry.as_ref(), name).await,
         },
+        Commands::Quick {
+            template,
+            param,
+            timeout,
+            max_budget_usd,
+            list,
+            dry_run,
+        } => {
+            // Handle --list
+            if *list {
+                let templates = resolvers::template::TemplateResolver::list_templates(config);
+                if templates.is_empty() {
+                    println!("No templates found.");
+                } else {
+                    println!("Available templates:");
+                    for name in &templates {
+                        println!("  {name}");
+                    }
+                }
+                return Ok(());
+            }
+
+            let template = template.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("template name required (use --list to see available templates)")
+            })?;
+
+            let params = parse_params(param)?;
+            let opts = RunOpts {
+                input: template.to_string(),
+                directive: None,
+                params,
+                pr_url: None,
+                repos: vec![],
+                inline: true,
+                force: false,
+                dry_run: *dry_run,
+                directives: None,
+                no_worktree: true,
+                max_budget_usd: Some(*max_budget_usd),
+                max_turns: None,
+                retries: 0,
+                list: false,
+                ephemeral: true,
+                timeout: Some(*timeout),
+            };
+
+            // Quick is template-only — don't allow fallthrough to prompt/task resolvers.
+            let template_resolver: Vec<Box<dyn atc_core::resolver::InputResolver>> =
+                vec![Box::new(resolvers::template::TemplateResolver)];
+            let pipeline = pipeline::DispatchPipeline {
+                resolvers: template_resolver,
+                config,
+                registry: registry.as_ref(),
+                executor: executor.as_ref(),
+            };
+
+            let outcome = pipeline.execute(template, &opts).await?;
+            if let Some(code) = outcome.inline_exit_code {
+                if code != 0 {
+                    anyhow::bail!("quick dispatch failed with exit code {code}");
+                }
+            }
+            Ok(())
+        }
         Commands::Daemon {
             action,
             queues,

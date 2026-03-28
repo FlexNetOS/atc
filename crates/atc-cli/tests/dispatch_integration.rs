@@ -18,10 +18,12 @@ struct StubExecutor {
 #[async_trait::async_trait]
 impl AgentExecutor for StubExecutor {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
-        if let Some(parent) = opts.log_file.parent() {
-            std::fs::create_dir_all(parent).ok();
+        if let Some(ref log_file) = opts.log_file {
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(log_file, b"")?;
         }
-        std::fs::write(&opts.log_file, b"").ok();
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),
@@ -48,10 +50,12 @@ impl AgentExecutor for RecordingExecutor {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         *self.prompt.lock().await = Some(opts.prompt.clone());
 
-        if let Some(parent) = opts.log_file.parent() {
-            std::fs::create_dir_all(parent).ok();
+        if let Some(ref log_file) = opts.log_file {
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(log_file, b"")?;
         }
-        std::fs::write(&opts.log_file, b"").ok();
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),
@@ -292,6 +296,8 @@ fn default_run_opts(input: &str, directive: Directive) -> RunOpts {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     }
 }
 
@@ -482,6 +488,8 @@ async fn test_dispatch_resolves_directive_from_frontmatter() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let outcome = dispatch_via_pipeline(
         &fix.config,
@@ -615,6 +623,8 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let outcome = dispatch_via_pipeline(
         &fix.config,
@@ -665,6 +675,8 @@ async fn test_dispatch_review_fix_requires_pr_url() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let result = dispatch_via_pipeline(
         &fix.config,
@@ -709,6 +721,8 @@ async fn test_dispatch_dry_run() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let outcome = dispatch_via_pipeline(
         &fix.config,
@@ -756,6 +770,8 @@ async fn test_prompt_resolver_dispatch() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
 
     // Only use prompt resolver (no task resolver since git-kb not configured)
@@ -827,6 +843,8 @@ async fn test_template_resolver_dispatch() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
 
     let outcome = dispatch_via_pipeline(

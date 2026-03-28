@@ -237,6 +237,8 @@ pub async fn run_retry(
         max_turns: max_turns_override,
         retries: record.retries + 1,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
 
     // Use the recorded resolver directly instead of rebuilding the full chain.

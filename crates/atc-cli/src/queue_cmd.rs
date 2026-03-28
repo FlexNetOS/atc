@@ -207,6 +207,8 @@ pub async fn dispatch_queue_item(
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
 
     // Build resolver chain

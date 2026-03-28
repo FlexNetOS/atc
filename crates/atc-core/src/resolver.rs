@@ -29,6 +29,8 @@ pub struct ResolvedInput {
     /// Rendered template content to be used as user prompt / stdin
     /// (only set for template dispatches).
     pub template_body: Option<String>,
+    /// Max turns override from template frontmatter.
+    pub max_turns: Option<u32>,
 }
 
 /// Trait defining how an input string is resolved into dispatch parameters.

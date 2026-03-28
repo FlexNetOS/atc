@@ -48,6 +48,14 @@ const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../defaults/templates/push-branch.md"),
     ),
     ("swot.md", include_str!("../defaults/templates/swot.md")),
+    (
+        "commit-message.md",
+        include_str!("../defaults/templates/commit-message.md"),
+    ),
+    (
+        "doc-edit.md",
+        include_str!("../defaults/templates/doc-edit.md"),
+    ),
 ];
 
 // --- Embedded default component files ---
@@ -605,6 +613,33 @@ mod tests {
             fm.required_params,
             Some(vec!["competitor".to_string(), "name".to_string()])
         );
+
+        // commit-message.md → no directive, required_params: [slug, diff], max_turns: 1
+        let c =
+            std::fs::read_to_string(dir.path().join(".atc/templates/commit-message.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(
+            fm.directive, None,
+            "commit-message should have no directive"
+        );
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["slug".to_string(), "diff".to_string()])
+        );
+        assert_eq!(
+            fm.max_turns,
+            Some(1),
+            "commit-message should have max_turns: 1"
+        );
+
+        // doc-edit.md → directive: implement, required_params: [slug, directive]
+        let c = std::fs::read_to_string(dir.path().join(".atc/templates/doc-edit.md")).unwrap();
+        let fm = parse_template_frontmatter(&c).expect("valid frontmatter");
+        assert_eq!(fm.directive.as_deref(), Some("implement"));
+        assert_eq!(
+            fm.required_params,
+            Some(vec!["slug".to_string(), "directive".to_string()])
+        );
     }
 
     #[tokio::test]
@@ -719,12 +754,9 @@ mod tests {
             let contents = std::fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("template {name} should exist"));
             assert!(!contents.is_empty(), "template {name} should not be empty");
-            let fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
+            let _fm = atc_core::prompt_engine::parse_template_frontmatter(&contents)
                 .unwrap_or_else(|e| panic!("template {name} should have valid frontmatter: {e}"));
-            assert!(
-                fm.directive.is_some(),
-                "template {name} should have a directive"
-            );
+            // Note: not all templates require a directive (e.g., commit-message defaults to implement)
         }
     }
 
