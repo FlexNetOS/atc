@@ -190,25 +190,20 @@ pub struct Artifacts {
 /// rather than requiring it at the start, which catches URLs embedded in
 /// surrounding syntax.
 fn extract_pr_urls(text: &str, urls: &mut Vec<String>) {
-    const PREFIX: &str = "https://github.com/";
-    const MARKER: &str = "/pull/";
+    use regex::Regex;
+    use std::sync::LazyLock;
 
-    for token in text.split_whitespace() {
-        // Strip quotes (for JSON-encoded tool inputs)
-        let token = token.trim_matches('"');
+    // Match GitHub PR URLs precisely: owner/repo/pull/number with optional
+    // fragment (#issuecomment-123) or query params. Rejects URLs embedded in
+    // code literals like `"https://github.com/org/repo/pull/42".to_string()`.
+    static PR_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"https://github\.com/[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+/pull/[0-9]+(?:#[a-zA-Z0-9_-]+(?:-[0-9]+)*)?"
+        ).unwrap()
+    });
 
-        // Find the URL prefix anywhere in the token (handles markdown links, parens, etc.)
-        let Some(start) = token.find(PREFIX) else {
-            continue;
-        };
-        let candidate = &token[start..];
-        if !candidate.contains(MARKER) {
-            continue;
-        }
-        // Trim trailing punctuation (but preserve `/`, `#`, `?`, `=`, `&` which are valid URL chars)
-        let url = candidate.trim_end_matches(|c: char| {
-            c.is_ascii_punctuation() && !matches!(c, '/' | '#' | '?' | '=' | '&')
-        });
+    for m in PR_RE.find_iter(text) {
+        let url = m.as_str();
         if !urls.iter().any(|u| u == url) {
             urls.push(url.to_string());
         }
@@ -578,6 +573,47 @@ mod tests {
             &mut urls,
         );
         assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_rejects_rust_code_literals() {
+        let mut urls = Vec::new();
+        // Agent writing test code with PR URLs in string literals
+        extract_pr_urls(
+            r#"urls.push("https://github.com/org/repo/pull/42".to_string());"#,
+            &mut urls,
+        );
+        // Should extract the clean URL, not the trailing .to_string()
+        assert_eq!(urls, vec!["https://github.com/org/repo/pull/42"]);
+    }
+
+    #[test]
+    fn test_extract_pr_urls_rejects_regex_patterns() {
+        let mut urls = Vec::new();
+        // Agent writing regex that matches PR URL patterns
+        extract_pr_urls(
+            r"https://github.com/([^/]+/[^/]+)/pull/.*$|\1|')\nPR_NUMBER=$(printf",
+            &mut urls,
+        );
+        // Regex pattern should NOT be extracted — no valid /pull/{number}
+        assert!(
+            urls.is_empty(),
+            "regex patterns should not match: {:?}",
+            urls
+        );
+    }
+
+    #[test]
+    fn test_extract_pr_urls_with_issuecomment_fragment() {
+        let mut urls = Vec::new();
+        extract_pr_urls(
+            "https://github.com/org/repo/pull/43#issuecomment-4148593011",
+            &mut urls,
+        );
+        assert_eq!(
+            urls,
+            vec!["https://github.com/org/repo/pull/43#issuecomment-4148593011"]
+        );
     }
 
     #[test]
