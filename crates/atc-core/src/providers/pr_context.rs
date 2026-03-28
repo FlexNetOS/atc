@@ -75,7 +75,7 @@ impl ContextProvider for PrContextProvider {
         });
 
         // Generate triage.md
-        let triage = generate_triage(&comments, &threads);
+        let triage = generate_triage(&comments, &threads, &owner, &repo, pr_number);
 
         // Generate summary.md
         let mut summary = generate_summary(&metadata, &reviews, &comments, &threads);
@@ -368,8 +368,42 @@ struct TriageEntry {
     is_outdated: bool,
 }
 
+/// Render a comment body as a fenced `text` block.
+///
+/// Truncates at 2000 chars and picks a fence length that won't collide
+/// with backtick runs already present in the body.
+fn fenced_body(raw: &str) -> String {
+    let body = raw.trim();
+    let rendered = if body.chars().count() > 2000 {
+        let mut truncated: String = body.chars().take(2000).collect();
+        truncated
+            .push_str("\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]");
+        truncated
+    } else {
+        body.to_string()
+    };
+
+    let max_backticks = rendered
+        .split(|c| c != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(max_backticks.max(3) + 1);
+    format!("{fence}text\n{rendered}\n{fence}")
+}
+
 /// Generate triage.md from comments and threads.
-pub fn generate_triage(comments: &Value, threads: &Value) -> String {
+///
+/// Produces a self-contained markdown document with full comment text and
+/// pre-built `gh api` commands for reply and thread resolution. Agents should
+/// need ONLY this file — no JSON parsing required.
+pub fn generate_triage(
+    comments: &Value,
+    threads: &Value,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> String {
     let mut entries = Vec::new();
 
     // Parse GraphQL threads
@@ -483,49 +517,78 @@ pub fn generate_triage(comments: &Value, threads: &Value) -> String {
             .then_with(|| a.line.cmp(&b.line))
     });
 
-    // Render markdown checklist
+    // Render self-contained triage document
     let mut md = String::from("# PR Comment Triage\n\n");
     if entries.is_empty() {
         md.push_str("No review comments found.\n");
         return md;
     }
 
-    for entry in &entries {
-        let checkbox = if entry.is_resolved { "[x]" } else { "[ ]" };
-        let status = if entry.is_resolved {
-            "resolved"
-        } else {
-            "unresolved"
-        };
-        let location = match entry.line {
-            Some(line) => format!("**{}:{}**", entry.path, line),
-            None => format!("**{}**", entry.path),
-        };
+    let unresolved: Vec<&TriageEntry> = entries
+        .iter()
+        .filter(|e| !e.is_resolved && !e.is_outdated)
+        .collect();
+    let inactive: Vec<&TriageEntry> = entries
+        .iter()
+        .filter(|e| e.is_resolved || e.is_outdated)
+        .collect();
 
-        // Truncate body to first line for checklist
-        let body_preview: &str = entry.body.lines().next().unwrap_or("");
-        let body_truncated = if body_preview.chars().count() > 120 {
-            let truncated: String = body_preview.chars().take(117).collect();
-            format!("{}...", truncated)
-        } else {
-            body_preview.to_string()
-        };
+    // Unresolved section — full detail, agents work through these
+    if !unresolved.is_empty() {
+        md.push_str(&format!("## Unresolved ({})\n\n", unresolved.len()));
+        for (i, entry) in unresolved.iter().enumerate() {
+            let location = match entry.line {
+                Some(line) => format!("{}:{}", entry.path, line),
+                None => entry.path.clone(),
+            };
 
-        md.push_str(&format!(
-            "- {} {} ({}) @{}: \"{}\"\n",
-            checkbox, location, status, entry.author, body_truncated
-        ));
-        if !entry.thread_id.is_empty() || !entry.comment_id.is_empty() {
             md.push_str(&format!(
-                "  Thread ID: {} | Comment ID: {}\n",
-                if entry.thread_id.is_empty() {
-                    "N/A"
-                } else {
-                    &entry.thread_id
-                },
-                entry.comment_id
+                "### {}. {} — @{}\n\n",
+                i + 1,
+                location,
+                entry.author
+            ));
+
+            md.push_str(&fenced_body(&entry.body));
+            md.push_str("\n\n");
+
+            // Pre-built commands
+            if !entry.comment_id.is_empty() && entry.comment_id != "unknown" {
+                md.push_str("```bash\n");
+                md.push_str(&format!(
+                    "# Reply:\ngh api repos/{}/{}/pulls/{}/comments/{}/replies -f body=\"Fixed in <commit>\"\n",
+                    owner, repo, pr_number, entry.comment_id
+                ));
+                if !entry.thread_id.is_empty() && entry.thread_id != "unknown" {
+                    md.push_str(&format!(
+                        "# Resolve thread:\ngh api graphql -f query='mutation {{ resolveReviewThread(input: {{threadId: \"{}\"}}) {{ thread {{ isResolved }} }} }}'\n",
+                        entry.thread_id
+                    ));
+                }
+                md.push_str("```\n\n");
+            }
+        }
+    }
+
+    // Resolved + outdated section — collapsed, for reference only
+    if !inactive.is_empty() {
+        md.push_str(&format!(
+            "<details>\n<summary>Resolved / Outdated ({}) — skip unless verifying a previous fix</summary>\n\n",
+            inactive.len()
+        ));
+        for entry in &inactive {
+            let location = match entry.line {
+                Some(line) => format!("{}:{}", entry.path, line),
+                None => entry.path.clone(),
+            };
+            md.push_str(&format!(
+                "- [x] **{}** @{}\n\n{}\n\n",
+                location,
+                entry.author,
+                fenced_body(&entry.body)
             ));
         }
+        md.push_str("\n</details>\n");
     }
 
     md
@@ -614,15 +677,24 @@ fn count_thread_resolution(threads: &Value) -> (usize, usize) {
 
     match nodes {
         Some(arr) => {
-            let resolved = arr
-                .iter()
-                .filter(|t| {
-                    t.get("isResolved")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                })
-                .count();
-            (resolved, arr.len() - resolved)
+            let mut resolved = 0usize;
+            let mut unresolved = 0usize;
+            for t in arr {
+                let is_resolved = t
+                    .get("isResolved")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let is_outdated = t
+                    .get("isOutdated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_resolved || is_outdated {
+                    resolved += 1;
+                } else {
+                    unresolved += 1;
+                }
+            }
+            (resolved, unresolved)
         }
         None => (0, 0),
     }
@@ -841,16 +913,56 @@ mod tests {
             }
         });
 
-        let triage = generate_triage(&comments, &threads);
+        let triage = generate_triage(&comments, &threads, "test-owner", "test-repo", 42);
 
-        // Unresolved should come first
-        assert!(triage.contains("- [ ] **src/auth.rs:42** (unresolved)"));
-        assert!(triage.contains("- [x] **src/main.rs:10** (resolved)"));
-        // Unresolved first in output
-        let unresolved_pos = triage
-            .find("- [ ] **src/auth.rs:42** (unresolved)")
-            .unwrap();
-        let resolved_pos = triage.find("- [x] **src/main.rs:10** (resolved)").unwrap();
+        // Unresolved section with full body
+        assert!(
+            triage.contains("## Unresolved (1)"),
+            "should have unresolved section"
+        );
+        assert!(
+            triage.contains("### 1. src/auth.rs:42 — @reviewer1"),
+            "should have entry header"
+        );
+        assert!(
+            triage.contains("This needs error handling"),
+            "should have full comment body"
+        );
+        // Pre-built commands
+        assert!(
+            triage.contains("gh api repos/test-owner/test-repo/pulls/42/comments/100/replies"),
+            "should have reply command"
+        );
+        assert!(
+            triage.contains("resolveReviewThread"),
+            "should have resolve command"
+        );
+        assert!(
+            triage.contains("T_001"),
+            "should have thread ID in resolve command"
+        );
+        // Resolved section collapsed
+        assert!(
+            triage.contains("<details>"),
+            "resolved should be in details tag"
+        );
+        assert!(
+            triage.contains("Resolved / Outdated (1)"),
+            "should count resolved/outdated"
+        );
+        assert!(
+            triage.contains("src/main.rs:10"),
+            "resolved entry should be listed"
+        );
+        // Resolved entry should have fenced body, not a plain preview
+        assert!(
+            triage.contains("```text\nTypo in variable name\n```"),
+            "resolved entry should have fenced body, got: {}",
+            triage
+        );
+        // Unresolved before resolved
+        let unresolved_pos = triage.find("## Unresolved").unwrap();
+        let resolved_pos = triage.find("<details>").unwrap();
         assert!(unresolved_pos < resolved_pos);
     }
 
@@ -858,7 +970,7 @@ mod tests {
     fn test_generate_triage_empty() {
         let comments = Value::Array(vec![]);
         let threads = Value::Null;
-        let triage = generate_triage(&comments, &threads);
+        let triage = generate_triage(&comments, &threads, "test-owner", "test-repo", 42);
         assert!(triage.contains("No review comments found."));
     }
 
@@ -874,9 +986,13 @@ mod tests {
             }
         ]);
         let threads = Value::Null;
-        let triage = generate_triage(&comments, &threads);
-        assert!(triage.contains("**src/lib.rs:5**"));
-        assert!(triage.contains("@alice"));
+        let triage = generate_triage(&comments, &threads, "test-owner", "test-repo", 42);
+        assert!(triage.contains("src/lib.rs:5"), "should have file:line");
+        assert!(triage.contains("@alice"), "should have author");
+        assert!(
+            triage.contains("Consider using a constant here"),
+            "should have full body"
+        );
     }
 
     #[test]
@@ -1010,6 +1126,150 @@ mod tests {
             text.contains("c1") && text.contains("c2"),
             "expected c1, c2 in result, got: {}",
             text
+        );
+    }
+
+    #[test]
+    fn test_triage_body_fenced_contains_markdown() {
+        // Regression: comment bodies with markdown headings, fences, or HTML
+        // must be contained so they don't break the triage document structure.
+        let comments = Value::Array(vec![]);
+        let threads = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "T_fence",
+                                    "isResolved": false,
+                                    "isOutdated": false,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "id": "C_fence",
+                                                "databaseId": 300,
+                                                "author": { "login": "bot" },
+                                                "body": "## Heading\n\n```rust\nfn main() {}\n```\n\n<details><summary>More</summary>stuff</details>",
+                                                "path": "src/lib.rs",
+                                                "line": 1,
+                                                "createdAt": "2024-01-01T00:00:00Z"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let triage = generate_triage(&comments, &threads, "owner", "repo", 1);
+
+        // The body should be inside a fence block (````text)
+        assert!(
+            triage.contains("````text\n"),
+            "body should be wrapped in a fence longer than the inner ```"
+        );
+        // The inner ``` should appear inside the fence, not break the document
+        assert!(
+            triage.contains("```rust"),
+            "inner fence should be preserved inside the containing fence"
+        );
+    }
+
+    #[test]
+    fn test_triage_resolved_body_fenced_contains_html() {
+        // Regression: resolved comment bodies with <details> or </details> HTML
+        // must be fenced so they don't corrupt the outer <details> wrapper.
+        let comments = Value::Array(vec![]);
+        let threads = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "T_resolved_html",
+                                    "isResolved": true,
+                                    "isOutdated": false,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "id": "C_resolved_html",
+                                                "databaseId": 400,
+                                                "author": { "login": "bot" },
+                                                "body": "<details><summary>Suggestion</summary>\n\nDo X instead of Y\n\n</details>",
+                                                "path": "src/lib.rs",
+                                                "line": 5,
+                                                "createdAt": "2024-01-01T00:00:00Z"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let triage = generate_triage(&comments, &threads, "owner", "repo", 1);
+
+        // The resolved body must be inside a fence so the inner <details>
+        // doesn't break the outer Resolved/Outdated <details> wrapper.
+        assert!(
+            triage.contains("```text\n<details><summary>Suggestion</summary>"),
+            "resolved body with HTML should be fenced, got: {}",
+            triage
+        );
+        // The outer <details> for the collapsed section should still be intact
+        let details_count = triage.matches("<details>").count();
+        // 1 outer + 1 inner (inside fence, so technically visible as text)
+        assert!(details_count >= 1, "outer <details> should be present");
+    }
+
+    #[test]
+    fn test_summary_outdated_threads_count_as_resolved() {
+        // Regression: outdated threads should not inflate the unresolved count
+        // in summary.md, matching the triage.md filtering.
+        let metadata = serde_json::json!({
+            "title": "Test PR",
+            "state": "OPEN",
+            "additions": 10,
+            "deletions": 5
+        });
+        let reviews = Value::Array(vec![]);
+        let comments = Value::Array(vec![]);
+        let threads = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                { "id": "t1", "isResolved": false, "isOutdated": false },
+                                { "id": "t2", "isResolved": false, "isOutdated": true },
+                                { "id": "t3", "isResolved": true, "isOutdated": false }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let summary = generate_summary(&metadata, &reviews, &comments, &threads);
+
+        // t1 is the only truly unresolved thread; t2 is outdated, t3 is resolved
+        assert!(
+            summary.contains("Resolved threads: 2"),
+            "outdated + resolved should be 2, got: {}",
+            summary
+        );
+        assert!(
+            summary.contains("Unresolved threads: 1"),
+            "only non-outdated unresolved should count, got: {}",
+            summary
         );
     }
 }

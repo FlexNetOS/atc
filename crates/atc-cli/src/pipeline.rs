@@ -740,16 +740,18 @@ impl<'a> DispatchPipeline<'a> {
             return Err(e);
         }
 
-        // "Agent starting" PR comment
+        // "Agent starting" PR comment — actionable context for humans
         if matches!(
             resolved.directive,
             Directive::ReviewFix | Directive::PrComments
         ) {
             if let Some(ref url) = effective_pr_url {
-                let comment = format!(
-                    "\u{1f916} Agent starting: {} on {}",
+                let comment = render_pr_start_comment(
                     resolved.directive.as_str(),
-                    resolved.branch
+                    resolved.task_slug.as_deref(),
+                    &resolved.branch,
+                    &worktree_path.to_string_lossy(),
+                    &handle.session,
                 );
                 post_pr_comment(url, &comment).await;
             }
@@ -912,6 +914,45 @@ fn print_dispatch_confirmation(
     println!("  Log:       {}", log_file.display());
 }
 
+/// Embedded template for PR start comments. Editable without touching Rust code.
+const PR_START_COMMENT_TEMPLATE: &str = include_str!("../defaults/pr-start-comment.md");
+
+/// Render the PR start comment from the embedded template.
+fn render_pr_start_comment(
+    directive: &str,
+    task: Option<&str>,
+    branch: &str,
+    worktree: &str,
+    session: &str,
+) -> String {
+    let mut out = PR_START_COMMENT_TEMPLATE.to_string();
+    out = out.replace("{{directive}}", directive);
+    out = out.replace("{{branch}}", branch);
+    out = out.replace("{{worktree}}", worktree);
+    out = out.replace("{{session}}", session);
+    // Handle conditional {{#if task}} block
+    if let Some(task) = task {
+        out = out.replace("{{#if task}}", "");
+        out = out.replace("{{/if}}", "");
+        out = out.replace("{{task}}", task);
+    } else {
+        // Remove the entire {{#if task}}...{{/if}} block
+        while let Some(start) = out.find("{{#if task}}") {
+            if let Some(rel_end) = out[start..].find("{{/if}}") {
+                let end = start + rel_end;
+                out.replace_range(start..end + "{{/if}}".len(), "");
+            } else {
+                break;
+            }
+        }
+    }
+    // Clean up any double blank lines
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out.trim().to_string()
+}
+
 /// Post a comment on a PR via `gh pr comment`.
 async fn post_pr_comment(pr_url: &str, body: &str) {
     let result = tokio::process::Command::new("gh")
@@ -1052,5 +1093,48 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
                 "failed to spawn worktree remove: {e}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_pr_start_comment_with_task() {
+        let out = render_pr_start_comment(
+            "review-fix",
+            Some("tasks/my-task"),
+            "feat/branch",
+            "/tmp/wt/branch",
+            "sess-123",
+        );
+        assert!(out.contains("review-fix"), "should contain directive");
+        assert!(out.contains("tasks/my-task"), "should contain task");
+        assert!(out.contains("feat/branch"), "should contain branch");
+        assert!(out.contains("sess-123"), "should contain session");
+        assert!(
+            out.contains("atc watch --id sess-123"),
+            "should have watch cmd"
+        );
+        // No leftover template syntax
+        assert!(!out.contains("{{"), "no template tags remaining: {}", out);
+    }
+
+    #[test]
+    fn test_render_pr_start_comment_without_task() {
+        let out = render_pr_start_comment(
+            "pr-comments",
+            None,
+            "feat/branch",
+            "/tmp/wt/branch",
+            "sess-456",
+        );
+        assert!(out.contains("pr-comments"), "should contain directive");
+        assert!(!out.contains("Task:"), "task line should be removed");
+        // No triple blank lines
+        assert!(!out.contains("\n\n\n"), "no triple blank lines");
+        // No leftover template syntax
+        assert!(!out.contains("{{"), "no template tags remaining: {}", out);
     }
 }
