@@ -205,6 +205,26 @@ impl<'a> DispatchPipeline<'a> {
                                 .filter(|s| !s.is_empty())
                         });
                     if let Some(slug) = slug {
+                        // Validate slug (mirrors the non-ephemeral Document path).
+                        let slug_path = std::path::Path::new(slug);
+                        if slug_path.is_absolute()
+                            || slug.contains('\\')
+                            || slug.contains('\0')
+                            || slug_path.components().any(|c| {
+                                matches!(
+                                    c,
+                                    std::path::Component::ParentDir
+                                        | std::path::Component::CurDir
+                                        | std::path::Component::RootDir
+                                        | std::path::Component::Prefix(_)
+                                )
+                            })
+                        {
+                            anyhow::bail!(
+                                "invalid slug for document policy: unsafe path '{}'",
+                                slug
+                            );
+                        }
                         let workspace_root = dispatch_cfg
                             .resolved_meta_workspace_root(self.config.config_dir.as_deref())
                             .ok()
@@ -226,7 +246,11 @@ impl<'a> DispatchPipeline<'a> {
                                 );
                                 doc_ws.cwd
                             }
-                            _ => process_cwd.clone(),
+                            Ok(None) => process_cwd.clone(),
+                            Err(e) => {
+                                warn!(slug, error = %e, "ephemeral document workspace resolution failed, using CWD");
+                                process_cwd.clone()
+                            }
                         }
                     } else {
                         process_cwd.clone()
@@ -317,13 +341,26 @@ impl<'a> DispatchPipeline<'a> {
                     info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
                     vec![r]
                 }
-                Ok(None) | Err(_) => match dispatch_cfg.resolved_repo() {
-                    Some(r) => vec![r.to_string()],
-                    None => meta
-                        .as_ref()
-                        .map(|m| vec![m.repo.clone()])
-                        .unwrap_or_default(),
-                },
+                Ok(None) => {
+                    info!(pr_url = %pr_url, "could not resolve PR repo to local path, using config/discovery fallback");
+                    match dispatch_cfg.resolved_repo() {
+                        Some(r) => vec![r.to_string()],
+                        None => meta
+                            .as_ref()
+                            .map(|m| vec![m.repo.clone()])
+                            .unwrap_or_default(),
+                    }
+                }
+                Err(e) => {
+                    warn!(pr_url = %pr_url, error = %e, "PR repo resolution failed, using config/discovery fallback");
+                    match dispatch_cfg.resolved_repo() {
+                        Some(r) => vec![r.to_string()],
+                        None => meta
+                            .as_ref()
+                            .map(|m| vec![m.repo.clone()])
+                            .unwrap_or_default(),
+                    }
+                }
             }
         } else {
             match dispatch_cfg.resolved_repo() {
