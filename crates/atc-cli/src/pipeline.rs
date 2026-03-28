@@ -257,13 +257,22 @@ impl<'a> DispatchPipeline<'a> {
                     .or_else(|| effective_params.get("slug").map(|s| s.as_str()));
                 match slug {
                     Some(slug) => {
+                        // Validate slug to prevent path traversal (e.g. "../../etc/passwd")
+                        if slug.contains("..") {
+                            anyhow::bail!(
+                                "invalid slug for document policy: contains path traversal (\"..\"): {}",
+                                slug
+                            );
+                        }
                         let worktree_base = dispatch_cfg.resolved_worktree_base();
                         match resolve_document_workspace(
                             slug,
                             kb_root,
                             &worktree_base,
                             &workspace_root,
-                        ) {
+                        )
+                        .await
+                        {
                             Some(doc_ws) => {
                                 // Set GITKB_WORKSPACE for the document's branch
                                 resolved.env_overrides.insert(

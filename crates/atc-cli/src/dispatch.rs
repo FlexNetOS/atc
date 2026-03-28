@@ -443,13 +443,13 @@ pub struct DocumentWorkspace {
 ///
 /// Phase 2: Select the best match using priority rules:
 ///   1. Current branch (if the slug is checked out there)
-///   2. Non-main branch (if exactly one; ambiguity is an error)
+///   2. Non-main branch (if exactly one; ambiguity is warned)
 ///   3. Main workspace (fallback)
 ///
 /// Phase 3: If non-main, find the corresponding code worktree.
 ///
 /// Returns `None` if the document isn't checked out in any workspace.
-pub fn resolve_document_workspace(
+pub async fn resolve_document_workspace(
     slug: &str,
     kb_root: &Path,
     worktree_base: &Path,
@@ -484,9 +484,10 @@ pub fn resolve_document_workspace(
 
     // Phase 2: Select best match.
     // Prefer the current git branch if it's among the matches.
-    let current_branch = std::process::Command::new("git")
+    let current_branch = tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
         .output()
+        .await
         .ok()
         .and_then(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -499,12 +500,13 @@ pub fn resolve_document_workspace(
 
     let selected = if let Some(ref current) = current_branch {
         let sanitized_current = current.replace('/', "--");
-        if matches
+        // Find the actual matched value from the vector (may be the original
+        // or sanitized form depending on workspace directory naming).
+        if let Some(matched) = matches
             .iter()
-            .any(|m| m == current || m == &sanitized_current)
+            .find(|m| *m == current || *m == &sanitized_current)
         {
-            // Current branch takes priority.
-            sanitized_current
+            matched.clone()
         } else {
             select_from_matches(&matches, slug)?
         }
@@ -1096,8 +1098,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_document_workspace_finds_in_main() {
+    #[tokio::test]
+    async fn test_resolve_document_workspace_finds_in_main() {
         let dir = tempfile::tempdir().unwrap();
         let kb_root = dir.path();
         let main_ws = kb_root.join(".kb/workspaces/main/tasks");
@@ -1109,15 +1111,16 @@ mod tests {
             kb_root,
             Path::new("/tmp/worktrees"),
             kb_root,
-        );
+        )
+        .await;
         assert!(result.is_some());
         let ws = result.unwrap();
         assert_eq!(ws.workspace_branch, "main");
         assert_eq!(ws.cwd, kb_root);
     }
 
-    #[test]
-    fn test_resolve_document_workspace_finds_in_worktree_branch() {
+    #[tokio::test]
+    async fn test_resolve_document_workspace_finds_in_worktree_branch() {
         let dir = tempfile::tempdir().unwrap();
         let kb_root = dir.path();
 
@@ -1131,15 +1134,16 @@ mod tests {
         let wt_path = wt_base.join("tasks--harmony-350");
         std::fs::create_dir_all(&wt_path).unwrap();
 
-        let result = resolve_document_workspace("tasks/harmony-350", kb_root, &wt_base, kb_root);
+        let result =
+            resolve_document_workspace("tasks/harmony-350", kb_root, &wt_base, kb_root).await;
         assert!(result.is_some());
         let ws = result.unwrap();
         assert_eq!(ws.workspace_branch, "tasks--harmony-350");
         assert_eq!(ws.cwd, wt_path);
     }
 
-    #[test]
-    fn test_resolve_document_workspace_returns_none_when_not_found() {
+    #[tokio::test]
+    async fn test_resolve_document_workspace_returns_none_when_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let kb_root = dir.path();
 
@@ -1152,8 +1156,34 @@ mod tests {
             kb_root,
             Path::new("/tmp/worktrees"),
             kb_root,
-        );
+        )
+        .await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_document_workspace_ambiguous_warns_and_picks_alphabetically() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+
+        // Create doc in two non-main workspaces (branch-b and branch-a)
+        for branch in &["branch-b", "branch-a"] {
+            let ws = kb_root.join(format!(".kb/workspaces/{}/tasks", branch));
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(ws.join("harmony-999.md"), "---\ntitle: test\n---\n").unwrap();
+        }
+
+        let result = resolve_document_workspace(
+            "tasks/harmony-999",
+            kb_root,
+            Path::new("/tmp/worktrees"),
+            kb_root,
+        )
+        .await;
+        assert!(result.is_some());
+        let ws = result.unwrap();
+        // Should pick first alphabetically
+        assert_eq!(ws.workspace_branch, "branch-a");
     }
 
     #[test]
