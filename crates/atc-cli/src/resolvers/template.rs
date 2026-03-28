@@ -996,6 +996,17 @@ mod tests {
         )
         .unwrap();
 
+        // Serialize CWD + env changes to avoid races with other tests.
+        let _guard = CWD_LOCK.lock().await;
+        let _cwd = RestoreCwd(std::env::current_dir().unwrap());
+
+        // Clear GIT_DIR/GIT_WORK_TREE so git subprocesses (both setup and
+        // resolve) discover the temp repo via CWD, not the hook's context.
+        let saved_git_dir = std::env::var("GIT_DIR").ok();
+        let saved_git_work_tree = std::env::var("GIT_WORK_TREE").ok();
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+
         // Set up a temp git repo with a named branch so `git branch --show-current`
         // returns a deterministic value regardless of the CI checkout state.
         let repo_dir = tempfile::tempdir().unwrap();
@@ -1019,15 +1030,6 @@ mod tests {
         let opts = test_opts("branch-review", std::collections::HashMap::new());
         let resolver = TemplateResolver;
 
-        // Serialize CWD changes to avoid races with other tests.
-        let _guard = CWD_LOCK.lock().await;
-        let _cwd = RestoreCwd(std::env::current_dir().unwrap());
-        // Clear GIT_DIR/GIT_WORK_TREE so the subprocess discovers the temp repo
-        // via CWD rather than inheriting the hook's repo context.
-        let saved_git_dir = std::env::var("GIT_DIR").ok();
-        let saved_git_work_tree = std::env::var("GIT_WORK_TREE").ok();
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
         std::env::set_current_dir(repo_dir.path()).unwrap();
         let result = resolver.resolve("branch-review", &opts, &config).await;
         // Restore git env vars
