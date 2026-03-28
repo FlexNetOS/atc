@@ -503,6 +503,7 @@ impl InputResolver for TaskResolver {
             is_template: false,
             template_body: None,
             max_turns: None,
+            worktree_policy: None,
         })
     }
 

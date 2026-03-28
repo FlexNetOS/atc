@@ -1,5 +1,6 @@
 ---
 directive: implement
+worktree: document
 required_params: [slug, directive]
 ---
 Edit the GitKB document at {{slug}}.

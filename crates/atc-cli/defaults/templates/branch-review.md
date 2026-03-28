@@ -1,6 +1,7 @@
 ---
 description: Local review flywheel — iterate until confident
 directive: review-fix
+worktree: current
 ---
 
 # Branch Review

@@ -1,6 +1,7 @@
 ---
 description: Deep SWOT analysis of a competitor vs GitKB
 directive: research
+worktree: none
 required_params: [competitor, name]
 ---
 

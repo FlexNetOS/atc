@@ -1,6 +1,7 @@
 ---
 description: Validate build and push branch to remote
 directive: implement
+worktree: current
 ---
 
 # Push Branch

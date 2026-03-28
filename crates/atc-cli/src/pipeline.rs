@@ -3,7 +3,9 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::{AgentExecutor, AgentOpts};
 use atc_core::registry::Registry;
 use atc_core::resolver::InputResolver;
-use atc_core::types::{Directive, DispatchOutcome, DispatchRecord, HealthChecks, RunOpts, Status};
+use atc_core::types::{
+    Directive, DispatchOutcome, DispatchRecord, HealthChecks, RunOpts, Status, WorktreePolicy,
+};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -11,9 +13,9 @@ use tracing::{info, warn};
 use atc_core::types::{WorkUnit, WorkUnitStatus};
 
 use crate::dispatch::{
-    compute_allowed_paths, derive_pr_url_from_comment, ensure_worktree, parse_comment_url,
-    resolve_gh_token, resolve_pr_repo_path, tmux_session_alive, validate_branch_name,
-    write_diag_file, WorktreeOpts,
+    auto_checkout_to_main, compute_allowed_paths, derive_pr_url_from_comment, ensure_worktree,
+    parse_comment_url, resolve_document_workspace, resolve_gh_token, resolve_pr_repo_path,
+    tmux_session_alive, validate_branch_name, write_diag_file, WorktreeOpts,
 };
 
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
@@ -216,7 +218,7 @@ impl<'a> DispatchPipeline<'a> {
             });
         }
 
-        // 5. Ensure worktree (skip if --no-worktree)
+        // 5. Ensure worktree — policy-aware routing
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let meta = crate::dispatch::discover_meta(&cwd).await;
 
@@ -229,88 +231,146 @@ impl<'a> DispatchPipeline<'a> {
         // falling back to workspace_root for resolvers that don't set it.
         let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
 
-        let (worktree_path, wt_created, wt_is_meta, repos_for_context) = if opts.no_worktree {
-            // Run in current directory, no worktree creation
-            (cwd.clone(), false, false, Vec::<String>::new())
+        // Determine effective worktree policy:
+        // --no-worktree CLI flag forces Current policy regardless of template.
+        let worktree_policy = if opts.no_worktree {
+            WorktreePolicy::Current
         } else {
-            // Repo resolution priority:
-            // 1. CLI --repo flag(s) (explicit override, highest priority)
-            // 2. DISPATCH_WORKTREE_REPO env var (dispatch.sh compat)
-            // 3. PR URL → resolve_pr_repo_path() (auto-resolved)
-            // 4. Config dispatch.repo
-            // 5. Meta discovery fallback
-            let repos: Vec<String> = if !opts.repos.is_empty() {
-                opts.repos.clone()
-            } else if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
-                let env_repo = env_repo.trim().to_string();
-                if env_repo.is_empty() {
-                    // Fall through to PR URL resolution below
-                    Vec::new()
-                } else {
-                    info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
-                    vec![env_repo]
-                }
-            } else {
-                Vec::new()
-            };
-            let repos: Vec<String> = if !repos.is_empty() {
-                repos
-            } else if let Some(ref pr_url) = effective_pr_url {
-                match resolve_pr_repo_path(pr_url, &workspace_root).await {
-                    Ok(Some(r)) => {
-                        info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
-                        vec![r]
-                    }
-                    Ok(None) => {
-                        info!(pr_url = %pr_url, "could not resolve PR repo to local path, using config/discovery fallback");
-                        match dispatch_cfg.resolved_repo() {
-                            Some(r) => vec![r.to_string()],
-                            None => meta
-                                .as_ref()
-                                .map(|m| vec![m.repo.clone()])
-                                .unwrap_or_default(),
-                        }
-                    }
-                    Err(e) => {
-                        warn!(pr_url = %pr_url, error = %e, "PR repo resolution failed, using config/discovery fallback");
-                        match dispatch_cfg.resolved_repo() {
-                            Some(r) => vec![r.to_string()],
-                            None => meta
-                                .as_ref()
-                                .map(|m| vec![m.repo.clone()])
-                                .unwrap_or_default(),
-                        }
-                    }
-                }
-            } else {
-                match dispatch_cfg.resolved_repo() {
-                    Some(r) => vec![r.to_string()],
-                    None => meta
-                        .as_ref()
-                        .map(|m| vec![m.repo.clone()])
-                        .unwrap_or_default(),
-                }
-            };
+            resolved.worktree_policy.unwrap_or(WorktreePolicy::Branch)
+        };
 
-            let worktree_base = dispatch_cfg.resolved_worktree_base();
-            let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
-            let wt_opts = WorktreeOpts {
-                worktree_base: &worktree_base,
-                repos: repo_refs,
-                branch: &resolved.branch,
-                meta_workspace_root: &workspace_root,
-                kb_root,
-                force: opts.force,
-            };
-            let wt_result = match ensure_worktree(&wt_opts, self.registry).await {
-                Ok(r) => r,
-                Err(e) => {
-                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                    resolver.on_cleanup(&tmp_record, self.config, None).await;
-                    return Err(e);
+        let (worktree_path, wt_created, wt_is_meta, repos_for_context) = match worktree_policy {
+            WorktreePolicy::Current => {
+                // Run in CWD. No worktree creation, no document resolution.
+                (cwd.clone(), false, false, Vec::<String>::new())
+            }
+            WorktreePolicy::None => {
+                // Run in canonical repo root. No worktree creation.
+                (workspace_root.clone(), false, false, Vec::<String>::new())
+            }
+            WorktreePolicy::Document => {
+                // Resolve CWD from document location.
+                let slug = resolved
+                    .task_slug
+                    .as_deref()
+                    .or_else(|| effective_params.get("task").map(|s| s.as_str()))
+                    .or_else(|| effective_params.get("slug").map(|s| s.as_str()));
+                match slug {
+                    Some(slug) => {
+                        let worktree_base = dispatch_cfg.resolved_worktree_base();
+                        match resolve_document_workspace(
+                            slug,
+                            kb_root,
+                            &worktree_base,
+                            &workspace_root,
+                        ) {
+                            Some(doc_ws) => {
+                                // Set GITKB_WORKSPACE for the document's branch
+                                resolved.env_overrides.insert(
+                                    "GITKB_WORKSPACE".to_string(),
+                                    doc_ws.workspace_branch.clone(),
+                                );
+                                info!(
+                                    slug,
+                                    cwd = %doc_ws.cwd.display(),
+                                    workspace_branch = %doc_ws.workspace_branch,
+                                    "document policy: resolved workspace"
+                                );
+                                (doc_ws.cwd, false, false, Vec::new())
+                            }
+                            None => {
+                                // Auto-checkout to main, use workspace_root
+                                if let Err(e) = auto_checkout_to_main(slug, kb_root).await {
+                                    warn!(slug, error = %e, "auto-checkout failed (non-fatal)");
+                                }
+                                resolved
+                                    .env_overrides
+                                    .insert("GITKB_WORKSPACE".to_string(), "main".to_string());
+                                (workspace_root.clone(), false, false, Vec::new())
+                            }
+                        }
+                    }
+                    None => {
+                        // No slug found in params — fall back to CWD
+                        warn!("worktree: document but no slug found in params, using CWD");
+                        (cwd.clone(), false, false, Vec::new())
+                    }
                 }
-            };
-            (wt_result.path, wt_result.created, wt_result.is_meta, repos)
+            }
+            WorktreePolicy::Branch => {
+                // Current behavior: create/reuse worktree by branch name.
+                let repos: Vec<String> = if !opts.repos.is_empty() {
+                    opts.repos.clone()
+                } else if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
+                    let env_repo = env_repo.trim().to_string();
+                    if env_repo.is_empty() {
+                        Vec::new()
+                    } else {
+                        info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
+                        vec![env_repo]
+                    }
+                } else {
+                    Vec::new()
+                };
+                let repos: Vec<String> = if !repos.is_empty() {
+                    repos
+                } else if let Some(ref pr_url) = effective_pr_url {
+                    match resolve_pr_repo_path(pr_url, &workspace_root).await {
+                        Ok(Some(r)) => {
+                            info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
+                            vec![r]
+                        }
+                        Ok(None) => {
+                            info!(pr_url = %pr_url, "could not resolve PR repo to local path, using config/discovery fallback");
+                            match dispatch_cfg.resolved_repo() {
+                                Some(r) => vec![r.to_string()],
+                                None => meta
+                                    .as_ref()
+                                    .map(|m| vec![m.repo.clone()])
+                                    .unwrap_or_default(),
+                            }
+                        }
+                        Err(e) => {
+                            warn!(pr_url = %pr_url, error = %e, "PR repo resolution failed, using config/discovery fallback");
+                            match dispatch_cfg.resolved_repo() {
+                                Some(r) => vec![r.to_string()],
+                                None => meta
+                                    .as_ref()
+                                    .map(|m| vec![m.repo.clone()])
+                                    .unwrap_or_default(),
+                            }
+                        }
+                    }
+                } else {
+                    match dispatch_cfg.resolved_repo() {
+                        Some(r) => vec![r.to_string()],
+                        None => meta
+                            .as_ref()
+                            .map(|m| vec![m.repo.clone()])
+                            .unwrap_or_default(),
+                    }
+                };
+
+                let worktree_base = dispatch_cfg.resolved_worktree_base();
+                let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
+                let wt_opts = WorktreeOpts {
+                    worktree_base: &worktree_base,
+                    repos: repo_refs,
+                    branch: &resolved.branch,
+                    meta_workspace_root: &workspace_root,
+                    kb_root,
+                    force: opts.force,
+                };
+                let wt_result = match ensure_worktree(&wt_opts, self.registry).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                        resolver.on_cleanup(&tmp_record, self.config, None).await;
+                        return Err(e);
+                    }
+                };
+                (wt_result.path, wt_result.created, wt_result.is_meta, repos)
+            }
         };
 
         // 5b. Load per-project .dispatch/env (after worktree exists, before env setup)
@@ -615,6 +675,34 @@ impl<'a> DispatchPipeline<'a> {
             kb_root.to_string_lossy().into_owned(),
         );
 
+        // GITKB_WORKSPACE per policy (document policy sets it above in the routing match).
+        match worktree_policy {
+            WorktreePolicy::None => {
+                env.insert("GITKB_WORKSPACE".to_string(), "main".to_string());
+            }
+            WorktreePolicy::Current => {
+                // Use current branch name as workspace
+                if let Ok(output) = tokio::process::Command::new("git")
+                    .args(["branch", "--show-current"])
+                    .output()
+                    .await
+                {
+                    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !branch.is_empty() {
+                        env.insert(
+                            "GITKB_WORKSPACE".to_string(),
+                            crate::dispatch::sanitize_slashes(&branch),
+                        );
+                    }
+                }
+            }
+            _ => {
+                // Branch policy: GITKB_WORKSPACE is set by the task resolver or
+                // derived from the worktree branch name.
+                // Document policy: already set in the routing match above.
+            }
+        }
+
         // CLAUDECODE: always clear to prevent recursive agent-spawning.
         env.insert("CLAUDECODE".to_string(), String::new());
 
@@ -866,6 +954,13 @@ impl<'a> DispatchPipeline<'a> {
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
+        println!(
+            "Worktree:    {}",
+            resolved
+                .worktree_policy
+                .map(|p| p.as_str())
+                .unwrap_or("branch (default)")
+        );
         if ephemeral {
             println!("Providers:   (skipped — ephemeral)");
             println!("System:      (skipped — ephemeral)");

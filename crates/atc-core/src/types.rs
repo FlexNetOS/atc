@@ -169,6 +169,58 @@ impl std::fmt::Display for Directive {
     }
 }
 
+/// Worktree routing policy for template-based dispatches.
+///
+/// Controls how the pipeline resolves the agent's working directory:
+/// - `Branch`: create/reuse a worktree by branch name (default, current behavior)
+/// - `Document`: resolve CWD from where the target document is checked out
+/// - `None`: run in canonical repo root, no worktree creation
+/// - `Current`: run in the current working directory as-is
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorktreePolicy {
+    Branch,
+    Document,
+    None,
+    Current,
+}
+
+impl WorktreePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorktreePolicy::Branch => "branch",
+            WorktreePolicy::Document => "document",
+            WorktreePolicy::None => "none",
+            WorktreePolicy::Current => "current",
+        }
+    }
+}
+
+impl std::str::FromStr for WorktreePolicy {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "branch" => Ok(WorktreePolicy::Branch),
+            "document" => Ok(WorktreePolicy::Document),
+            "none" => Ok(WorktreePolicy::None),
+            "current" => Ok(WorktreePolicy::Current),
+            other => Err(anyhow::anyhow!("unknown worktree policy: {}", other)),
+        }
+    }
+}
+
+impl std::fmt::Display for WorktreePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Default for WorktreePolicy {
+    fn default() -> Self {
+        WorktreePolicy::Branch
+    }
+}
+
 /// A work unit groups all dispatches, PRs, and branches for a piece of work.
 /// It's the backing data for the desktop/web task lifecycle strip and session history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -300,5 +352,45 @@ mod tests {
         };
         assert!(!opts.ephemeral, "ephemeral should default to false");
         assert_eq!(opts.timeout, None, "timeout should default to None");
+    }
+
+    #[test]
+    fn test_worktree_policy_from_str() {
+        assert_eq!(
+            "branch".parse::<WorktreePolicy>().unwrap(),
+            WorktreePolicy::Branch
+        );
+        assert_eq!(
+            "document".parse::<WorktreePolicy>().unwrap(),
+            WorktreePolicy::Document
+        );
+        assert_eq!(
+            "none".parse::<WorktreePolicy>().unwrap(),
+            WorktreePolicy::None
+        );
+        assert_eq!(
+            "current".parse::<WorktreePolicy>().unwrap(),
+            WorktreePolicy::Current
+        );
+        assert!("invalid".parse::<WorktreePolicy>().is_err());
+    }
+
+    #[test]
+    fn test_worktree_policy_display_roundtrip() {
+        for policy in [
+            WorktreePolicy::Branch,
+            WorktreePolicy::Document,
+            WorktreePolicy::None,
+            WorktreePolicy::Current,
+        ] {
+            let s = policy.to_string();
+            let parsed: WorktreePolicy = s.parse().unwrap();
+            assert_eq!(parsed, policy, "roundtrip failed for {:?}", policy);
+        }
+    }
+
+    #[test]
+    fn test_worktree_policy_default() {
+        assert_eq!(WorktreePolicy::default(), WorktreePolicy::Branch);
     }
 }

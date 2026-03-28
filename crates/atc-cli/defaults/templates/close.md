@@ -1,6 +1,7 @@
 ---
 description: Verify and close a completed task with evidence
 directive: close
+worktree: document
 required_params: [task]
 ---
 

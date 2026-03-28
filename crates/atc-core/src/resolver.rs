@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::config::AtcConfig;
 use crate::registry::Registry;
-use crate::types::{Directive, DispatchRecord, RunOpts};
+use crate::types::{Directive, DispatchRecord, RunOpts, WorktreePolicy};
 
 /// Result of resolving an input string into dispatch parameters.
 #[derive(Debug, Clone)]
@@ -31,6 +31,8 @@ pub struct ResolvedInput {
     pub template_body: Option<String>,
     /// Max turns override from template frontmatter.
     pub max_turns: Option<u32>,
+    /// Worktree routing policy from template frontmatter.
+    pub worktree_policy: Option<WorktreePolicy>,
 }
 
 /// Trait defining how an input string is resolved into dispatch parameters.

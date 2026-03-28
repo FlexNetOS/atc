@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use atc_core::config::AtcConfig;
 use atc_core::prompt_engine;
 use atc_core::resolver::{InputResolver, ResolvedInput};
-use atc_core::types::{Directive, DispatchRecord, RunOpts};
+use atc_core::types::{Directive, DispatchRecord, RunOpts, WorktreePolicy};
 
 use crate::dispatch::build_dispatch_id;
 
@@ -33,6 +33,48 @@ fn is_ref_safe(s: &str) -> bool {
                 && c != '*'
                 && c != '['
                 && c != '\\'
+        })
+}
+
+/// Get the current git branch, returning None if on main/master or detached HEAD.
+async fn get_current_branch() -> Option<String> {
+    tokio::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !b.is_empty() && b != "main" && b != "master" {
+                    Some(b)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+}
+
+/// Get the current git branch including main/master. Returns None only for detached HEAD.
+async fn get_current_branch_any() -> Option<String> {
+    tokio::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !b.is_empty() {
+                    Some(b)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         })
 }
 
@@ -191,72 +233,104 @@ impl InputResolver for TemplateResolver {
             Directive::Implement
         };
 
-        info!(template = input, directive = %resolved_directive.as_str(), "template resolved");
+        // Resolve worktree policy from frontmatter (default: Branch for backward compat)
+        let worktree_policy = output.worktree_policy.unwrap_or(WorktreePolicy::Branch);
 
-        // Branch resolution priority:
-        // 1. PR URL (--pr-url or --param pr=<url>) → use PR's actual head branch
-        // 2. Explicit `branch` param
-        // 3. Current git branch (if not main/master)
-        // 4. Synthetic fallback: tpl--<name>-<ts>-<pid>-<seq>
-        let pr_for_branch = opts
-            .pr_url
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                params
-                    .get("pr")
-                    .map(String::as_str)
-                    .filter(|s| !s.is_empty())
-            });
+        info!(
+            template = input,
+            directive = %resolved_directive.as_str(),
+            worktree = worktree_policy.as_str(),
+            "template resolved"
+        );
 
-        let branch = if let Some(pr_url) = pr_for_branch {
-            // Extract head branch from PR (calls `gh pr view`)
-            match crate::dispatch::extract_pr_head_branch(pr_url).await {
-                Ok(b) => {
-                    info!(pr_url, branch = %b, "using PR head branch");
-                    b
-                }
-                Err(e) => {
-                    debug!(pr_url, error = %e, "failed to extract PR head branch, falling back to synthetic");
-                    let ts = chrono::Utc::now().timestamp_millis();
-                    let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
-                    let pid = std::process::id();
-                    format!("tpl--{}-{}-{}-{}", input, ts, pid, seq)
+        // Branch resolution is conditioned on worktree policy:
+        //
+        // | Policy   | Resolver branch behavior                                        |
+        // |----------|-----------------------------------------------------------------|
+        // | branch   | PR head → param → current branch → synthetic fallback           |
+        // | document | Current branch (or stable slug-based); pipeline may override     |
+        // | none     | Stable `none--<template>` branch (for dispatch ID only)          |
+        // | current  | Current git branch; never fall back to synthetic                 |
+        let branch = match worktree_policy {
+            WorktreePolicy::None => {
+                // Stable branch name for dispatch ID generation; no worktree created.
+                format!("none--{}", input)
+            }
+            WorktreePolicy::Current => {
+                // Use current git branch, never fall back to synthetic.
+                let current = get_current_branch().await;
+                match current {
+                    Some(b) => {
+                        info!(branch = %b, "using current git branch for current-policy dispatch");
+                        b
+                    }
+                    None => {
+                        // On main/master or detached HEAD — still use it as-is.
+                        get_current_branch_any()
+                            .await
+                            .unwrap_or_else(|| "main".to_string())
+                    }
                 }
             }
-        } else if let Some(b) = params.get("branch").filter(|s| !s.is_empty()) {
-            b.clone()
-        } else {
-            // Check current git branch
-            let current_branch = tokio::process::Command::new("git")
-                .args(["branch", "--show-current"])
-                .output()
-                .await
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if !b.is_empty() && b != "main" && b != "master" {
-                            Some(b)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
+            WorktreePolicy::Document => {
+                // Use current branch if available (non-main); otherwise stable slug-based.
+                let current = get_current_branch().await;
+                match current {
+                    Some(b) => b,
+                    None => {
+                        // Fall back to a stable slug-based branch from task/slug param
+                        let slug = params
+                            .get("task")
+                            .or_else(|| params.get("slug"))
+                            .cloned()
+                            .unwrap_or_else(|| input.to_string());
+                        format!("doc--{}", crate::dispatch::sanitize_slashes(&slug))
                     }
-                });
-
-            match current_branch {
-                Some(b) => {
-                    info!(branch = %b, "using current git branch for template dispatch");
-                    b
                 }
-                None => {
-                    // Synthetic fallback
-                    let ts = chrono::Utc::now().timestamp_millis();
-                    let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
-                    let pid = std::process::id();
-                    format!("tpl--{}-{}-{}-{}", input, ts, pid, seq)
+            }
+            WorktreePolicy::Branch => {
+                // Current behavior: PR head → param → current branch → synthetic fallback
+                let pr_for_branch =
+                    opts.pr_url
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            params
+                                .get("pr")
+                                .map(String::as_str)
+                                .filter(|s| !s.is_empty())
+                        });
+
+                if let Some(pr_url) = pr_for_branch {
+                    match crate::dispatch::extract_pr_head_branch(pr_url).await {
+                        Ok(b) => {
+                            info!(pr_url, branch = %b, "using PR head branch");
+                            b
+                        }
+                        Err(e) => {
+                            debug!(pr_url, error = %e, "failed to extract PR head branch, falling back to synthetic");
+                            let ts = chrono::Utc::now().timestamp_millis();
+                            let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
+                            let pid = std::process::id();
+                            format!("tpl--{}-{}-{}-{}", input, ts, pid, seq)
+                        }
+                    }
+                } else if let Some(b) = params.get("branch").filter(|s| !s.is_empty()) {
+                    b.clone()
+                } else {
+                    let current = get_current_branch().await;
+                    match current {
+                        Some(b) => {
+                            info!(branch = %b, "using current git branch for template dispatch");
+                            b
+                        }
+                        None => {
+                            let ts = chrono::Utc::now().timestamp_millis();
+                            let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
+                            let pid = std::process::id();
+                            format!("tpl--{}-{}-{}-{}", input, ts, pid, seq)
+                        }
+                    }
                 }
             }
         };
@@ -273,6 +347,7 @@ impl InputResolver for TemplateResolver {
             is_template: true,
             template_body: Some(output.body),
             max_turns: output.max_turns,
+            worktree_policy: Some(worktree_policy),
         })
     }
 
@@ -880,6 +955,141 @@ mod tests {
             err.contains("unknown directive"),
             "expected unknown directive error, got: {}",
             err
+        );
+    }
+
+    /// Test `worktree: none` suppresses synthetic branch (uses stable `none--<name>`).
+    #[tokio::test]
+    async fn test_resolve_worktree_none_stable_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/swot.md"),
+            "---\ndirective: research\nworktree: none\nrequired_params: [competitor, name]\n---\nSWOT for {{competitor}}.",
+        )
+        .unwrap();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("competitor".to_string(), "Acme".to_string());
+        params.insert("name".to_string(), "Test".to_string());
+        let opts = test_opts("swot", params);
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("swot", &opts, &config).await.unwrap();
+
+        assert_eq!(result.directive, Directive::Research);
+        assert_eq!(result.worktree_policy, Some(WorktreePolicy::None));
+        assert_eq!(result.branch, "none--swot");
+        assert!(
+            !result.branch.starts_with("tpl--"),
+            "none policy should not produce synthetic branch, got: {}",
+            result.branch
+        );
+    }
+
+    /// Test `worktree: current` uses current git branch (doesn't create synthetic).
+    #[tokio::test]
+    async fn test_resolve_worktree_current_uses_git_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/branch-review.md"),
+            "---\ndirective: review-fix\nworktree: current\n---\nReview.",
+        )
+        .unwrap();
+
+        let opts = test_opts("branch-review", std::collections::HashMap::new());
+        let resolver = TemplateResolver;
+        let result = resolver
+            .resolve("branch-review", &opts, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(result.directive, Directive::ReviewFix);
+        assert_eq!(result.worktree_policy, Some(WorktreePolicy::Current));
+        // Should not be a synthetic branch (no tpl-- prefix)
+        assert!(
+            !result.branch.starts_with("tpl--"),
+            "current policy should not produce synthetic branch, got: {}",
+            result.branch
+        );
+    }
+
+    /// Test `worktree: document` uses current branch or slug-based fallback.
+    #[tokio::test]
+    async fn test_resolve_worktree_document_slug_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/close.md"),
+            "---\ndirective: close\nworktree: document\nrequired_params: [task]\n---\nClose {{task}}.",
+        )
+        .unwrap();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("task".to_string(), "tasks/harmony-350".to_string());
+        let opts = test_opts("close", params);
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("close", &opts, &config).await.unwrap();
+
+        assert_eq!(result.directive, Directive::Close);
+        assert_eq!(result.worktree_policy, Some(WorktreePolicy::Document));
+        // On main/master, should fall back to slug-based branch
+        // (or use current branch if we happen to be on one)
+        assert!(
+            !result.branch.starts_with("tpl--"),
+            "document policy should not produce synthetic branch, got: {}",
+            result.branch
+        );
+    }
+
+    /// Test `worktree: branch` preserves current behavior (explicit in frontmatter).
+    #[tokio::test]
+    async fn test_resolve_worktree_branch_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/pr-review.md"),
+            "---\ndirective: review-fix\nworktree: branch\nrequired_params: [pr]\n---\nReview {{pr}}\n\n{{prefetch}}",
+        )
+        .unwrap();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "pr".to_string(),
+            "https://github.com/org/repo/pull/42".to_string(),
+        );
+        let opts = test_opts("pr-review", params);
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("pr-review", &opts, &config).await.unwrap();
+
+        assert_eq!(result.directive, Directive::ReviewFix);
+        assert_eq!(result.worktree_policy, Some(WorktreePolicy::Branch));
+    }
+
+    /// Test absent `worktree:` defaults to Branch.
+    #[tokio::test]
+    async fn test_resolve_worktree_absent_defaults_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        std::fs::write(
+            dir.path().join("templates/simple.md"),
+            "---\ndirective: implement\n---\nBody.",
+        )
+        .unwrap();
+
+        let opts = test_opts("simple", std::collections::HashMap::new());
+        let resolver = TemplateResolver;
+        let result = resolver.resolve("simple", &opts, &config).await.unwrap();
+
+        assert_eq!(
+            result.worktree_policy,
+            Some(WorktreePolicy::Branch),
+            "absent worktree: should default to Branch"
         );
     }
 }
