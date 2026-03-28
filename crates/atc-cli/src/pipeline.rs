@@ -740,16 +740,18 @@ impl<'a> DispatchPipeline<'a> {
             return Err(e);
         }
 
-        // "Agent starting" PR comment
+        // "Agent starting" PR comment — actionable context for humans
         if matches!(
             resolved.directive,
             Directive::ReviewFix | Directive::PrComments
         ) {
             if let Some(ref url) = effective_pr_url {
-                let comment = format!(
-                    "\u{1f916} Agent starting: {} on {}",
+                let comment = render_pr_start_comment(
                     resolved.directive.as_str(),
-                    resolved.branch
+                    resolved.task_slug.as_deref(),
+                    &resolved.branch,
+                    &worktree_path.to_string_lossy(),
+                    &handle.session,
                 );
                 post_pr_comment(url, &comment).await;
             }
@@ -910,6 +912,44 @@ fn print_dispatch_confirmation(
     println!("  Worktree:  {}", worktree_path.display());
     println!("  Session:   {}", session);
     println!("  Log:       {}", log_file.display());
+}
+
+/// Embedded template for PR start comments. Editable without touching Rust code.
+const PR_START_COMMENT_TEMPLATE: &str = include_str!("../defaults/pr-start-comment.md");
+
+/// Render the PR start comment from the embedded template.
+fn render_pr_start_comment(
+    directive: &str,
+    task: Option<&str>,
+    branch: &str,
+    worktree: &str,
+    session: &str,
+) -> String {
+    let mut out = PR_START_COMMENT_TEMPLATE.to_string();
+    out = out.replace("{{directive}}", directive);
+    out = out.replace("{{branch}}", branch);
+    out = out.replace("{{worktree}}", worktree);
+    out = out.replace("{{session}}", session);
+    // Handle conditional {{#if task}} block
+    if let Some(task) = task {
+        out = out.replace("{{#if task}}", "");
+        out = out.replace("{{/if}}", "");
+        out = out.replace("{{task}}", task);
+    } else {
+        // Remove the entire {{#if task}}...{{/if}} block
+        while let Some(start) = out.find("{{#if task}}") {
+            if let Some(end) = out.find("{{/if}}") {
+                out.replace_range(start..end + "{{/if}}".len(), "");
+            } else {
+                break;
+            }
+        }
+    }
+    // Clean up any double blank lines
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out.trim().to_string()
 }
 
 /// Post a comment on a PR via `gh pr comment`.
