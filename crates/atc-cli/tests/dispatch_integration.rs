@@ -20,9 +20,9 @@ impl AgentExecutor for StubExecutor {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         if let Some(ref log_file) = opts.log_file {
             if let Some(parent) = log_file.parent() {
-                std::fs::create_dir_all(parent).ok();
+                std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(log_file, b"").ok();
+            std::fs::write(log_file, b"")?;
         }
 
         Ok(AgentHandle {
@@ -52,9 +52,9 @@ impl AgentExecutor for RecordingExecutor {
 
         if let Some(ref log_file) = opts.log_file {
             if let Some(parent) = log_file.parent() {
-                std::fs::create_dir_all(parent).ok();
+                std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(log_file, b"").ok();
+            std::fs::write(log_file, b"")?;
         }
 
         Ok(AgentHandle {

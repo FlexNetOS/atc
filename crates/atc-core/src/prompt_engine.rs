@@ -353,6 +353,7 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
             let val = v
                 .as_u64()
                 .with_context(|| "max_turns must be a positive integer")?;
+            anyhow::ensure!(val > 0, "max_turns must be >= 1, got 0");
             let val_u32 = u32::try_from(val)
                 .with_context(|| format!("max_turns value {} exceeds u32::MAX", val))?;
             Some(val_u32)

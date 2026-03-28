@@ -278,6 +278,15 @@ impl ClaudeExecutor {
             .as_deref()
             .unwrap_or("No prompt provided.");
 
+        // Optionally write sandbox settings (same as non-ephemeral path)
+        let sandbox_file = if !opts.sandbox {
+            let f = tempfile::NamedTempFile::new()?;
+            Self::write_sandbox_settings(f.path()).await?;
+            Some(f)
+        } else {
+            None
+        };
+
         let mut cmd = Command::new(&self.claude_bin);
         cmd.arg("-p")
             .arg(user_prompt)
@@ -288,6 +297,10 @@ impl ClaudeExecutor {
             .arg(opts.max_turns.to_string())
             .arg("--max-budget-usd")
             .arg(opts.max_budget_usd.to_string());
+
+        if let Some(ref sf) = sandbox_file {
+            cmd.arg("--settings").arg(sf.path());
+        }
 
         // No --append-system-prompt-file, no --verbose
 

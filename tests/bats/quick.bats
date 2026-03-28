@@ -55,7 +55,7 @@ EOF
 @test "atc quick --list shows commit-message and doc-edit" {
     setup_atc_dir
     cd "$TEST_TMPDIR"
-    run atc quick --list dummy
+    run atc quick --list
     assert_success
     assert_output --partial "commit-message"
     assert_output --partial "doc-edit"
