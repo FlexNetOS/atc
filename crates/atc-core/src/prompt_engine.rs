@@ -15,6 +15,8 @@ pub struct TemplateOutput {
     pub directive: Option<String>,
     /// Required parameter names from frontmatter `required_params:` field.
     pub required_params: Option<Vec<String>>,
+    /// Max turns override from frontmatter `max_turns:` field.
+    pub max_turns: Option<u32>,
 }
 
 /// Assemble a system prompt from component `.md` files listed in the directive config.
@@ -171,6 +173,7 @@ pub async fn render_template_with_deferred(
         directives: frontmatter.directives,
         directive: frontmatter.directive,
         required_params: frontmatter.required_params,
+        max_turns: frontmatter.max_turns,
     })
 }
 
@@ -268,6 +271,8 @@ struct Frontmatter {
     directive: Option<String>,
     /// Required parameter names from `required_params:` frontmatter field.
     required_params: Option<Vec<String>>,
+    /// Max turns override from `max_turns:` frontmatter field.
+    max_turns: Option<u32>,
 }
 
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
@@ -343,12 +348,18 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
                 .collect()
         });
 
+    let max_turns = yaml
+        .get("max_turns")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+
     Ok((
         Frontmatter {
             description,
             directives,
             directive,
             required_params,
+            max_turns,
         },
         body,
     ))
@@ -359,6 +370,7 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, &str)> {
 pub struct TemplateFrontmatter {
     pub directive: Option<String>,
     pub required_params: Option<Vec<String>>,
+    pub max_turns: Option<u32>,
 }
 
 /// Parse only the frontmatter of a raw template string, without rendering.
@@ -368,6 +380,7 @@ pub fn parse_template_frontmatter(raw: &str) -> Result<TemplateFrontmatter> {
     Ok(TemplateFrontmatter {
         directive: fm.directive,
         required_params: fm.required_params,
+        max_turns: fm.max_turns,
     })
 }
 
@@ -1645,5 +1658,36 @@ Working on PR: {{pr}}
             "should not contain deferred placeholder when user supplies value, got: {}",
             output.body
         );
+    }
+
+    #[test]
+    fn test_max_turns_parsed_from_frontmatter() {
+        let raw = "---\nmax_turns: 1\nrequired_params: [slug]\n---\nBody content.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.max_turns, Some(1));
+        assert_eq!(body, "Body content.");
+    }
+
+    #[test]
+    fn test_max_turns_none_when_absent() {
+        let raw = "---\ndirective: implement\n---\nBody content.";
+        let (fm, body) = split_frontmatter(raw).unwrap();
+        assert_eq!(fm.max_turns, None);
+        assert_eq!(body, "Body content.");
+    }
+
+    #[test]
+    fn test_parse_template_frontmatter_max_turns() {
+        let raw = "---\nmax_turns: 5\nrequired_params: [x]\n---\nBody.";
+        let tfm = parse_template_frontmatter(raw).unwrap();
+        assert_eq!(tfm.max_turns, Some(5));
+        assert_eq!(tfm.required_params, Some(vec!["x".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_template_frontmatter_no_max_turns() {
+        let raw = "---\ndirective: research\n---\nBody.";
+        let tfm = parse_template_frontmatter(raw).unwrap();
+        assert_eq!(tfm.max_turns, None);
     }
 }

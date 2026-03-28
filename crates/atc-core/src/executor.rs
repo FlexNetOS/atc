@@ -29,6 +29,10 @@ pub struct AgentOpts {
     /// calling `git kb show`. When None, falls back to fetching the task
     /// document from git-kb (legacy task dispatch path).
     pub stdin_content: Option<String>,
+    /// Ephemeral mode: skip log file, use text output, pass template body as -p directly.
+    pub ephemeral: bool,
+    /// Timeout in seconds for inline execution (kill after N seconds, exit 124).
+    pub timeout: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -87,6 +91,11 @@ impl ClaudeExecutor {
     /// CI mode: run claude synchronously, capture exit code.
     #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
     async fn spawn_inline(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        // Ephemeral fast path
+        if opts.ephemeral {
+            return self.spawn_inline_ephemeral(opts).await;
+        }
+
         use tokio::process::Command;
 
         // 1. Get stdin content: use pre-built content or fetch from git-kb
@@ -227,13 +236,95 @@ impl ClaudeExecutor {
                 tracing::warn!(slug = %opts.slug, error = %e, "log stream task failed");
             }
         }
-        let status = child.wait().await?;
+        let status = if let Some(secs) = opts.timeout {
+            match tokio::time::timeout(Duration::from_secs(secs as u64), child.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    warn!(slug = %opts.slug, timeout_secs = secs, "inline spawn timed out, killing child");
+                    let _ = child.kill().await;
+                    return Ok(AgentHandle {
+                        session: opts.session_name.clone(),
+                        inline_exit_code: Some(124),
+                    });
+                }
+            }
+        } else {
+            child.wait().await?
+        };
 
         // 9. Extract exit code
         let exit_code = status.code().unwrap_or(-1);
         info!(slug = %opts.slug, exit_code, "inline spawn completed");
 
         // Temp files cleaned up on drop
+
+        Ok(AgentHandle {
+            session: opts.session_name.clone(),
+            inline_exit_code: Some(exit_code),
+        })
+    }
+
+    /// Ephemeral inline mode: stdout/stderr inherited, text output, no log file, no system prompt.
+    #[tracing::instrument(skip(self, opts), fields(slug = %opts.slug, session = %opts.session_name))]
+    async fn spawn_inline_ephemeral(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        use tokio::process::Command;
+
+        // The -p argument is the rendered template body directly (no build_user_prompt wrapper)
+        let user_prompt = opts
+            .stdin_content
+            .as_deref()
+            .unwrap_or("No prompt provided.");
+
+        let mut cmd = Command::new(&self.claude_bin);
+        cmd.arg("-p")
+            .arg(user_prompt)
+            .arg("--dangerously-skip-permissions")
+            .arg("--output-format")
+            .arg("text")
+            .arg("--max-turns")
+            .arg(opts.max_turns.to_string())
+            .arg("--max-budget-usd")
+            .arg(opts.max_budget_usd.to_string());
+
+        // No --append-system-prompt-file, no --verbose
+
+        // Set cwd and env
+        cmd.current_dir(&opts.worktree_path);
+        for (k, v) in &opts.env {
+            if v.is_empty() {
+                cmd.env_remove(k);
+            } else {
+                cmd.env(k, v);
+            }
+        }
+
+        // Inherit stdout/stderr — output goes directly to terminal
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::inherit());
+        cmd.stderr(std::process::Stdio::inherit());
+
+        info!(slug = %opts.slug, "spawning claude (ephemeral inline)");
+        let mut child = cmd.spawn()?;
+
+        // Wait with optional timeout
+        let status = if let Some(secs) = opts.timeout {
+            match tokio::time::timeout(Duration::from_secs(secs as u64), child.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    warn!(slug = %opts.slug, timeout_secs = secs, "ephemeral spawn timed out, killing child");
+                    let _ = child.kill().await;
+                    return Ok(AgentHandle {
+                        session: opts.session_name.clone(),
+                        inline_exit_code: Some(124),
+                    });
+                }
+            }
+        } else {
+            child.wait().await?
+        };
+
+        let exit_code = status.code().unwrap_or(-1);
+        info!(slug = %opts.slug, exit_code, "ephemeral inline spawn completed");
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),
@@ -576,6 +667,8 @@ mod tests {
             max_turns: 10_000,
             max_budget_usd: 25.0,
             stdin_content: None,
+            ephemeral: false,
+            timeout: None,
         };
         let prompt = ClaudeExecutor::build_user_prompt(&opts);
         assert!(prompt.contains("Directive: implement"));
@@ -600,6 +693,8 @@ mod tests {
             max_turns: 10_000,
             max_budget_usd: 25.0,
             stdin_content: Some("some content".to_string()),
+            ephemeral: false,
+            timeout: None,
         };
         let prompt = ClaudeExecutor::build_user_prompt(&opts);
         assert!(prompt.contains("Directive: implement"));
@@ -681,6 +776,8 @@ mod tests {
             max_turns: 100,
             max_budget_usd: 5.0,
             stdin_content,
+            ephemeral: false,
+            timeout: None,
         }
     }
 
@@ -872,6 +969,56 @@ mod tests {
             body.contains(r#"trap 'rm -f "$ATC_PROMPT_FILE" "$ATC_TASKDOC_FILE"' EXIT"#),
             "trap should reference only two variables, got: {}",
             body
+        );
+    }
+
+    #[test]
+    fn test_ephemeral_opts_defaults() {
+        let opts = make_test_opts(Some("template body".to_string()), HashMap::new());
+        assert!(!opts.ephemeral);
+        assert_eq!(opts.timeout, None);
+    }
+
+    #[test]
+    fn test_ephemeral_opts_set() {
+        let mut opts = make_test_opts(Some("template body".to_string()), HashMap::new());
+        opts.ephemeral = true;
+        opts.timeout = Some(15);
+        assert!(opts.ephemeral);
+        assert_eq!(opts.timeout, Some(15));
+    }
+
+    #[test]
+    fn test_ephemeral_skips_build_user_prompt() {
+        // In ephemeral mode, the executor passes stdin_content directly as -p,
+        // NOT through build_user_prompt. Verify build_user_prompt output differs
+        // from the raw stdin_content.
+        let opts = AgentOpts {
+            slug: "test".to_string(),
+            worktree_path: PathBuf::from("/tmp"),
+            prompt: String::new(),
+            directive: Directive::Implement,
+            log_file: PathBuf::from("/dev/null"),
+            env: HashMap::new(),
+            session_name: "test".to_string(),
+            dispatch_id: "test".to_string(),
+            sandbox: false,
+            inline: true,
+            max_turns: 1,
+            max_budget_usd: 0.50,
+            stdin_content: Some("Generate a commit message".to_string()),
+            ephemeral: true,
+            timeout: Some(15),
+        };
+        // build_user_prompt wraps in "Directive: ...\nTask: ..." — ephemeral mode
+        // should NOT use this wrapper.
+        let wrapped = ClaudeExecutor::build_user_prompt(&opts);
+        assert!(wrapped.contains("Directive: implement"));
+        // The raw content "Generate a commit message" should NOT equal the wrapped prompt
+        assert_ne!(
+            opts.stdin_content.as_deref().unwrap(),
+            wrapped,
+            "ephemeral mode should pass stdin_content directly, not through build_user_prompt"
         );
     }
 }

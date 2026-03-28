@@ -27,6 +27,11 @@ pub struct DispatchPipeline<'a> {
 impl<'a> DispatchPipeline<'a> {
     /// Execute the dispatch pipeline for the given input.
     pub async fn execute(&self, input: &str, opts: &RunOpts) -> Result<DispatchOutcome> {
+        // 0. Ephemeral guard
+        if opts.ephemeral && !opts.inline {
+            anyhow::bail!("--ephemeral requires --inline");
+        }
+
         // 1. Find first resolver that can handle input
         let resolver = self.find_resolver(input).await?;
         info!(resolver = resolver.name(), "selected resolver");
@@ -105,6 +110,7 @@ impl<'a> DispatchPipeline<'a> {
             .unwrap_or(dispatch_cfg.max_budget_usd);
         let turns = opts
             .max_turns
+            .or(resolved.max_turns)
             .or_else(|| {
                 self.config
                     .directives
@@ -145,7 +151,40 @@ impl<'a> DispatchPipeline<'a> {
                 turns,
                 resolver.name(),
                 &provider_names,
+                opts.ephemeral,
             );
+        }
+
+        // 4b. Ephemeral fast path — skip worktree, log, diag, providers, system prompt, registry, work unit
+        if opts.ephemeral {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
+            let stdin_content = resolved.template_body.clone();
+
+            let agent_opts = AgentOpts {
+                slug: slug_for_agent.to_string(),
+                worktree_path: cwd,
+                prompt: String::new(), // no system prompt in ephemeral mode
+                directive: resolved.directive.clone(),
+                log_file: PathBuf::from("/dev/null"),
+                env: resolved.env_overrides.clone(),
+                session_name: resolved.dispatch_id.clone(),
+                dispatch_id: resolved.dispatch_id.clone(),
+                sandbox: false,
+                inline: true,
+                max_turns: turns,
+                max_budget_usd: budget,
+                stdin_content,
+                ephemeral: true,
+                timeout: opts.timeout,
+            };
+
+            let handle = self.executor.spawn(&agent_opts).await?;
+            return Ok(DispatchOutcome {
+                id: resolved.dispatch_id.clone(),
+                session: handle.session.clone(),
+                inline_exit_code: handle.inline_exit_code,
+            });
         }
 
         // 5. Ensure worktree (skip if --no-worktree)
@@ -581,6 +620,8 @@ impl<'a> DispatchPipeline<'a> {
             max_turns: turns,
             max_budget_usd: budget,
             stdin_content,
+            ephemeral: opts.ephemeral,
+            timeout: opts.timeout,
         };
 
         let handle = match self.executor.spawn(&agent_opts).await {
@@ -770,6 +811,7 @@ impl<'a> DispatchPipeline<'a> {
     }
 
     /// Execute a dry-run: print config and return without dispatching.
+    #[allow(clippy::too_many_arguments)]
     fn dry_run(
         &self,
         resolved: &atc_core::resolver::ResolvedInput,
@@ -778,8 +820,13 @@ impl<'a> DispatchPipeline<'a> {
         turns: u32,
         resolver_name: &str,
         providers: &[&str],
+        ephemeral: bool,
     ) -> Result<DispatchOutcome> {
-        println!("=== DRY RUN ===");
+        if ephemeral {
+            println!("=== DRY RUN (ephemeral) ===");
+        } else {
+            println!("=== DRY RUN ===");
+        }
         println!(
             "Input:       {}",
             resolved.task_slug.as_deref().unwrap_or(&resolved.branch)
@@ -791,7 +838,12 @@ impl<'a> DispatchPipeline<'a> {
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
-        println!("Providers:   {:?}", providers);
+        if ephemeral {
+            println!("Providers:   (skipped — ephemeral)");
+            println!("System:      (skipped — ephemeral)");
+        } else {
+            println!("Providers:   {:?}", providers);
+        }
         if resolved.is_template {
             println!("Template:    yes (system prompt from directive config)");
         }

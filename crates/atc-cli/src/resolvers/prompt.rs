@@ -67,6 +67,7 @@ impl InputResolver for PromptResolver {
             kb_root: None,
             is_template: false,
             template_body: None,
+            max_turns: None,
         })
     }
 
@@ -117,6 +118,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         };
 
         let result = resolver
@@ -150,6 +153,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         };
 
         let result = resolver.resolve("test", &opts, &config).await.unwrap();

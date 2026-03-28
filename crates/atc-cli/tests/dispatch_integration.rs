@@ -292,6 +292,8 @@ fn default_run_opts(input: &str, directive: Directive) -> RunOpts {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     }
 }
 
@@ -482,6 +484,8 @@ async fn test_dispatch_resolves_directive_from_frontmatter() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let outcome = dispatch_via_pipeline(
         &fix.config,
@@ -615,6 +619,8 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let outcome = dispatch_via_pipeline(
         &fix.config,
@@ -665,6 +671,8 @@ async fn test_dispatch_review_fix_requires_pr_url() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let result = dispatch_via_pipeline(
         &fix.config,
@@ -709,6 +717,8 @@ async fn test_dispatch_dry_run() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
     let outcome = dispatch_via_pipeline(
         &fix.config,
@@ -756,6 +766,8 @@ async fn test_prompt_resolver_dispatch() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
 
     // Only use prompt resolver (no task resolver since git-kb not configured)
@@ -827,6 +839,8 @@ async fn test_template_resolver_dispatch() {
         max_turns: None,
         retries: 0,
         list: false,
+        ephemeral: false,
+        timeout: None,
     };
 
     let outcome = dispatch_via_pipeline(

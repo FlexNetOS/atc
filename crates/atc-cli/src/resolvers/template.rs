@@ -272,6 +272,7 @@ impl InputResolver for TemplateResolver {
             kb_root: None,
             is_template: true,
             template_body: Some(output.body),
+            max_turns: output.max_turns,
         })
     }
 
@@ -437,6 +438,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         };
 
         let resolver = TemplateResolver;
@@ -514,6 +517,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         };
 
         let resolver = TemplateResolver;
@@ -592,6 +597,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         };
 
         let resolver = TemplateResolver;
@@ -650,6 +657,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         }
     }
 
@@ -840,6 +849,8 @@ mod tests {
             max_turns: None,
             retries: 0,
             list: false,
+            ephemeral: false,
+            timeout: None,
         };
 
         let resolver = TemplateResolver;

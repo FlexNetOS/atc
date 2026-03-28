@@ -365,6 +365,8 @@ pub async fn run_health(
                 max_turns: None,
                 retries: 0,
                 list: false,
+                ephemeral: false,
+                timeout: None,
             };
             let resolvers = crate::resolvers::build_resolvers(config);
             let pipeline = crate::pipeline::DispatchPipeline {

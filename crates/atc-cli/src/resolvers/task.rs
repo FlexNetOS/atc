@@ -486,6 +486,7 @@ impl InputResolver for TaskResolver {
             kb_root: Some(kb_root),
             is_template: false,
             template_body: None,
+            max_turns: None,
         })
     }
 
