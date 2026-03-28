@@ -14,7 +14,7 @@ Validate the branch is clean, then push to remote.
 ## Steps
 
 1. **Verify branch state**:
-   - `git log --oneline main..HEAD` — confirm there are commits to push
+   - `git log --oneline {{default_branch}}..HEAD` — confirm there are commits to push
    - `git status` — confirm working tree is clean (no uncommitted changes)
    - If dirty: abort and list the uncommitted changes
 

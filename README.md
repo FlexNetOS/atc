@@ -84,7 +84,7 @@ Continuous: atc daemon --source ready -> kb_ready -> enqueue -> drain -> pipelin
 4. **Context Providers** — pluggable pre-dispatch data assembly. Providers run after prompt assembly, before agent spawn:
    - **PR Context** — fetches PR metadata, comments, reviews, threads in parallel
    - **KB Context** — fetches related documents and active context from GitKB
-   - **Rebase** — detects if branch is behind main and injects rebase instructions
+   - **Rebase** — detects if branch is behind default branch, exports `default_branch` and `rebase_behind_count` as template variables for use in partials
 
 5. **Agent Execution** — spawns `claude` in a tmux session (detached) or inline (synchronous for CI). Stream-json output is logged to JSONL files.
 
@@ -272,9 +272,9 @@ macos = true
 # webhook_url = "https://..."
 
 [prompt]
-components_dir = ".atc/components"       # or ".claude/prompts/components" (legacy)
-templates_dir = ".atc/templates"         # or ".claude/prompts/templates" (legacy)
-partials_dir = ".claude/prompts/partials"
+components_dir = ".atc/components"
+templates_dir = ".atc/templates"
+partials_dir = ".atc/partials"
 
 # Per-directive configuration
 [directives.implement]
@@ -429,11 +429,12 @@ Providers run between prompt assembly and agent spawn:
 ```rust
 pub trait ContextProvider: Send + Sync {
     fn name(&self) -> &str;
+    fn declared_template_vars(&self) -> &[&str] { &[] }
     async fn prepare(&self, ctx: &DispatchContext) -> Result<ContextOutput>;
 }
 ```
 
-Registered per-directive in config (`providers = ["pr-context", "rebase"]`). Provider errors are non-fatal.
+Providers export data via `template_vars` (substituted into templates/partials via deferred placeholders) and `preamble_sections` (prepended to the system prompt). Registered per-directive in config (`providers = ["pr-context", "rebase"]`). Provider errors are non-fatal.
 
 ### Registry
 

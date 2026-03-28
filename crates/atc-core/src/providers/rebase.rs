@@ -152,7 +152,10 @@ impl ContextProvider for RebaseProvider {
 }
 
 /// Resolve the default branch by probing git, falling back to "main".
-async fn resolve_default_branch(worktree: &Path) -> String {
+///
+/// Public because the pipeline uses this as a fallback when the rebase
+/// provider is not configured for a directive.
+pub async fn resolve_default_branch(worktree: &Path) -> String {
     // Try `git symbolic-ref refs/remotes/origin/HEAD` to detect the default branch
     if let Ok(Ok(output)) = tokio::time::timeout(
         GIT_TIMEOUT,

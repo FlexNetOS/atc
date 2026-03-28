@@ -284,7 +284,6 @@ impl AtcConfig {
         };
         self.atc_dir_mode = is_atc_dir;
         if is_atc_dir {
-            self.apply_atc_dir_defaults();
             self.load_directive_files();
         }
     }
@@ -340,20 +339,6 @@ impl AtcConfig {
             }
         }
         Ok(())
-    }
-
-    /// When loaded from `.atc/config.toml`, apply `.atc/`-convention defaults
-    /// for prompt directories if they haven't been explicitly set in the config file.
-    fn apply_atc_dir_defaults(&mut self) {
-        if self.prompt.components_dir == default_components_dir() {
-            self.prompt.components_dir = ".atc/components".to_string();
-        }
-        if self.prompt.templates_dir == default_templates_dir() {
-            self.prompt.templates_dir = ".atc/templates".to_string();
-        }
-        if self.prompt.partials_dir == default_partials_dir() {
-            self.prompt.partials_dir = ".atc/partials".to_string();
-        }
     }
 
     /// Load directive config files from `.atc/directives/*.toml`.
@@ -649,27 +634,27 @@ pub struct DirectiveConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PromptConfig {
     /// Directory containing component `.md` files.
-    /// Default: `.claude/prompts/components`
+    /// Default: `.atc/components`
     #[serde(default = "default_components_dir")]
     pub components_dir: String,
     /// Directory containing template `.md` files.
-    /// Default: `.claude/prompts/templates`
+    /// Default: `.atc/templates`
     #[serde(default = "default_templates_dir")]
     pub templates_dir: String,
     /// Directory containing partial `.md` files.
-    /// Default: `.claude/prompts/partials`
+    /// Default: `.atc/partials`
     #[serde(default = "default_partials_dir")]
     pub partials_dir: String,
 }
 
 fn default_components_dir() -> String {
-    ".claude/prompts/components".to_string()
+    ".atc/components".to_string()
 }
 fn default_templates_dir() -> String {
-    ".claude/prompts/templates".to_string()
+    ".atc/templates".to_string()
 }
 fn default_partials_dir() -> String {
-    ".claude/prompts/partials".to_string()
+    ".atc/partials".to_string()
 }
 
 impl Default for PromptConfig {
@@ -1801,8 +1786,8 @@ max_budget_usd = 15.0
         let cfg = AtcConfig::find_config_upward(root.path()).unwrap();
         assert_eq!(cfg.batch.max_concurrency, 7);
         assert!(!cfg.atc_dir_mode);
-        // Legacy mode keeps old default paths
-        assert_eq!(cfg.prompt.components_dir, ".claude/prompts/components");
+        // Default paths are always .atc/
+        assert_eq!(cfg.prompt.components_dir, ".atc/components");
     }
 
     #[test]

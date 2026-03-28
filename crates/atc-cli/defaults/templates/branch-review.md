@@ -15,7 +15,7 @@ Review all changes on this branch vs main. Iterate until confident.
 
 Repeat:
 
-1. **Review** (`git diff main...HEAD`, read each changed file in full):
+1. **Review** (`git diff {{default_branch}}...HEAD`, read each changed file in full):
    - Deduplication & reuse
    - Efficiency & performance
    - Maintainability & extensibility
