@@ -368,6 +368,30 @@ struct TriageEntry {
     is_outdated: bool,
 }
 
+/// Render a comment body as a fenced `text` block.
+///
+/// Truncates at 2000 chars and picks a fence length that won't collide
+/// with backtick runs already present in the body.
+fn fenced_body(raw: &str) -> String {
+    let body = raw.trim();
+    let rendered = if body.chars().count() > 2000 {
+        let mut truncated: String = body.chars().take(2000).collect();
+        truncated
+            .push_str("\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]");
+        truncated
+    } else {
+        body.to_string()
+    };
+
+    let max_backticks = rendered
+        .split(|c| c != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(max_backticks.max(3) + 1);
+    format!("{fence}text\n{rendered}\n{fence}")
+}
+
 /// Generate triage.md from comments and threads.
 ///
 /// Produces a self-contained markdown document with full comment text and
@@ -525,26 +549,8 @@ pub fn generate_triage(
                 entry.author
             ));
 
-            // Full comment body (trimmed, up to 2000 chars to avoid giant dumps).
-            // Wrapped in a dynamic fence to contain any markdown/HTML in the body.
-            let body = entry.body.trim();
-            let rendered_body = if body.chars().count() > 2000 {
-                let mut truncated: String = body.chars().take(2000).collect();
-                truncated.push_str(
-                    "\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]",
-                );
-                truncated
-            } else {
-                body.to_string()
-            };
-
-            let max_backticks = rendered_body
-                .split(|c| c != '`')
-                .map(str::len)
-                .max()
-                .unwrap_or(0);
-            let fence = "`".repeat(max_backticks.max(3) + 1);
-            md.push_str(&format!("{fence}text\n{rendered_body}\n{fence}\n\n"));
+            md.push_str(&fenced_body(&entry.body));
+            md.push_str("\n\n");
 
             // Pre-built commands
             if !entry.comment_id.is_empty() && entry.comment_id != "unknown" {
@@ -575,27 +581,11 @@ pub fn generate_triage(
                 Some(line) => format!("{}:{}", entry.path, line),
                 None => entry.path.clone(),
             };
-            // Fenced body for resolved entries so HTML in comment text
-            // cannot corrupt the surrounding <details> structure.
-            let body = entry.body.trim();
-            let rendered_body = if body.chars().count() > 2000 {
-                let mut truncated: String = body.chars().take(2000).collect();
-                truncated.push_str(
-                    "\n\n[truncated — see `.dispatch-prefetch/comments.json` for full text]",
-                );
-                truncated
-            } else {
-                body.to_string()
-            };
-            let max_backticks = rendered_body
-                .split(|c| c != '`')
-                .map(str::len)
-                .max()
-                .unwrap_or(0);
-            let fence = "`".repeat(max_backticks.max(3) + 1);
             md.push_str(&format!(
-                "- [x] **{}** @{}\n\n{fence}text\n{rendered_body}\n{fence}\n\n",
-                location, entry.author
+                "- [x] **{}** @{}\n\n{}\n\n",
+                location,
+                entry.author,
+                fenced_body(&entry.body)
             ));
         }
         md.push_str("\n</details>\n");
