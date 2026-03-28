@@ -259,20 +259,15 @@ impl InputResolver for TemplateResolver {
                 branch
             }
             WorktreePolicy::Document => {
-                // Use current branch if available (non-main); otherwise stable slug-based.
-                let current = get_current_branch().await;
-                match current {
-                    Some(b) => b,
-                    None => {
-                        // Fall back to a stable slug-based branch from task/slug param
-                        let slug = params
-                            .get("task")
-                            .or_else(|| params.get("slug"))
-                            .cloned()
-                            .unwrap_or_else(|| input.to_string());
-                        format!("doc--{}", crate::dispatch::sanitize_slashes(&slug))
-                    }
-                }
+                // Always use a deterministic slug-based branch so dispatch keys
+                // (duplicate-session checks, work-unit grouping, registry state)
+                // align with the slug, not the caller's checked-out branch.
+                let slug = params
+                    .get("task")
+                    .or_else(|| params.get("slug"))
+                    .cloned()
+                    .unwrap_or_else(|| input.to_string());
+                format!("doc--{}", crate::dispatch::sanitize_slashes(&slug))
             }
             WorktreePolicy::Branch => {
                 // Current behavior: PR head → param → current branch → synthetic fallback
@@ -974,8 +969,16 @@ mod tests {
     }
 
     /// Test `worktree: current` uses current git branch (doesn't create synthetic).
+    ///
+    /// This test creates a temporary git repo with a named branch so it is
+    /// self-contained and works on CI (where the checkout may be detached HEAD).
+    /// A process-global mutex serializes CWD changes to avoid races with
+    /// parallel tests.
     #[tokio::test]
     async fn test_resolve_worktree_current_uses_git_branch() {
+        use tokio::sync::Mutex;
+        static CWD_LOCK: Mutex<()> = Mutex::const_new(());
+
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(dir.path());
 
@@ -985,20 +988,43 @@ mod tests {
         )
         .unwrap();
 
+        // Set up a temp git repo with a named branch so `git branch --show-current`
+        // returns a deterministic value regardless of the CI checkout state.
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "branch-review"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        // Need at least one commit for the branch to be real
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+
         let opts = test_opts("branch-review", std::collections::HashMap::new());
         let resolver = TemplateResolver;
-        let result = resolver
-            .resolve("branch-review", &opts, &config)
-            .await
-            .unwrap();
+
+        // Serialize CWD changes to avoid races with other tests.
+        let _guard = CWD_LOCK.lock().await;
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(repo_dir.path()).unwrap();
+        let result = resolver.resolve("branch-review", &opts, &config).await;
+        std::env::set_current_dir(&original_dir).unwrap();
+        drop(_guard);
+        let result = result.unwrap();
 
         assert_eq!(result.directive, Directive::ReviewFix);
         assert_eq!(result.worktree_policy, Some(WorktreePolicy::Current));
-        // Should not be a synthetic branch (no tpl-- prefix)
-        assert!(
-            !result.branch.starts_with("tpl--"),
-            "current policy should not produce synthetic branch, got: {}",
-            result.branch
+        assert_eq!(
+            result.branch, "branch-review",
+            "current policy should use the git branch name"
         );
     }
 

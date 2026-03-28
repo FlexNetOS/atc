@@ -257,10 +257,23 @@ impl<'a> DispatchPipeline<'a> {
                     .or_else(|| effective_params.get("slug").map(|s| s.as_str()));
                 match slug {
                     Some(slug) => {
-                        // Validate slug to prevent path traversal (e.g. "../../etc/passwd")
-                        if slug.contains("..") {
+                        // Validate slug to prevent path traversal and absolute path injection.
+                        // resolve_document_workspace() joins this into a workspace-relative path,
+                        // so we must reject anything that could escape .kb/workspaces/.
+                        let slug_path = std::path::Path::new(slug);
+                        if slug_path.is_absolute()
+                            || slug.contains('\\')
+                            || slug_path.components().any(|c| {
+                                matches!(
+                                    c,
+                                    std::path::Component::ParentDir
+                                        | std::path::Component::CurDir
+                                        | std::path::Component::Prefix(_)
+                                )
+                            })
+                        {
                             anyhow::bail!(
-                                "invalid slug for document policy: contains path traversal (\"..\"): {}",
+                                "invalid slug for document policy: unsafe path '{}'",
                                 slug
                             );
                         }
