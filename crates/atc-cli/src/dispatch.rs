@@ -808,12 +808,7 @@ pub async fn ensure_worktree(
     // No existing worktree — create a new one.
     // Reuse sanitized_branch for the worktree name (git branch keeps original slashes).
     if !repos.is_empty() {
-        let mut args = vec!["git", "worktree", "create", &sanitized_branch];
-        for r in repos {
-            args.push("--repo");
-            args.push(r);
-        }
-        args.extend(["--branch", branch]);
+        let args = build_meta_worktree_args(&sanitized_branch, repos, branch);
 
         let output = tokio::process::Command::new("meta")
             .args(&args)
@@ -868,6 +863,24 @@ pub async fn ensure_worktree(
         created: true,
         is_meta: !repos.is_empty(),
     })
+}
+
+/// Build the argument list for `meta git worktree create`.
+///
+/// Always passes `--recursive` so nested `.meta.yaml` `depends_on` entries
+/// are resolved transitively.
+fn build_meta_worktree_args<'a>(
+    sanitized_branch: &'a str,
+    repos: &[&'a str],
+    branch: &'a str,
+) -> Vec<&'a str> {
+    let mut args = vec!["git", "worktree", "create", sanitized_branch, "--recursive"];
+    for r in repos {
+        args.push("--repo");
+        args.push(r);
+    }
+    args.extend(["--branch", branch]);
+    args
 }
 
 #[cfg(test)]
@@ -1307,5 +1320,44 @@ mod tests {
 
         let result = find_worktree_for_branch("nonexistent", &wt_base, &workspace_root);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_build_meta_worktree_args_includes_recursive() {
+        let args = build_meta_worktree_args(
+            "tasks--harmony-407",
+            &["open-source/gitkb/core"],
+            "tasks/harmony-407",
+        );
+        assert!(
+            args.contains(&"--recursive"),
+            "args must include --recursive for nested dep resolution: {args:?}"
+        );
+        assert_eq!(
+            args,
+            vec![
+                "git",
+                "worktree",
+                "create",
+                "tasks--harmony-407",
+                "--recursive",
+                "--repo",
+                "open-source/gitkb/core",
+                "--branch",
+                "tasks/harmony-407",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_meta_worktree_args_multiple_repos() {
+        let args =
+            build_meta_worktree_args("my-branch", &["repo-a", "repo-b"], "feature/my-branch");
+        assert!(args.contains(&"--recursive"));
+        assert_eq!(
+            args.iter().filter(|a| **a == "--repo").count(),
+            2,
+            "should have two --repo flags"
+        );
     }
 }

@@ -1152,6 +1152,17 @@ fn print_dispatch_confirmation(
     println!("  Worktree:  {}", worktree_path.display());
     println!("  Session:   {}", session);
     println!("  Log:       {}", log_file.display());
+    println!();
+    println!("  Next steps:");
+    if let Some(slug) = task_slug {
+        println!("    atc logs {slug}");
+    }
+    println!("    atc watch --id \"{id}\"");
+    println!("    atc watch --id \"{id}\" --pretty");
+    println!("    atc status --flat --json");
+    if let Some(slug) = task_slug {
+        println!("    atc redirect {slug} [message]");
+    }
 }
 
 /// Embedded template for PR start comments. Editable without touching Rust code.
