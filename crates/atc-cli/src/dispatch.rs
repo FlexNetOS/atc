@@ -808,7 +808,13 @@ pub async fn ensure_worktree(
     // No existing worktree — create a new one.
     // Reuse sanitized_branch for the worktree name (git branch keeps original slashes).
     if !repos.is_empty() {
-        let mut args = vec!["git", "worktree", "create", &sanitized_branch];
+        let mut args = vec![
+            "git",
+            "worktree",
+            "create",
+            &sanitized_branch,
+            "--recursive",
+        ];
         for r in repos {
             args.push("--repo");
             args.push(r);
