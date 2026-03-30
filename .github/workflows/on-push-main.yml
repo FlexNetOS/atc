@@ -19,11 +19,11 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Release Please
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@c3fc4de07084f75a2b61a5b933069bda6edf3d5c # v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
@@ -35,8 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Repository Dispatch
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           token: ${{ secrets.PARENT_REPO_PAT }}
           event-type: release-tagged
-          client-payload: '{"tag": "${{ needs.release-please.outputs.tag_name }}"}'
+          client-payload: >-
+            {"tag": ${{ toJSON(needs.release-please.outputs.tag_name) }}}
