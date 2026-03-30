@@ -146,9 +146,9 @@ mod tests {
     fn sample_work_unit() -> WorkUnit {
         WorkUnit {
             id: "wu-test-001".to_string(),
-            task_slug: Some("tasks/harmony-370".to_string()),
-            branch: Some("tasks-harmony-370".to_string()),
-            repos: vec!["open-source/atc".to_string()],
+            task_slug: Some("tasks/acme-370".to_string()),
+            branch: Some("tasks-acme-370".to_string()),
+            repos: vec!["open-source/tools".to_string()],
             pr_urls: vec!["https://github.com/acme-org/acme-tools/pull/30".to_string()],
             status: WorkUnitStatus::Merged,
             created_at: Utc::now(),
@@ -193,8 +193,8 @@ mod tests {
             sample_dispatch(Directive::ReviewFix, Some(2.10)),
         ];
         let table = build_history_table(&unit, &dispatches);
-        assert!(table.contains("tasks/harmony-370"));
-        assert!(table.contains("tasks-harmony-370"));
+        assert!(table.contains("tasks/acme-370"));
+        assert!(table.contains("tasks-acme-370"));
         assert!(table.contains("acme-tools#30"));
         assert!(table.contains("merged"));
         assert!(table.contains("$6.30"));
