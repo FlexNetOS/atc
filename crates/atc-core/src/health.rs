@@ -759,10 +759,10 @@ mod tests {
 
     #[test]
     fn test_parse_pr_url_valid() {
-        let result = HealthChecker::parse_pr_url("https://github.com/harmony-labs/atc/pull/6");
+        let result = HealthChecker::parse_pr_url("https://github.com/acme-org/acme-tools/pull/6");
         assert_eq!(
             result,
-            Some(("harmony-labs".to_string(), "atc".to_string(), 6))
+            Some(("acme-org".to_string(), "acme-tools".to_string(), 6))
         );
     }
 

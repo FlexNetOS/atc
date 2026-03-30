@@ -197,7 +197,7 @@ pub async fn resolve_pr_repo_path(
     pr_url: &str,
     meta_workspace_root: &Path,
 ) -> Result<Option<String>> {
-    // Extract org/repo from PR URL: "https://github.com/harmony-labs/atc/pull/27" → "harmony-labs/atc"
+    // Extract org/repo from PR URL: "https://github.com/org/repo/pull/27" → "org/repo"
     let github_repo = pr_url
         .strip_prefix("https://github.com/")
         .and_then(|s| s.split("/pull/").next())
@@ -974,47 +974,47 @@ mod tests {
         // Simulates the output of `meta project list --recursive --json`
         let json: serde_json::Value = serde_json::json!({
             "path": ".",
-            "repo": "git@github.com:harmony-labs/harmony.git",
+            "repo": "git@github.com:acme-org/acme-workspace.git",
             "projects": [
                 {
                     "name": "clients",
                     "path": "clients",
-                    "repo": "git@github.com:harmony-labs/harmony-clients.git",
+                    "repo": "git@github.com:acme-org/acme-clients.git",
                     "is_meta": true,
                     "projects": [
                         {
                             "name": "desktop",
                             "path": "desktop",
-                            "repo": "git@github.com:harmony-labs/harmony-desktop.git"
+                            "repo": "git@github.com:acme-org/acme-desktop.git"
                         },
                         {
                             "name": "mobile",
                             "path": "mobile",
-                            "repo": "https://github.com/harmony-labs/harmony-mobile.git"
+                            "repo": "https://github.com/acme-org/acme-mobile.git"
                         }
                     ]
                 },
                 {
                     "name": "open-source",
                     "path": "open-source",
-                    "repo": "git@github.com:harmony-labs/harmony-oss.git",
+                    "repo": "git@github.com:acme-org/acme-oss.git",
                     "is_meta": true,
                     "projects": [
                         {
-                            "name": "atc",
-                            "path": "atc",
-                            "repo": "git@github.com:harmony-labs/atc.git"
+                            "name": "tools",
+                            "path": "tools",
+                            "repo": "git@github.com:acme-org/acme-tools.git"
                         },
                         {
-                            "name": "gitkb",
-                            "path": "gitkb",
-                            "repo": "git@github.com:harmony-labs/harmony-gitkb.git",
+                            "name": "libs",
+                            "path": "libs",
+                            "repo": "git@github.com:acme-org/acme-libs.git",
                             "is_meta": true,
                             "projects": [
                                 {
                                     "name": "core",
                                     "path": "core",
-                                    "repo": "git@github.com:harmony-labs/gitkb-core.git"
+                                    "repo": "git@github.com:acme-org/acme-core.git"
                                 }
                             ]
                         }
@@ -1023,13 +1023,13 @@ mod tests {
                 {
                     "name": "platform",
                     "path": "platform",
-                    "repo": "git@github.com:harmony-labs/harmony-platform.git",
+                    "repo": "git@github.com:acme-org/acme-platform.git",
                     "is_meta": true,
                     "projects": [
                         {
                             "name": "api",
                             "path": "api",
-                            "repo": "https://github.com/harmony-labs/harmony-api"
+                            "repo": "https://github.com/acme-org/acme-api"
                         }
                     ]
                 }
@@ -1038,43 +1038,43 @@ mod tests {
 
         // Nested child: clients/desktop
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-desktop"),
+            resolve_pr_repo_path_sync(&json, "acme-org/acme-desktop"),
             Some("clients/desktop".to_string())
         );
 
-        // Nested child: open-source/atc
+        // Nested child: open-source/tools
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/atc"),
-            Some("open-source/atc".to_string())
+            resolve_pr_repo_path_sync(&json, "acme-org/acme-tools"),
+            Some("open-source/tools".to_string())
         );
 
         // Nested child: platform/api (https URL, no .git suffix)
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-api"),
+            resolve_pr_repo_path_sync(&json, "acme-org/acme-api"),
             Some("platform/api".to_string())
         );
 
-        // Deep nesting: open-source/gitkb/core
+        // Deep nesting: open-source/libs/core
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/gitkb-core"),
-            Some("open-source/gitkb/core".to_string())
+            resolve_pr_repo_path_sync(&json, "acme-org/acme-core"),
+            Some("open-source/libs/core".to_string())
         );
 
         // HTTPS URL with .git suffix
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-mobile"),
+            resolve_pr_repo_path_sync(&json, "acme-org/acme-mobile"),
             Some("clients/mobile".to_string())
         );
 
         // Non-existent repo
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/nonexistent"),
+            resolve_pr_repo_path_sync(&json, "acme-org/nonexistent"),
             None
         );
 
         // Top-level group (not a leaf repo match)
         assert_eq!(
-            resolve_pr_repo_path_sync(&json, "harmony-labs/harmony-clients"),
+            resolve_pr_repo_path_sync(&json, "acme-org/acme-clients"),
             Some("clients".to_string())
         );
     }
