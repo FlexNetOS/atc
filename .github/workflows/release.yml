@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  repository_dispatch:
+    types: [release-tagged]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -13,8 +15,31 @@ env:
   BINARY_NAME: atc
 
 jobs:
+  get-tag:
+    name: Extract Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Get tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            TAG="${{ github.event.client_payload.tag }}"
+            if [ -z "$TAG" ]; then
+              echo "::error::Missing client_payload.tag for repository_dispatch"
+              exit 1
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
   build-macos:
     name: Build macOS (${{ matrix.arch }})
+    needs: [get-tag]
     runs-on: [self-hosted, macOS, ARM64]
     strategy:
       fail-fast: false
@@ -55,6 +80,7 @@ jobs:
 
   build-linux:
     name: Build Linux (${{ matrix.arch }})
+    needs: [get-tag]
     runs-on: [self-hosted, macOS, ARM64]
     strategy:
       fail-fast: false
@@ -107,7 +133,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-macos, build-linux]
+    needs: [get-tag, build-macos, build-linux]
     runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: write
@@ -126,6 +152,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
+          tag_name: ${{ needs.get-tag.outputs.tag }}
           files: |
             artifacts/atc-darwin-arm64.tar.gz
             artifacts/atc-darwin-arm64.tar.gz.sha256
@@ -140,7 +167,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew Formula
-    needs: [release]
+    needs: [get-tag, release]
     runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: read
@@ -163,8 +190,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=${{ needs.get-tag.outputs.version }}" >> $GITHUB_OUTPUT
 
       - name: Read checksums
         id: checksums
