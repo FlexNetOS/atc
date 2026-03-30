@@ -34,6 +34,13 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Require PAT for repository dispatch
+        run: |
+          if [ -z "${{ secrets.PARENT_REPO_PAT }}" ]; then
+            echo "::error::PARENT_REPO_PAT secret is not set. Repository dispatch will fail."
+            exit 1
+          fi
+
       - name: Repository Dispatch
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:

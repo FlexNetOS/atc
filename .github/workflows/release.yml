@@ -7,7 +7,7 @@ on:
     types: [release-tagged]
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.client_payload.tag || github.ref }}
   cancel-in-progress: false
 
 env:
