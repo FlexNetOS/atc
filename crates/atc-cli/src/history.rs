@@ -146,10 +146,10 @@ mod tests {
     fn sample_work_unit() -> WorkUnit {
         WorkUnit {
             id: "wu-test-001".to_string(),
-            task_slug: Some("tasks/harmony-370".to_string()),
-            branch: Some("tasks-harmony-370".to_string()),
-            repos: vec!["open-source/atc".to_string()],
-            pr_urls: vec!["https://github.com/harmony-labs/atc/pull/30".to_string()],
+            task_slug: Some("tasks/acme-370".to_string()),
+            branch: Some("tasks-acme-370".to_string()),
+            repos: vec!["open-source/tools".to_string()],
+            pr_urls: vec!["https://github.com/acme-org/acme-tools/pull/30".to_string()],
             status: WorkUnitStatus::Merged,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -193,9 +193,9 @@ mod tests {
             sample_dispatch(Directive::ReviewFix, Some(2.10)),
         ];
         let table = build_history_table(&unit, &dispatches);
-        assert!(table.contains("tasks/harmony-370"));
-        assert!(table.contains("tasks-harmony-370"));
-        assert!(table.contains("atc#30"));
+        assert!(table.contains("tasks/acme-370"));
+        assert!(table.contains("tasks-acme-370"));
+        assert!(table.contains("acme-tools#30"));
         assert!(table.contains("merged"));
         assert!(table.contains("$6.30"));
         assert!(table.contains("2 dispatches"));
@@ -235,8 +235,8 @@ mod tests {
     #[test]
     fn test_format_pr_url_github() {
         assert_eq!(
-            format_pr_url("https://github.com/harmony-labs/atc/pull/30"),
-            "atc#30"
+            format_pr_url("https://github.com/acme-org/acme-tools/pull/30"),
+            "acme-tools#30"
         );
     }
 

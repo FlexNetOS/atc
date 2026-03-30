@@ -122,7 +122,7 @@ mod tests {
             directive: Directive::Implement,
             retries: 1,
             resolver: "task".to_string(),
-            pr_urls: vec!["https://github.com/harmony-labs/gitkb-core/pull/275".to_string()],
+            pr_urls: vec!["https://github.com/acme-org/acme-core/pull/275".to_string()],
             no_worktree: false,
             original_input: None,
             checks: HealthChecks {
