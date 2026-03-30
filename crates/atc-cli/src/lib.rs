@@ -37,7 +37,11 @@ mod args {
     use std::path::PathBuf;
 
     #[derive(Parser)]
-    #[command(name = "atc", about = "Air Traffic Control — agent orchestrator")]
+    #[command(
+        name = "atc",
+        about = "Air Traffic Control — agent orchestrator",
+        version
+    )]
     pub struct Args {
         #[arg(long, global = true)]
         pub config: Option<std::path::PathBuf>,
