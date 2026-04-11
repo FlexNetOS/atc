@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/gitkb/atc/compare/v0.1.1...v0.1.2) (2026-04-11)
+
+
+### Bug Fixes
+
+* updating harmony-labs GitHub org to gitkb ([#51](https://github.com/gitkb/atc/issues/51)) ([568e8f1](https://github.com/gitkb/atc/commit/568e8f181a4b23a358be9aba2e8f7cf65799e20e))
+
 ## [0.1.1](https://github.com/gitkb/atc/compare/v0.1.0...v0.1.1) (2026-03-30)
 
 
