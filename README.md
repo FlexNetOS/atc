@@ -13,7 +13,7 @@ A headless agent orchestrator for AI coding agents. ATC dispatches agents to wor
 ## Install
 
 ```bash
-brew tap harmony-labs/tap
+brew tap gitkb/tap
 brew install atc
 ```
 
