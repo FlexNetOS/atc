@@ -184,6 +184,7 @@ impl<'a> DispatchPipeline<'a> {
                 opts.ephemeral,
                 worktree_policy,
                 &dry_repos,
+                &workspace_root,
             );
         }
 
@@ -1077,6 +1078,7 @@ impl<'a> DispatchPipeline<'a> {
         ephemeral: bool,
         worktree_policy: WorktreePolicy,
         repos: &[String],
+        workspace_root: &Path,
     ) -> Result<DispatchOutcome> {
         if ephemeral {
             println!("=== DRY RUN (ephemeral) ===");
@@ -1096,8 +1098,13 @@ impl<'a> DispatchPipeline<'a> {
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
 
         let primary_repo = repos.first().map(String::as_str);
-        let (policy_label, resolved_path, hint) =
-            describe_worktree(self.config, &resolved.branch, primary_repo, worktree_policy);
+        let (policy_label, resolved_path, hint) = describe_worktree(
+            self.config,
+            &resolved.branch,
+            primary_repo,
+            worktree_policy,
+            workspace_root,
+        );
         println!(
             "Worktree:    {} ({})",
             worktree_policy.as_str(),
@@ -1147,20 +1154,17 @@ fn worktree_policy_label(policy: WorktreePolicy) -> &'static str {
 ///
 /// `primary_repo` should be the same value the dispatch path resolves via
 /// [`resolve_base_repos`] so the dry-run preview matches execution.
+/// `workspace_root` is the resolved workspace root from the dispatch path
+/// (config → meta discovery → cwd fallback) so `Document`/`None` previews
+/// match what dispatch actually uses.
 fn describe_worktree(
     config: &AtcConfig,
     branch: &str,
     primary_repo: Option<&str>,
     policy: WorktreePolicy,
+    workspace_root: &Path,
 ) -> (&'static str, PathBuf, Option<String>) {
     use crate::dispatch::sanitize_slashes;
-
-    let process_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let workspace_root = config
-        .dispatch
-        .resolved_meta_workspace_root(config.config_dir.as_deref())
-        .ok()
-        .unwrap_or_else(|| process_cwd.clone());
 
     let label = worktree_policy_label(policy);
     match policy {
@@ -1182,9 +1186,12 @@ fn describe_worktree(
             (label, path, hint)
         }
         // Without resolving the document we can only show the workspace root.
-        WorktreePolicy::Document => (label, workspace_root, None),
-        WorktreePolicy::None => (label, workspace_root, None),
-        WorktreePolicy::Current => (label, process_cwd, None),
+        WorktreePolicy::Document => (label, workspace_root.to_path_buf(), None),
+        WorktreePolicy::None => (label, workspace_root.to_path_buf(), None),
+        WorktreePolicy::Current => {
+            let process_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            (label, process_cwd, None)
+        }
     }
 }
 
@@ -1545,6 +1552,7 @@ mod tests {
         // This locks the dry-run preview path to the same shape as dispatch.
         let mut config = AtcConfig::default();
         config.dispatch.worktree_base = Some(PathBuf::from("/tmp/wt"));
+        let workspace_root = PathBuf::from("/tmp/ws");
 
         // Slashes in the branch name are sanitized to `--` to match
         // ensure_worktree's on-disk layout (so dry-run paths match reality).
@@ -1553,6 +1561,7 @@ mod tests {
             "feat/x",
             Some("open-source/atc"),
             WorktreePolicy::Branch,
+            &workspace_root,
         );
         assert_eq!(
             with_repo,
@@ -1560,12 +1569,45 @@ mod tests {
             "primary_repo must be appended to the branch path"
         );
 
-        let (_, without_repo, _) =
-            describe_worktree(&config, "feat/x", None, WorktreePolicy::Branch);
+        let (_, without_repo, _) = describe_worktree(
+            &config,
+            "feat/x",
+            None,
+            WorktreePolicy::Branch,
+            &workspace_root,
+        );
         assert_eq!(
             without_repo,
             PathBuf::from("/tmp/wt/feat--x"),
             "missing primary_repo must yield the bare branch path"
         );
+    }
+
+    #[test]
+    fn test_describe_worktree_document_and_none_use_workspace_root() {
+        // Document and None policies must echo the workspace_root supplied by
+        // the caller (which dispatch resolves via the meta-discovery fallback
+        // chain), not a separately-derived workspace_root. This keeps dry-run
+        // previews aligned with the path dispatch actually uses.
+        let config = AtcConfig::default();
+        let workspace_root = PathBuf::from("/tmp/meta-ws");
+
+        let (_, doc_path, _) = describe_worktree(
+            &config,
+            "feat/x",
+            None,
+            WorktreePolicy::Document,
+            &workspace_root,
+        );
+        assert_eq!(doc_path, workspace_root);
+
+        let (_, none_path, _) = describe_worktree(
+            &config,
+            "feat/x",
+            None,
+            WorktreePolicy::None,
+            &workspace_root,
+        );
+        assert_eq!(none_path, workspace_root);
     }
 }
