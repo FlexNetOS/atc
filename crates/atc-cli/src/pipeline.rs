@@ -1212,12 +1212,12 @@ async fn resolve_base_repos(
         return opts.repos.clone();
     }
     if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
-        let env_repo = env_repo.trim().to_string();
-        if env_repo.is_empty() {
-            return Vec::new();
+        let env_repo = env_repo.trim();
+        if !env_repo.is_empty() {
+            info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
+            return vec![env_repo.to_string()];
         }
-        info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
-        return vec![env_repo];
+        // Blank env var behaves like "unset" so fallback chain continues.
     }
     if let Some(pr_url) = effective_pr_url {
         match resolve_pr_repo_path(pr_url, workspace_root).await {
