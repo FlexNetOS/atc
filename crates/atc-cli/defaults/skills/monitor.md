@@ -81,7 +81,7 @@ Look for these milestones in the log:
 ```bash
 # Verify what the agent did
 cd <worktree-path>
-git log --oneline main..HEAD
+git log --oneline <default-branch>..HEAD
 
 # Run health checks
 atc health

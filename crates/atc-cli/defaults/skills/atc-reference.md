@@ -7,7 +7,7 @@ ATC (Agent Task Controller) dispatches Claude Code agents to isolated git worktr
 ```bash
 # Task implementation
 atc run task <slug>                              # e.g. atc run task tasks/my-task-42
-atc run <directive> task <slug>                   # e.g. atc run research task tasks/my-task-42
+atc run task <slug> --directive <directive>      # e.g. atc run task tasks/my-task-42 --directive research
 
 # PR review (iterative fix flywheel)
 atc run pr-review --param pr=<github-pr-url>

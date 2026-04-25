@@ -7,7 +7,7 @@ Use this when the user asks you to dispatch, run, or send an agent to work on a 
 | User intent | Command pattern |
 |-------------|----------------|
 | Implement a task | `atc run task <slug>` |
-| Implement with explicit directive | `atc run <directive> task <slug>` |
+| Implement with explicit directive | `atc run task <slug> --directive <directive>` |
 | Review a PR | `atc run pr-review --param pr=<url>` |
 | Fix specific PR comments | `atc run pr-comment --param pr=<url>` |
 | Review current branch locally | `atc run branch-review` |
