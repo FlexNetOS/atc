@@ -20,6 +20,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = atc_cli::Args::parse();
 
+    // Apply --color flag to the global style state. Errors here would be
+    // pre-config (no logging yet), so use anyhow::Context.
+    let color_mode: atc_cli::style::ColorMode = cli.color.parse()?;
+    atc_cli::style::set_color_mode(color_mode);
+
+    // Honor --no-pager via env var so the pager module sees it without
+    // having to thread the flag through every callsite.
+    if cli.no_pager {
+        std::env::set_var("ATC_NO_PAGER", "1");
+    }
+
     let config = AtcConfig::load(cli.config.as_deref())?;
     let db_path = config.registry.resolved_path();
     let registry = Arc::new(SqliteRegistry::open(&db_path).await?);

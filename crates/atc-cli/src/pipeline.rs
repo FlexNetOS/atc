@@ -86,7 +86,8 @@ impl<'a> DispatchPipeline<'a> {
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
             resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
-                "{} directive requires a PR URL (--pr-url or --param pr=<url>). Cannot dispatch without it.",
+                "{} directive requires a PR URL (--pr-url or --param pr=<url>). Cannot dispatch without it.\n\
+                 hint: pass `--pr-url <url>` or `--param pr=<url>` — never as a positional arg.",
                 resolved.directive.as_str()
             );
         }
@@ -127,7 +128,9 @@ impl<'a> DispatchPipeline<'a> {
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
             resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
-                "tmux session '{}' already exists. Use --force to override.",
+                "tmux session '{}' already exists. Use --force to override.\n\
+                 hint: `atc info {session_name}` shows the existing dispatch; \
+                 `atc stop` and `atc cleanup` end it cleanly.",
                 session_name
             );
         }
@@ -162,6 +165,7 @@ impl<'a> DispatchPipeline<'a> {
                 &provider_names,
                 opts.ephemeral,
                 worktree_policy,
+                opts,
             );
         }
 
@@ -1011,6 +1015,8 @@ impl<'a> DispatchPipeline<'a> {
             &handle.session,
             &log_file,
             resolver.name(),
+            worktree_policy,
+            opts.repos.first().map(String::as_str),
         );
 
         if let Some(exit_code) = handle.inline_exit_code {
@@ -1090,6 +1096,7 @@ impl<'a> DispatchPipeline<'a> {
         providers: &[&str],
         ephemeral: bool,
         worktree_policy: WorktreePolicy,
+        opts: &RunOpts,
     ) -> Result<DispatchOutcome> {
         if ephemeral {
             println!("=== DRY RUN (ephemeral) ===");
@@ -1107,7 +1114,22 @@ impl<'a> DispatchPipeline<'a> {
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
-        println!("Worktree:    {}", worktree_policy.as_str());
+
+        let (policy_label, resolved_path, hint) =
+            describe_worktree(self.config, &resolved.branch, opts, worktree_policy);
+        println!(
+            "Worktree:    {} ({})",
+            worktree_policy.as_str(),
+            policy_label
+        );
+        println!("Path:        {}", resolved_path.display());
+        if !opts.repos.is_empty() {
+            println!("Repo:        {}", opts.repos.join(", "));
+        }
+        if let Some(h) = hint {
+            println!("Hint:        {}", h);
+        }
+
         if ephemeral {
             println!("Providers:   (skipped — ephemeral)");
             println!("System:      (skipped — ephemeral)");
@@ -1122,6 +1144,61 @@ impl<'a> DispatchPipeline<'a> {
             session: resolved.dispatch_id.clone(),
             inline_exit_code: Some(0),
         })
+    }
+}
+
+/// Describe the resolved worktree location for a dispatch policy.
+///
+/// Returns `(policy_label, resolved_path, optional_hint)`. The path is
+/// computed using the same logic that `ensure_worktree` uses for `Branch`
+/// policy, but does not actually create anything on disk.
+fn describe_worktree(
+    config: &AtcConfig,
+    branch: &str,
+    opts: &RunOpts,
+    policy: WorktreePolicy,
+) -> (&'static str, PathBuf, Option<String>) {
+    use crate::dispatch::sanitize_slashes;
+
+    let process_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let workspace_root = config
+        .dispatch
+        .resolved_meta_workspace_root(config.config_dir.as_deref())
+        .ok()
+        .unwrap_or_else(|| process_cwd.clone());
+
+    match policy {
+        WorktreePolicy::Branch => {
+            let label = "create or reuse a worktree by branch name";
+            let worktree_base = config.dispatch.resolved_worktree_base();
+            let sanitized = sanitize_slashes(branch);
+            let path = match opts.repos.first() {
+                Some(r) => worktree_base.join(&sanitized).join(r),
+                None => worktree_base.join(&sanitized),
+            };
+            let hint = if config.dispatch.worktree_base.is_none() {
+                Some(format!(
+                    "worktree_base is unset; using default {}. Set [dispatch] worktree_base in .atc/config.toml to override.",
+                    worktree_base.display()
+                ))
+            } else {
+                None
+            };
+            (label, path, hint)
+        }
+        WorktreePolicy::Document => {
+            let label = "use the document workspace path";
+            // Without resolving the document we can only show the workspace root.
+            (label, workspace_root, None)
+        }
+        WorktreePolicy::None => {
+            let label = "no worktree — run in the canonical repo root";
+            (label, workspace_root, None)
+        }
+        WorktreePolicy::Current => {
+            let label = "no worktree — run in the current working directory";
+            (label, process_cwd, None)
+        }
     }
 }
 
@@ -1142,14 +1219,30 @@ fn print_dispatch_confirmation(
     session: &str,
     log_file: &Path,
     resolver_name: &str,
+    worktree_policy: WorktreePolicy,
+    primary_repo: Option<&str>,
 ) {
     let slug_display = task_slug.unwrap_or("(none)");
+    let policy_label = match worktree_policy {
+        WorktreePolicy::Branch => "create or reuse a worktree by branch name",
+        WorktreePolicy::Document => "use the document workspace path",
+        WorktreePolicy::None => "no worktree — run in the canonical repo root",
+        WorktreePolicy::Current => "no worktree — run in the current working directory",
+    };
     println!("Dispatched: {}", slug_display);
     println!("  Resolver:  {}", resolver_name);
     println!("  Directive: {}", directive.as_str());
     println!("  ID:        {}", id);
     println!("  Branch:    {}", branch);
-    println!("  Worktree:  {}", worktree_path.display());
+    println!(
+        "  Worktree:  {} ({})",
+        worktree_policy.as_str(),
+        policy_label
+    );
+    println!("  Path:      {}", worktree_path.display());
+    if let Some(repo) = primary_repo {
+        println!("  Repo:      {}", repo);
+    }
     println!("  Session:   {}", session);
     println!("  Log:       {}", log_file.display());
     println!();

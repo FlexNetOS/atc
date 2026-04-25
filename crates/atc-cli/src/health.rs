@@ -5,9 +5,19 @@ use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
 use atc_core::types::{Directive, DispatchRecord, RunOpts, Status, WorkUnitStatus};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
+
+use crate::status::STATUS_SCHEMA_VERSION;
+
+/// JSON envelope for `atc health --json`. Stable across v1 of the schema.
+#[derive(Debug, Serialize)]
+pub struct HealthOutputV1<'a> {
+    pub schema_version: u32,
+    pub records: &'a [DispatchRecord],
+}
 
 /// Format a three-state signal value for display.
 /// `Some(true)` = "✓", `Some(false)` = "✗", `None` = "-" (not evaluated / skipped).
@@ -429,11 +439,15 @@ pub async fn run_health(
     display_records.sort_by_key(|r| std::cmp::Reverse(r.dispatched_at));
 
     if json {
-        let json_out = serde_json::to_string_pretty(&display_records)?;
-        println!("{json_out}");
+        let envelope = HealthOutputV1 {
+            schema_version: STATUS_SCHEMA_VERSION,
+            records: &display_records,
+        };
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else if display_records.is_empty() {
         println!("No dispatch records found.");
     } else {
+        let _pager = crate::pager::setup_pager(Some(&config.pager));
         print_table(&display_records);
     }
 

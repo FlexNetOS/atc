@@ -45,6 +45,25 @@ pub struct AtcConfig {
     /// Named source configurations for daemon auto-feed.
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
+    /// Pager configuration for human-facing CLI output.
+    #[serde(default)]
+    pub pager: PagerConfig,
+}
+
+/// `[pager]` section — controls pager program for long human-facing output.
+///
+/// Precedence (Plain class, used by status/history/info/health/logs):
+/// 1. `ATC_PAGER` env var
+/// 2. `pager.plain` in config.toml
+/// 3. `PAGER` env var
+/// 4. Built-in default: `less -R +G`
+///
+/// Set to empty string or `cat` to disable.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PagerConfig {
+    /// Pager command for plain/tabular output. Default: `less -R +G`.
+    #[serde(default)]
+    pub plain: Option<String>,
 }
 
 /// `[resolvers]` section — controls resolver order and per-resolver settings.

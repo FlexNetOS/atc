@@ -49,6 +49,12 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 # System
 libc = "0.2"
 
+# Color / terminal styling
+owo-colors = "4"
+
+# Human-friendly duration parsing (24h, 2d, 1w)
+humantime = "2"
+
 # Temp files (for tests)
 tempfile = "3"
 
