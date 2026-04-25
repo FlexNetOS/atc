@@ -121,8 +121,12 @@ pub fn setup_pager(config: Option<&PagerConfig>) -> Option<PagerGuard> {
     {
         use std::os::unix::io::{AsRawFd, RawFd};
 
-        let mut child = Command::new("sh")
-            .args(["-c", &pager_cmd])
+        // Parse argv via shlex to avoid `sh -c` interpreting metacharacters in
+        // config-derived pager commands.
+        let argv = shlex::split(&pager_cmd)?;
+        let (program, args) = argv.split_first()?;
+        let mut child = Command::new(program)
+            .args(args)
             .stdin(Stdio::piped())
             .spawn()
             .ok()?;
