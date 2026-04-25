@@ -3,11 +3,21 @@
 use anyhow::Result;
 use atc_core::registry::Registry;
 use atc_core::types::{DispatchRecord, WorkUnit};
+use serde::Serialize;
 use std::sync::Arc;
 
+use crate::output_schema::SCHEMA_VERSION;
 #[cfg(test)]
 use crate::status::format_pr_url;
 use crate::status::{format_duration, format_pr_list};
+
+/// JSON envelope for `atc history --json`. Stable across v1 of the schema.
+#[derive(Debug, Serialize)]
+pub struct HistoryOutputV1<'a> {
+    pub schema_version: u32,
+    pub work_unit: Option<&'a WorkUnit>,
+    pub dispatches: &'a [DispatchRecord],
+}
 
 /// Build the history table for a work unit's dispatches.
 pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> String {
@@ -83,6 +93,7 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
 
 pub async fn run_history(
     registry: Arc<dyn Registry>,
+    pager_config: Option<&atc_core::config::PagerConfig>,
     slug: Option<&str>,
     pr: Option<&str>,
     branch: Option<&str>,
@@ -104,12 +115,13 @@ pub async fn run_history(
     let Some(unit) = unit else {
         let target = slug.or(pr).or(branch).unwrap_or("(unknown)");
         if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({ "work_unit": null, "dispatches": [] })
-                )?
-            );
+            let empty: Vec<DispatchRecord> = Vec::new();
+            let envelope = HistoryOutputV1 {
+                schema_version: SCHEMA_VERSION,
+                work_unit: None,
+                dispatches: &empty,
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
         } else {
             println!("No work unit found for: {}", target);
         }
@@ -119,11 +131,12 @@ pub async fn run_history(
     let dispatches = registry.list_dispatches_for_work_unit(&unit.id).await?;
 
     if json {
-        let out = serde_json::json!({
-            "work_unit": unit,
-            "dispatches": dispatches,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        let envelope = HistoryOutputV1 {
+            schema_version: SCHEMA_VERSION,
+            work_unit: Some(&unit),
+            dispatches: &dispatches,
+        };
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
         return Ok(());
     }
 
@@ -132,6 +145,7 @@ pub async fn run_history(
         return Ok(());
     }
 
+    let _pager = crate::pager::setup_pager(pager_config);
     println!("{}", build_history_table(&unit, &dispatches));
     Ok(())
 }
@@ -242,9 +256,7 @@ mod tests {
 
     #[test]
     fn test_format_pr_url_unknown() {
-        assert_eq!(
-            format_pr_url("http://other.com/pr/1"),
-            "http://other.com/pr/1"
-        );
+        // Non-GitHub URLs are now rejected by the strict validator.
+        assert_eq!(format_pr_url("http://other.com/pr/1"), "(invalid)");
     }
 }

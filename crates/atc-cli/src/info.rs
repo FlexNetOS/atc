@@ -3,10 +3,20 @@
 use anyhow::Result;
 use atc_core::registry::Registry;
 use atc_core::types::DispatchRecord;
+use serde::Serialize;
 use std::sync::Arc;
 
+use crate::output_schema::SCHEMA_VERSION;
 use crate::resolve::resolve_record;
 use crate::status::format_duration;
+
+/// JSON envelope for `atc info --json`. Mirrors the v1 schema versioning
+/// shared by the rest of the human-facing commands.
+#[derive(Debug, Serialize)]
+pub struct InfoOutputV1<'a> {
+    pub schema_version: u32,
+    pub record: &'a DispatchRecord,
+}
 
 /// Format a dispatch record for display.
 pub fn format_info(record: &DispatchRecord) -> String {
@@ -97,9 +107,17 @@ pub fn format_info(record: &DispatchRecord) -> String {
     lines.join("\n")
 }
 
-pub async fn run_info(registry: Arc<dyn Registry>, arg: &str) -> Result<()> {
+pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Result<()> {
     let record = resolve_record(registry.as_ref(), arg).await?;
-    println!("{}", format_info(&record));
+    if json {
+        let envelope = InfoOutputV1 {
+            schema_version: SCHEMA_VERSION,
+            record: &record,
+        };
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        println!("{}", format_info(&record));
+    }
     Ok(())
 }
 

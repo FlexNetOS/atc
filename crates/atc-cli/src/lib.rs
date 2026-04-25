@@ -19,6 +19,8 @@ pub mod info;
 pub mod init;
 pub mod kb;
 pub mod logs;
+pub mod output_schema;
+pub mod pager;
 pub mod pipeline;
 pub mod post_complete;
 pub mod queue_cmd;
@@ -28,6 +30,7 @@ pub mod resolvers;
 pub mod retry;
 pub mod status;
 pub mod stop;
+pub mod style;
 pub mod subprocess;
 pub mod watch;
 
@@ -40,11 +43,20 @@ mod args {
     #[command(
         name = "atc",
         about = "Air Traffic Control — agent orchestrator",
-        version
+        version,
+        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc run task tasks/foo      # Dispatch a task\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
     )]
     pub struct Args {
         #[arg(long, global = true)]
         pub config: Option<std::path::PathBuf>,
+
+        /// Bypass the pager even when stdout is a TTY.
+        #[arg(long = "no-pager", global = true)]
+        pub no_pager: bool,
+
+        /// Color mode: auto (default), always, never.
+        #[arg(long = "color", global = true, default_value = "auto")]
+        pub color: String,
 
         #[command(subcommand)]
         pub command: Commands,
@@ -53,6 +65,9 @@ mod args {
     #[derive(Subcommand)]
     pub enum Commands {
         /// Run an agent (direct dispatch, no queue)
+        #[command(
+            after_help = "EXAMPLES:\n  atc run task tasks/gitkb-42                  # Implement a task\n  atc run review-fix --param pr=<pr-url>       # Address PR review\n  atc run pr-comments --param pr=<pr-url>      # Resolve PR comments\n  atc run task tasks/foo --dry-run             # Preview without launching\n  atc run my-template --inline --no-worktree   # Run a template in cwd\n\nNOTE: pass PR URLs via --param pr=<url> or --pr-url <url>; never as a\npositional argument (it falls through to the prompt resolver).\n"
+        )]
         Run {
             /// Input: "task <slug>", template name, or raw prompt string
             input: Vec<String>,
@@ -100,6 +115,9 @@ mod args {
             timeout: Option<u32>,
         },
         /// Check health of all active dispatches
+        #[command(
+            after_help = "EXAMPLES:\n  atc health                  # Active records\n  atc health --all            # Include done/failed\n  atc health --auto           # Auto-fix NeedsReview dispatches\n  atc health --json | jq      # Stable v1 schema for agents\n"
+        )]
         Health {
             /// Output as JSON array
             #[arg(long)]
@@ -112,6 +130,9 @@ mod args {
             auto: bool,
         },
         /// Render and print the system prompt for a directive (useful for debugging)
+        #[command(
+            after_help = "EXAMPLES:\n  atc prompt implement                                # Default slug\n  atc prompt review-fix --slug tasks/gitkb-42         # Real slug\n  atc prompt implement --directive-text 'extra...'    # Append directive text\n  atc prompt implement --worktree-path /path/to/wt    # Use a project's partials\n"
+        )]
         Prompt {
             /// Directive to render
             #[arg(value_parser = clap::value_parser!(Directive))]
@@ -127,6 +148,9 @@ mod args {
             worktree_path: Option<PathBuf>,
         },
         /// Mark a task as complete, remove worktree, update git-kb
+        #[command(
+            after_help = "EXAMPLES:\n  atc close tasks/gitkb-42                                # Close without PR\n  atc close tasks/gitkb-42 --pr https://github.com/o/r/pull/1   # Record PR\n"
+        )]
         Close {
             /// Task slug (e.g. tasks/gitkb-42)
             slug: String,
@@ -135,6 +159,9 @@ mod args {
             pr: Option<String>,
         },
         /// Send a message to a running agent's tmux session
+        #[command(
+            after_help = "EXAMPLES:\n  atc redirect tasks/gitkb-42 'please rerun the tests'\n  atc redirect <dispatch-id> 'context: focus on auth'\n  atc redirect tasks/foo 'stop and write a recap'\n"
+        )]
         Redirect {
             /// Dispatch ID or task slug
             id: String,
@@ -142,12 +169,18 @@ mod args {
             message: String,
         },
         /// Re-dispatch a failed task with the same directive and config
+        #[command(
+            after_help = "EXAMPLES:\n  atc retry tasks/gitkb-42                # Retry by task slug\n  atc retry <dispatch-id>                 # Retry by ID\n  # See `atc info <id>` for the original config that will be reused.\n"
+        )]
         Retry {
             /// Dispatch ID or task slug
             id: String,
         },
         /// Show table view of all dispatch records
-        #[command(name = "status")]
+        #[command(
+            name = "status",
+            after_help = "EXAMPLES:\n  atc status                  # Active work (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc status --since 24h      # Add anything updated in the last 24h\n  atc status --status failed  # Only failed records\n  atc status --reverse        # Newest at top (git log style)\n  atc status --json | jq      # Stable v1 schema for agents\n"
+        )]
         StatusCmd {
             /// Filter by status (running, done, failed, needs-review, needs-human, stopped, retrying)
             #[arg(long = "status")]
@@ -158,8 +191,23 @@ mod args {
             /// Show flat per-dispatch table instead of work-unit-grouped view
             #[arg(long)]
             flat: bool,
+            /// Include all statuses (overrides default "interesting" filter)
+            #[arg(long)]
+            all: bool,
+            /// Include done/failed in addition to the default interesting set
+            #[arg(long = "include-done")]
+            include_done: bool,
+            /// Also include records updated within the given duration (e.g. 24h, 2d, 1w)
+            #[arg(long)]
+            since: Option<String>,
+            /// Render newest first (default: newest at the bottom of the buffer)
+            #[arg(long)]
+            reverse: bool,
         },
         /// Show dispatch history for a work unit (by task, PR, or branch)
+        #[command(
+            after_help = "EXAMPLES:\n  atc history tasks/harmony-370                              # By task slug\n  atc history --pr https://github.com/o/r/pull/123           # By PR URL\n  atc history --branch tasks--harmony-370                    # By branch\n  atc history tasks/harmony-370 --json | jq                  # Stable v1 schema\n"
+        )]
         History {
             /// Task slug (e.g. tasks/harmony-370)
             slug: Option<String>,
@@ -174,11 +222,20 @@ mod args {
             json: bool,
         },
         /// Show detailed info for a single dispatch record
+        #[command(
+            after_help = "EXAMPLES:\n  atc info <dispatch-id>      # By full ID\n  atc info tasks/foo          # By task slug\n  atc info <id> --json        # Stable v1 schema for agents\n"
+        )]
         Info {
             /// Dispatch ID or task slug
             id: String,
+            /// Output as JSON envelope
+            #[arg(long)]
+            json: bool,
         },
         /// Tail the stream-json log for a dispatch
+        #[command(
+            after_help = "EXAMPLES:\n  atc logs tasks/gitkb-42            # By task slug\n  atc logs <dispatch-id>             # By ID\n  atc logs <id> -f                   # Follow (tail -f)\n  atc logs <session-name>            # By tmux session name\n"
+        )]
         Logs {
             /// Dispatch ID, task slug, or session name
             arg: String,
@@ -187,11 +244,17 @@ mod args {
             follow: bool,
         },
         /// Stop a running dispatch (kill session, mark stopped)
+        #[command(
+            after_help = "EXAMPLES:\n  atc stop tasks/gitkb-42        # Stop by task slug\n  atc stop <dispatch-id>         # Stop by ID\n  # Use `atc cleanup <id>` afterward to remove the worktree.\n"
+        )]
         Stop {
             /// Dispatch ID or task slug
             id: String,
         },
         /// Clean up a dispatch (remove worktree, kill session)
+        #[command(
+            after_help = "EXAMPLES:\n  atc cleanup tasks/gitkb-42       # By task slug\n  atc cleanup <dispatch-id>        # By ID\n  atc cleanup --done               # Bulk-clean all Done dispatches\n"
+        )]
         Cleanup {
             /// Dispatch ID or task slug (omit for --done mode)
             id: Option<String>,
@@ -200,6 +263,9 @@ mod args {
             done: bool,
         },
         /// Run post-completion pipeline (extract artifacts, update registry, notify)
+        #[command(
+            after_help = "EXAMPLES:\n  atc post-complete                                       # Most recent Running\n  atc post-complete --id <dispatch-id>                    # Specific record\n  atc post-complete --id <id> --exit-code 0               # With explicit exit code\n  atc post-complete --id <id> --log /path/to/stream.jsonl # Override log path\n"
+        )]
         PostComplete {
             /// Dispatch ID (default: most recent Running)
             #[arg(long)]
@@ -251,6 +317,9 @@ mod args {
             interactive: bool,
         },
         /// Watch running agent sessions and emit structured events
+        #[command(
+            after_help = "EXAMPLES:\n  atc watch                          # Most recent Running dispatch\n  atc watch --id <dispatch-id>       # Specific dispatch\n  atc watch --all-running            # All running dispatches\n  atc watch --pretty                 # Human-formatted output\n  atc watch --format json            # JSON event stream (default)\n"
+        )]
         Watch {
             /// Dispatch ID to watch (default: most recent Running)
             #[arg(long)]
@@ -269,6 +338,9 @@ mod args {
             socket: Option<std::path::PathBuf>,
         },
         /// Add work to the dispatch queue
+        #[command(
+            after_help = "EXAMPLES:\n  atc enqueue task tasks/foo                       # Single task\n  atc enqueue --ready --limit 3                    # Top-3 ready tasks\n  atc enqueue --board --status active --unblocked  # Filter via board\n  atc enqueue --view 'my-saved-view'               # From a saved view\n  echo 'tasks/a\\ntasks/b' | atc enqueue --stdin   # From stdin\n"
+        )]
         Enqueue {
             /// Input: "task <slug>", template name, or raw prompt
             input: Vec<String>,
@@ -310,6 +382,9 @@ mod args {
             stdin: bool,
         },
         /// View and manage dispatch queues
+        #[command(
+            after_help = "EXAMPLES:\n  atc queue                          # List pending items in default queue\n  atc queue --name my-queue          # List a named queue\n  atc queue drain                    # Dispatch all pending items\n  atc queue clear                    # Remove all pending items\n"
+        )]
         Queue {
             #[command(subcommand)]
             action: Option<QueueAction>,
@@ -319,6 +394,9 @@ mod args {
         },
         /// Lightweight AI dispatch — prompt in, text out. No worktree, registry, or system prompt.
         /// Equivalent to: atc run <template> --inline --no-worktree --ephemeral --timeout <N>
+        #[command(
+            after_help = "EXAMPLES:\n  atc quick commit-message --param diff='...'      # Run a template\n  atc quick --list                                 # List templates\n  atc quick foo --param k=v --timeout 30           # Override timeout\n  atc quick foo --max-budget-usd 0.10              # Tighten budget\n  atc quick foo --dry-run                          # Preview\n"
+        )]
         Quick {
             /// Template name (e.g., "commit-message")
             template: Option<String>,
@@ -339,6 +417,9 @@ mod args {
             dry_run: bool,
         },
         /// Run the continuous dispatch daemon
+        #[command(
+            after_help = "EXAMPLES:\n  atc daemon                                # Drain default queue\n  atc daemon --queue main --queue retry     # Drain multiple queues\n  atc daemon --max-concurrent 2             # Limit concurrency\n  atc daemon --source github-issues         # Activate a source\n  atc daemon status                         # Daemon health check\n  atc daemon stop                           # Graceful shutdown\n"
+        )]
         Daemon {
             #[command(subcommand)]
             action: Option<DaemonAction>,
@@ -424,7 +505,8 @@ pub async fn run(
 
             if input.is_empty() || input.iter().all(|s| s.trim().is_empty()) {
                 anyhow::bail!(
-                    "input is required: provide a task slug, template name, or prompt string"
+                    "input is required: provide a task slug, template name, or prompt string\n\
+                     hint: try `atc run --list` to see templates, or `atc run task <slug>` for a task."
                 );
             }
 
@@ -433,7 +515,8 @@ pub async fn run(
                 let slug = input[1..].join(" ");
                 if slug.is_empty() {
                     anyhow::bail!(
-                        "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'"
+                        "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'\n\
+                         hint: list slugs with `git kb list --type task` or check `atc status`."
                     );
                 }
                 (slug, true)
@@ -537,8 +620,14 @@ pub async fn run(
             branch,
             json,
         } => {
+            let pager_cfg = if args.no_pager || *json {
+                None
+            } else {
+                Some(&config.pager)
+            };
             history::run_history(
                 registry.clone() as Arc<dyn Registry>,
+                pager_cfg,
                 slug.as_deref(),
                 pr.as_deref(),
                 branch.as_deref(),
@@ -550,16 +639,31 @@ pub async fn run(
             status_filter,
             json,
             flat,
+            all,
+            include_done,
+            since,
+            reverse,
         } => {
+            let opts = status::StatusOpts {
+                status_filter: status_filter.clone(),
+                json: *json,
+                flat: *flat,
+                all: *all,
+                include_done: *include_done,
+                since: since.clone(),
+                reverse: *reverse,
+                no_pager: args.no_pager || *json,
+            };
             status::run_status(
                 registry.clone() as Arc<dyn Registry>,
-                status_filter.clone(),
-                *json,
-                *flat,
+                Some(&config.pager),
+                opts,
             )
             .await
         }
-        Commands::Info { id } => info::run_info(registry.clone() as Arc<dyn Registry>, id).await,
+        Commands::Info { id, json } => {
+            info::run_info(registry.clone() as Arc<dyn Registry>, id, *json).await
+        }
         Commands::Logs { arg, follow } => {
             logs::run_logs(registry.clone() as Arc<dyn Registry>, config, arg, *follow).await
         }

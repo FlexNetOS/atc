@@ -128,18 +128,22 @@ pub async fn run_logs(
     let log_path = resolve_log_path(registry.as_ref(), config, arg).await?;
 
     if !log_path.exists() {
-        anyhow::bail!("No log file: {}", log_path.display());
+        anyhow::bail!(
+            "No log file: {}\nhint: try `atc info {arg}` to verify the dispatch exists.",
+            log_path.display()
+        );
     }
 
-    // Print existing content and get the byte offset where replay ended
-    let start_pos = print_existing_lines(&log_path)?;
-
-    if !follow {
-        return Ok(());
+    if follow {
+        // Follow mode bypasses the pager — output should stream directly.
+        let start_pos = print_existing_lines(&log_path)?;
+        return follow_log(&log_path, start_pos).await;
     }
 
-    // Follow mode: use notify for file change events with poll fallback
-    follow_log(&log_path, start_pos).await
+    // Non-follow mode: route through the pager for long replay.
+    let _pager = crate::pager::setup_pager(Some(&config.pager));
+    print_existing_lines(&log_path)?;
+    Ok(())
 }
 
 /// Follow a log file, printing new lines as they appear.
