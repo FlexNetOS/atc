@@ -151,8 +151,11 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | `atc close <slug>` | Verify task completion and close |
 | `atc post-complete` | Run post-completion (auto or manual recovery) |
 | `atc prompt <directive>` | Preview rendered system prompt |
-| `atc init` | Initialize `.atc/` project directory |
+| `atc init` | Initialize `.atc/` project directory, then prompt to wire your coding agent (TTY) |
 | `atc init --force` | Re-initialize `.atc/`, overwriting all files |
+| `atc init <agent>` | Wire `.atc/skills/` into a coding agent (e.g. `claude`, `agents`) |
+| `atc init --list-agents` | Show supported agents and current wire-up status |
+| `atc init --all-agents` | Wire every detected agent (skips entries whose parent dir is missing) |
 
 ## `.atc/` Project Directory
 
@@ -170,11 +173,45 @@ The queue is the universal interface between selection (what to dispatch) and sc
 │   ├── pr-review.md         # Handlebars templates with frontmatter
 │   ├── swot.md
 │   └── ...
-└── components/
-    ├── base.md              # System prompt building blocks
-    ├── code-read.md
-    └── ...
+├── components/
+│   ├── base.md              # System prompt building blocks
+│   ├── code-read.md
+│   └── ...
+└── skills/
+    ├── atc-reference.md     # Reference doc for coding agents (CLI surface)
+    ├── dispatch.md          # How to dispatch via ATC
+    └── monitor.md           # How to monitor a running dispatch
 ```
+
+## Hooking Into Your Coding Agent
+
+ATC ships agent skills under `.atc/skills/`. To make them visible to a specific
+coding agent, run `atc init <agent>` — it creates a directory-level symlink (or a
+copy with `--copy`) from the agent's skills directory back to `.atc/skills`.
+
+```bash
+atc init claude        # .claude/skills/atc -> ../../.atc/skills (symlink)
+atc init agents        # .agents/skills/atc -> ../../.atc/skills (symlink)
+atc init claude --copy # copy files instead (Windows-friendly)
+atc init --all-agents  # wire every entry whose parent dir already exists
+atc init --list-agents # show the registry + current wire-up status
+```
+
+`atc init` (no subcommand) on a TTY scaffolds `.atc/` and then opens a multi-select
+picker so you can wire your agents in one shot. Pass `--no-interactive` to skip the
+picker (CI / scripts) or `--interactive` to open the picker without re-scaffolding
+`.atc/` (post-init re-wire).
+
+| Agent  | Target path          | Purpose |
+|--------|----------------------|---------|
+| `claude` | `.claude/skills/atc` | Claude Code |
+| `agents` | `.agents/skills/atc` | Generic `.agents/` skills convention |
+
+`atc init <agent>` is idempotent — re-running on a correct symlink is a no-op. A
+wrong-target symlink errors without `--force`. A real user directory at the
+target is never deleted, with or without `--force`. On platforms where symlink
+syscalls fail (e.g. Windows without dev-mode), ATC falls back to copy mode and
+prints a one-line warning.
 
 **Re-init behavior:**
 
