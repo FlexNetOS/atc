@@ -195,7 +195,7 @@ impl TaskResolver {
         // giving deterministic "first match wins" semantics.
         use futures::stream::{self, StreamExt};
         let slug_owned = slug.to_string();
-        let results: Vec<(PathBuf, bool)> = stream::iter(sub_projects.into_iter())
+        let results: Vec<(PathBuf, bool)> = stream::iter(sub_projects)
             .map(|p| {
                 let s = slug_owned.clone();
                 async move {
