@@ -426,7 +426,7 @@ pub async fn run_health(
     }
 
     // Sort by dispatched_at desc for consistent display
-    display_records.sort_by(|a, b| b.dispatched_at.cmp(&a.dispatched_at));
+    display_records.sort_by_key(|r| std::cmp::Reverse(r.dispatched_at));
 
     if json {
         let json_out = serde_json::to_string_pretty(&display_records)?;
