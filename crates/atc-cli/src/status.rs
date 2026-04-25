@@ -509,10 +509,12 @@ pub async fn run_status(
     // sees a non-TTY and strips ANSI codes — defeating the whole color story.
     // If we were a TTY before the pager swap, force colors on so `less -R`
     // actually sees them. The process exits after this function returns, so
-    // no restore is needed.
+    // no restore is needed. NO_COLOR still wins — honor the disable contract
+    // implemented in `style::colors_enabled()`.
     if _pager_guard.is_some()
         && stdout_was_tty
         && crate::style::current_mode() == crate::style::ColorMode::Auto
+        && std::env::var_os("NO_COLOR").is_none()
     {
         crate::style::set_color_mode(crate::style::ColorMode::Always);
     }
