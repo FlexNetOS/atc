@@ -120,6 +120,14 @@ pub fn apply_selection(
 /// CLI surface (`atc init --interactive --copy`, etc.) propagate through the
 /// picker path instead of being silently dropped.
 pub fn run_picker(base: &Path, copy: bool, force: bool) -> Result<()> {
+    let skills_src = base.join(".atc").join("skills");
+    if !skills_src.is_dir() {
+        anyhow::bail!(
+            "{} does not exist. Run 'atc init' first to scaffold .atc/.",
+            skills_src.display()
+        );
+    }
+
     let options = build_options(base);
     let selectable: Vec<&AgentOption> = options.iter().filter(|o| o.selectable).collect();
 
@@ -335,6 +343,21 @@ mod tests {
         apply_selection(dir.path(), &[claude], false, false).unwrap();
         let target = dir.path().join(entry.target_dir);
         assert!(target.is_dir(), "should remain a copy directory");
+    }
+
+    #[test]
+    fn run_picker_errors_when_skills_src_missing() {
+        // A bare run_picker call (no `atc init` first) must not prompt — it
+        // should bail with the same hint that run_init_agent prints. Otherwise
+        // every selectable row would fail with "Run 'atc init' first" *after*
+        // the user makes a selection.
+        let dir = tempfile::tempdir().unwrap();
+        // Note: do NOT create .atc/skills.
+        let err = run_picker(dir.path(), false, false).unwrap_err();
+        assert!(
+            err.to_string().contains("Run 'atc init' first"),
+            "expected preflight bail, got: {err}"
+        );
     }
 
     #[test]

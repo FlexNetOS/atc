@@ -11,7 +11,7 @@ Use this when the user asks you to dispatch, run, or send an agent to work on a 
 | Review a PR | `atc run pr-review --param pr=<url>` |
 | Fix specific PR comments | `atc run pr-comment --param pr=<url>` |
 | Review current branch locally | `atc run branch-review` |
-| Research/explore a task | `atc run research task <slug>` |
+| Research/explore a task | `atc run task <slug> --directive research` |
 | Close/verify a task | `atc run close --param task=<slug>` |
 | Raw prompt | `atc run '<text>' --directive <directive>` |
 

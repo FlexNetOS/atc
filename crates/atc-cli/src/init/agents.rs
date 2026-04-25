@@ -16,6 +16,12 @@ use std::path::{Path, PathBuf};
 
 use super::scaffold::DEFAULT_SKILLS;
 
+/// Marker file written into copy-mode targets so we can later confirm a directory
+/// is ATC-managed without depending on filename heuristics. The file body is a
+/// short identifier so a casual `cat` reveals what produced the directory.
+const COPY_MARKER_FILENAME: &str = ".atc-skills-managed";
+const COPY_MARKER_BODY: &str = "atc init copy-mode marker; do not edit\n";
+
 /// Static description of one supported coding agent.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentEntry {
@@ -412,20 +418,19 @@ fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
 
     let mut copied: HashSet<String> = HashSet::new();
 
-    if let Ok(rd) = std::fs::read_dir(skills_src) {
-        for entry in rd {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let src = entry.path();
-            let dst = target.join(entry.file_name());
-            std::fs::copy(&src, &dst).with_context(|| {
-                format!("failed to copy {} -> {}", src.display(), dst.display())
-            })?;
-            if let Ok(name) = entry.file_name().into_string() {
-                copied.insert(name);
-            }
+    let rd = std::fs::read_dir(skills_src)
+        .with_context(|| format!("failed to read {}", skills_src.display()))?;
+    for entry in rd {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let src = entry.path();
+        let dst = target.join(entry.file_name());
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("failed to copy {} -> {}", src.display(), dst.display()))?;
+        if let Ok(name) = entry.file_name().into_string() {
+            copied.insert(name);
         }
     }
 
@@ -437,6 +442,8 @@ fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
         std::fs::write(target.join(name), content.as_bytes())
             .with_context(|| format!("failed to write {}", target.join(name).display()))?;
     }
+
+    write_marker(target)?;
 
     Ok(())
 }
@@ -478,29 +485,25 @@ fn mirror_skills(skills_src: &Path, target: &Path) -> Result<()> {
         }
     }
 
+    write_marker(target)?;
+
     Ok(())
 }
 
-/// Heuristic: a real directory is considered an ATC-skills copy if it contains
-/// at least one of the embedded skill filenames and nothing whose name suggests
-/// the user repurposed the dir for something else. We only need this to pick a
-/// useful default action in copy-mode; symlink-mode never overwrites a real dir.
+/// Write the copy-mode marker file. Idempotent — overwriting is fine because
+/// the contents are fixed.
+fn write_marker(target: &Path) -> Result<()> {
+    let marker = target.join(COPY_MARKER_FILENAME);
+    std::fs::write(&marker, COPY_MARKER_BODY)
+        .with_context(|| format!("failed to write {}", marker.display()))
+}
+
+/// A directory is an ATC-skills copy iff it contains the marker file written
+/// by [`copy_skills`] / [`mirror_skills`]. Filename-based heuristics produced
+/// false positives for any user dir that happened to hold a doc with the same
+/// name as an embedded skill (e.g. `dispatch.md`).
 fn is_atc_skills_copy(dir: &Path) -> bool {
-    let known_names: HashSet<&str> = DEFAULT_SKILLS.iter().map(|(n, _)| *n).collect();
-    let mut saw_known = false;
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in rd.flatten() {
-        let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else {
-            continue;
-        };
-        if known_names.contains(name) {
-            saw_known = true;
-        }
-    }
-    saw_known
+    dir.join(COPY_MARKER_FILENAME).is_file()
 }
 
 #[cfg(test)]
@@ -825,6 +828,65 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("notes.md"), "user").unwrap();
         assert_eq!(agent_status(base, entry), AgentStatus::UserDir);
+    }
+
+    #[test]
+    fn user_dir_with_default_skill_filename_is_not_copied() {
+        // Regression: is_atc_skills_copy used to return true for any directory
+        // containing a file named after an embedded skill (e.g. `dispatch.md`),
+        // misclassifying user-owned dirs as ATC-managed and putting them at
+        // risk of being mirrored over. The marker file gates that decision.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        make_skills_dir(base);
+        let entry = find_agent("claude").unwrap();
+        make_parent(base, entry);
+
+        let target = base.join(entry.target_dir);
+        std::fs::create_dir_all(&target).unwrap();
+        // User happens to have a file named like an embedded skill.
+        std::fs::write(target.join("dispatch.md"), "user notes").unwrap();
+
+        assert_eq!(agent_status(base, entry), AgentStatus::UserDir);
+    }
+
+    #[test]
+    fn copy_mode_writes_marker_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        make_skills_dir(base);
+        let entry = find_agent("agents").unwrap();
+        make_parent(base, entry);
+
+        run_init_agent(
+            base,
+            "agents",
+            AgentOpts {
+                force: false,
+                copy: true,
+            },
+        )
+        .unwrap();
+
+        let marker = base.join(entry.target_dir).join(COPY_MARKER_FILENAME);
+        assert!(marker.is_file(), "copy mode should write the marker file");
+        assert_eq!(agent_status(base, entry), AgentStatus::Copied);
+    }
+
+    #[test]
+    fn copy_skills_propagates_read_failure() {
+        // If the source directory cannot be read (e.g. it does not exist),
+        // copy_skills must fail rather than silently fall back to the embedded
+        // bundle and drop user-authored files.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let target = base.join("target-skills");
+        let nonexistent = base.join("nope");
+        let err = copy_skills(&nonexistent, &target).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to read"),
+            "expected 'failed to read' context, got: {err}"
+        );
     }
 
     #[test]
