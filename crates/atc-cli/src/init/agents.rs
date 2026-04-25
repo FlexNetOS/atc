@@ -112,7 +112,12 @@ pub fn agent_status(base: &Path, entry: &AgentEntry) -> AgentStatus {
     let meta = match std::fs::symlink_metadata(&target) {
         Ok(m) => Some(m),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => None,
+        Err(e) => {
+            // Don't silently swallow permission errors or other I/O failures —
+            // surface them so the user knows the status check is unreliable.
+            eprintln!("warning: could not stat {}: {e}", target.display());
+            None
+        }
     };
 
     match meta {
@@ -196,7 +201,7 @@ pub fn run_init_agent(base: &Path, agent_name: &str, opts: AgentOpts) -> Result<
                 "  {agent_name}: replaced symlink with copy at {}",
                 target.display()
             );
-            Ok(WireOutcome::Created)
+            Ok(WireOutcome::Replaced)
         }
         (AgentStatus::WrongTarget(existing), _) => {
             if !opts.force {
@@ -887,6 +892,41 @@ mod tests {
             err.to_string().contains("failed to read"),
             "expected 'failed to read' context, got: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_symlink_with_copy_returns_replaced() {
+        // (Wired, copy=true, force=true) replaces an existing symlink with a copy
+        // and should report Replaced — semantically a replacement, not a fresh
+        // creation, mirroring the WrongTarget and (Copied, false) replacement arms.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        make_skills_dir(base);
+        let entry = find_agent("claude").unwrap();
+        make_parent(base, entry);
+
+        // Wire as a symlink first.
+        run_init_agent(base, "claude", AgentOpts::default()).unwrap();
+        let target = base.join(entry.target_dir);
+        assert!(std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // Re-run with --copy --force; this should replace the symlink with a copy.
+        let outcome = run_init_agent(
+            base,
+            "claude",
+            AgentOpts {
+                force: true,
+                copy: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, WireOutcome::Replaced);
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        assert!(meta.is_dir(), "should be a real copy directory");
     }
 
     #[test]
