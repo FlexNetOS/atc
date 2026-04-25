@@ -79,15 +79,18 @@ pub async fn run(config: &atc_core::config::AtcConfig, opts: InitOpts) -> anyhow
 
     if opts.interactive {
         let base = scaffold::base_dir(config).to_path_buf();
-        return run_picker(&base);
+        return run_picker(&base, opts.copy, opts.force);
     }
 
     // Default: scaffold .atc/, then optionally pick agents.
     run_init(config, opts.force).await?;
 
-    if !opts.no_interactive && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+    if !opts.no_interactive
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+    {
         let base = scaffold::base_dir(config).to_path_buf();
-        run_picker(&base)?;
+        run_picker(&base, opts.copy, opts.force)?;
     }
 
     Ok(())

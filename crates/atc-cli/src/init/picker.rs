@@ -46,7 +46,10 @@ pub fn build_options(base: &Path) -> Vec<AgentOption> {
                 name = entry.name,
                 target = entry.target_dir,
             );
-            let selectable = !matches!(status, AgentStatus::ParentMissing);
+            // UserDir is unreconcilable from the picker (no --force can delete user
+            // content), so don't offer it as a selectable row. Copied is selectable
+            // because apply_selection auto-applies copy mode for those rows.
+            let selectable = !matches!(status, AgentStatus::ParentMissing | AgentStatus::UserDir);
             let default_selected = matches!(status, AgentStatus::Available);
             AgentOption {
                 entry,
@@ -78,9 +81,12 @@ pub fn render_options(opts: &[AgentOption]) -> String {
 }
 
 /// Apply a selection by calling [`run_init_agent`] for each chosen agent.
-/// `force_for_wrong_target` lets the picker auto-`--force` rows the user
-/// selected that already have a wrong-target symlink, without requiring the
-/// user to retype the flag.
+///
+/// The picker auto-applies `--force` to rows that have a wrong-target symlink,
+/// and auto-applies `--copy` to rows that are already a managed copy (so a
+/// re-run of the picker mirrors the latest skill set without forcing the user
+/// to remember the flag). Explicit `copy`/`force` flags from the CLI still
+/// override per-row defaults.
 pub fn apply_selection(
     base: &Path,
     selected: &[&AgentOption],
@@ -90,9 +96,10 @@ pub fn apply_selection(
     let mut failures: Vec<(String, String)> = Vec::new();
     for opt in selected {
         let force_this = force || matches!(opt.status, AgentStatus::WrongTarget(_));
+        let copy_this = copy || matches!(opt.status, AgentStatus::Copied);
         let agent_opts = AgentOpts {
             force: force_this,
-            copy,
+            copy: copy_this,
         };
         if let Err(e) = run_init_agent(base, opt.entry.name, agent_opts) {
             failures.push((opt.entry.name.to_string(), e.to_string()));
@@ -108,7 +115,11 @@ pub fn apply_selection(
 }
 
 /// Run the interactive picker. No-op (returns Ok) if no selectable rows exist.
-pub fn run_picker(base: &Path) -> Result<()> {
+///
+/// `copy` and `force` are forwarded to [`apply_selection`] so flags from the
+/// CLI surface (`atc init --interactive --copy`, etc.) propagate through the
+/// picker path instead of being silently dropped.
+pub fn run_picker(base: &Path, copy: bool, force: bool) -> Result<()> {
     let options = build_options(base);
     let selectable: Vec<&AgentOption> = options.iter().filter(|o| o.selectable).collect();
 
@@ -150,7 +161,7 @@ pub fn run_picker(base: &Path) -> Result<()> {
         .filter(|o| chosen_labels.contains(&o.label))
         .collect();
 
-    apply_selection(base, &chosen, false, false)?;
+    apply_selection(base, &chosen, copy, force)?;
 
     // Print the resulting status table for confirmation.
     super::agents::list_agents(base)?;
@@ -227,6 +238,7 @@ mod tests {
         assert!(rendered.contains("parent missing"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn apply_selection_calls_run_init_agent() {
         // This is the picker→install smoke test: handing a selection to
@@ -255,6 +267,7 @@ mod tests {
         assert_eq!(link, std::path::PathBuf::from("../../.atc/skills"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn apply_selection_auto_force_for_wrong_target() {
         let dir = fake_base(true, false);
@@ -275,5 +288,72 @@ mod tests {
         apply_selection(dir.path(), &[claude], false, false).unwrap();
         let link = std::fs::read_link(&target).unwrap();
         assert_eq!(link, std::path::PathBuf::from("../../.atc/skills"));
+    }
+
+    #[test]
+    fn build_options_user_dir_is_unselectable() {
+        // A real user directory at the target must not appear as a selectable
+        // picker row — the picker has no way to reconcile it (refusing to
+        // delete user content is the documented behavior of run_init_agent).
+        let dir = fake_base(true, false);
+        let entry = AGENT_REGISTRY.iter().find(|e| e.name == "claude").unwrap();
+        let target = dir.path().join(entry.target_dir);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("user-notes.md"), "user").unwrap();
+
+        let opts = build_options(dir.path());
+        let claude = opts.iter().find(|o| o.entry.name == "claude").unwrap();
+        assert_eq!(claude.status, AgentStatus::UserDir);
+        assert!(!claude.selectable);
+    }
+
+    #[test]
+    fn apply_selection_auto_copy_for_copied_rows() {
+        // When the target is already an ATC-managed copy, the picker should
+        // auto-apply --copy so the row is reconcilable (mirrored) instead of
+        // erroring with "is a copy directory; use --force to replace".
+        let dir = fake_base(true, false);
+        let entry = AGENT_REGISTRY.iter().find(|e| e.name == "claude").unwrap();
+
+        // Seed a Copied state via the flag path.
+        super::run_init_agent(
+            dir.path(),
+            "claude",
+            AgentOpts {
+                force: false,
+                copy: true,
+            },
+        )
+        .unwrap();
+
+        let opts = build_options(dir.path());
+        let claude = opts.iter().find(|o| o.entry.name == "claude").unwrap();
+        assert_eq!(claude.status, AgentStatus::Copied);
+        assert!(claude.selectable, "Copied rows should be selectable");
+
+        // Without explicit --copy, the picker still mirrors (no error).
+        apply_selection(dir.path(), &[claude], false, false).unwrap();
+        let target = dir.path().join(entry.target_dir);
+        assert!(target.is_dir(), "should remain a copy directory");
+    }
+
+    #[test]
+    fn apply_selection_threads_copy_flag() {
+        // Explicit --copy from the CLI should propagate through the picker
+        // and produce a real-directory copy instead of a symlink, even for
+        // an Available row.
+        let dir = fake_base(true, false);
+        let entry = AGENT_REGISTRY.iter().find(|e| e.name == "claude").unwrap();
+
+        let opts = build_options(dir.path());
+        let claude = opts.iter().find(|o| o.entry.name == "claude").unwrap();
+        assert_eq!(claude.status, AgentStatus::Available);
+
+        apply_selection(dir.path(), &[claude], true, false).unwrap();
+
+        let target = dir.path().join(entry.target_dir);
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        assert!(meta.is_dir(), "expected a real directory (copy mode)");
+        assert!(!meta.file_type().is_symlink());
     }
 }

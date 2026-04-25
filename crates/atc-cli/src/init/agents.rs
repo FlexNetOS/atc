@@ -400,17 +400,44 @@ fn make_symlink(_link_target: &Path, _link_path: &Path) -> std::io::Result<()> {
     ))
 }
 
-/// Copy every embedded skill file into `target` (creating it if absent).
+/// Copy every skill file from `skills_src` into `target` (creating it if absent).
+///
+/// We mirror the on-disk source directory rather than only `DEFAULT_SKILLS`, so
+/// user-authored files in `.atc/skills/` are picked up on the first `--copy`
+/// run and on the symlink fallback path. Falls back to the embedded content for
+/// known skill names that are missing on disk.
 fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
     std::fs::create_dir_all(target)
         .with_context(|| format!("failed to create target directory {}", target.display()))?;
+
+    let mut copied: HashSet<String> = HashSet::new();
+
+    if let Ok(rd) = std::fs::read_dir(skills_src) {
+        for entry in rd {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let src = entry.path();
+            let dst = target.join(entry.file_name());
+            std::fs::copy(&src, &dst).with_context(|| {
+                format!("failed to copy {} -> {}", src.display(), dst.display())
+            })?;
+            if let Ok(name) = entry.file_name().into_string() {
+                copied.insert(name);
+            }
+        }
+    }
+
+    // Backstop: any embedded skill missing from disk gets restored from the bundle.
     for (name, content) in DEFAULT_SKILLS {
-        // Prefer on-disk content (user may have customized), fall back to embedded.
-        let src_path = skills_src.join(name);
-        let bytes = std::fs::read(&src_path).unwrap_or_else(|_| content.as_bytes().to_vec());
-        std::fs::write(target.join(name), bytes)
+        if copied.contains(*name) {
+            continue;
+        }
+        std::fs::write(target.join(name), content.as_bytes())
             .with_context(|| format!("failed to write {}", target.join(name).display()))?;
     }
+
     Ok(())
 }
 
@@ -517,6 +544,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn fresh_wire_creates_relative_symlink() {
         let dir = tempfile::tempdir().unwrap();
@@ -540,6 +568,7 @@ mod tests {
         assert!(s.contains("ATC Quick Reference"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn rerun_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
@@ -553,6 +582,7 @@ mod tests {
         assert_eq!(outcome, WireOutcome::AlreadyWired);
     }
 
+    #[cfg(unix)]
     #[test]
     fn wrong_target_errors_without_force() {
         let dir = tempfile::tempdir().unwrap();
@@ -649,6 +679,34 @@ mod tests {
     }
 
     #[test]
+    fn copy_mode_includes_user_authored_skill_files() {
+        // copy_skills should mirror the on-disk .atc/skills/ directory rather than
+        // only the embedded set, so user-authored files like .atc/skills/custom.md
+        // appear in the target on the first --copy run.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        make_skills_dir(base);
+        std::fs::write(base.join(".atc/skills/custom.md"), "user skill").unwrap();
+        let entry = find_agent("agents").unwrap();
+        make_parent(base, entry);
+
+        run_init_agent(
+            base,
+            "agents",
+            AgentOpts {
+                force: false,
+                copy: true,
+            },
+        )
+        .unwrap();
+
+        let target = base.join(entry.target_dir);
+        let custom = target.join("custom.md");
+        assert!(custom.exists(), "user-added skill file should be copied");
+        assert_eq!(std::fs::read_to_string(&custom).unwrap(), "user skill");
+    }
+
+    #[test]
     fn copy_mode_mirror_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
@@ -734,6 +792,7 @@ mod tests {
         assert!(base.join(entry.parent_dir).is_dir());
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_status_reports_states() {
         let dir = tempfile::tempdir().unwrap();
