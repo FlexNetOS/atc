@@ -211,11 +211,44 @@ mod args {
             #[arg(long)]
             log: Option<std::path::PathBuf>,
         },
-        /// Initialize .atc/ directory from current config
+        /// Initialize .atc/ directory, then optionally wire skills into a coding agent
+        ///
+        /// Examples:
+        ///   atc init                  # scaffold .atc/, then prompt to wire agents (TTY)
+        ///   atc init --no-interactive # scaffold only, skip picker (CI / scripts)
+        ///   atc init --force          # overwrite .atc/, then prompt
+        ///   atc init claude           # wire .atc/skills into .claude/skills/atc
+        ///   atc init claude --copy    # copy files instead of symlinking
+        ///   atc init --all-agents     # wire every detected agent
+        ///   atc init --list-agents    # show registry + current wire-up status
+        ///   atc init --interactive    # picker only (skip .atc/ scaffold)
         Init {
-            /// Force overwrite existing .atc/ directory
+            /// Agent name (e.g. "claude", "agents"). When set, wires .atc/skills
+            /// into that agent's skills dir without re-scaffolding .atc/.
+            agent: Option<String>,
+            /// Force overwrite existing .atc/ files (scaffold mode), or replace a
+            /// wrong-target symlink (agent mode). Never deletes a real user dir.
             #[arg(long)]
             force: bool,
+            /// Copy files instead of symlinking (agent mode). Re-runs mirror
+            /// .atc/skills/ but never delete user-added files in the target dir.
+            #[arg(long)]
+            copy: bool,
+            /// Print the agent registry with current wire-up status, then exit.
+            #[arg(long)]
+            list_agents: bool,
+            /// JSON output for --list-agents.
+            #[arg(long)]
+            json: bool,
+            /// Wire every registry entry whose parent dir exists in the project.
+            #[arg(long)]
+            all_agents: bool,
+            /// Skip the interactive picker even on a TTY.
+            #[arg(long)]
+            no_interactive: bool,
+            /// Open the picker without re-scaffolding .atc/ (post-init re-wire).
+            #[arg(long)]
+            interactive: bool,
         },
         /// Watch running agent sessions and emit structured events
         Watch {
@@ -544,7 +577,28 @@ pub async fn run(
             )
             .await
         }
-        Commands::Init { force } => init::run_init(config, *force).await,
+        Commands::Init {
+            agent,
+            force,
+            copy,
+            list_agents,
+            json,
+            all_agents,
+            no_interactive,
+            interactive,
+        } => {
+            let opts = init::InitOpts {
+                agent: agent.clone(),
+                force: *force,
+                copy: *copy,
+                list_agents: *list_agents,
+                list_agents_json: *json,
+                all_agents: *all_agents,
+                no_interactive: *no_interactive,
+                interactive: *interactive,
+            };
+            init::run(config, opts).await
+        }
         Commands::Watch {
             id,
             all_running,

@@ -6,25 +6,31 @@ use std::path::Path;
 const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
     (
         "implement",
-        include_str!("../defaults/directives/implement.toml"),
+        include_str!("../../defaults/directives/implement.toml"),
     ),
     (
         "review-fix",
-        include_str!("../defaults/directives/review-fix.toml"),
+        include_str!("../../defaults/directives/review-fix.toml"),
     ),
     (
         "pr-comments",
-        include_str!("../defaults/directives/pr-comments.toml"),
+        include_str!("../../defaults/directives/pr-comments.toml"),
     ),
     (
         "research",
-        include_str!("../defaults/directives/research.toml"),
+        include_str!("../../defaults/directives/research.toml"),
     ),
-    ("close", include_str!("../defaults/directives/close.toml")),
-    ("refine", include_str!("../defaults/directives/refine.toml")),
+    (
+        "close",
+        include_str!("../../defaults/directives/close.toml"),
+    ),
+    (
+        "refine",
+        include_str!("../../defaults/directives/refine.toml"),
+    ),
     (
         "create-task",
-        include_str!("../defaults/directives/create-task.toml"),
+        include_str!("../../defaults/directives/create-task.toml"),
     ),
 ];
 
@@ -32,85 +38,123 @@ const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
 const DEFAULT_TEMPLATES: &[(&str, &str)] = &[
     (
         "pr-review.md",
-        include_str!("../defaults/templates/pr-review.md"),
+        include_str!("../../defaults/templates/pr-review.md"),
     ),
     (
         "pr-comment.md",
-        include_str!("../defaults/templates/pr-comment.md"),
+        include_str!("../../defaults/templates/pr-comment.md"),
     ),
     (
         "branch-review.md",
-        include_str!("../defaults/templates/branch-review.md"),
+        include_str!("../../defaults/templates/branch-review.md"),
     ),
-    ("close.md", include_str!("../defaults/templates/close.md")),
+    (
+        "close.md",
+        include_str!("../../defaults/templates/close.md"),
+    ),
     (
         "push-branch.md",
-        include_str!("../defaults/templates/push-branch.md"),
+        include_str!("../../defaults/templates/push-branch.md"),
     ),
-    ("swot.md", include_str!("../defaults/templates/swot.md")),
+    ("swot.md", include_str!("../../defaults/templates/swot.md")),
     (
         "commit-message.md",
-        include_str!("../defaults/templates/commit-message.md"),
+        include_str!("../../defaults/templates/commit-message.md"),
     ),
     (
         "doc-edit.md",
-        include_str!("../defaults/templates/doc-edit.md"),
+        include_str!("../../defaults/templates/doc-edit.md"),
     ),
 ];
 
 // --- Embedded default component files ---
 const DEFAULT_COMPONENTS: &[(&str, &str)] = &[
-    ("base.md", include_str!("../defaults/components/base.md")),
+    ("base.md", include_str!("../../defaults/components/base.md")),
     (
         "constraints.md",
-        include_str!("../defaults/components/constraints.md"),
+        include_str!("../../defaults/components/constraints.md"),
     ),
     (
         "code-read.md",
-        include_str!("../defaults/components/code-read.md"),
+        include_str!("../../defaults/components/code-read.md"),
     ),
     (
         "code-write.md",
-        include_str!("../defaults/components/code-write.md"),
+        include_str!("../../defaults/components/code-write.md"),
     ),
-    ("git.md", include_str!("../defaults/components/git.md")),
+    ("git.md", include_str!("../../defaults/components/git.md")),
     (
         "github.md",
-        include_str!("../defaults/components/github.md"),
+        include_str!("../../defaults/components/github.md"),
     ),
     (
         "review.md",
-        include_str!("../defaults/components/review.md"),
+        include_str!("../../defaults/components/review.md"),
     ),
     (
         "kb-read.md",
-        include_str!("../defaults/components/kb-read.md"),
+        include_str!("../../defaults/components/kb-read.md"),
     ),
     (
         "kb-write.md",
-        include_str!("../defaults/components/kb-write.md"),
+        include_str!("../../defaults/components/kb-write.md"),
     ),
     (
         "refine.md",
-        include_str!("../defaults/components/refine.md"),
+        include_str!("../../defaults/components/refine.md"),
     ),
     (
         "create-task.md",
-        include_str!("../defaults/components/create-task.md"),
+        include_str!("../../defaults/components/create-task.md"),
     ),
-    ("web.md", include_str!("../defaults/components/web.md")),
+    ("web.md", include_str!("../../defaults/components/web.md")),
 ];
 
 /// Embedded default partials — shared template fragments referenced via `{{>name}}`.
 const DEFAULT_PARTIALS: &[(&str, &str)] = &[
     (
         "github-comments.md",
-        include_str!("../defaults/partials/github-comments.md"),
+        include_str!("../../defaults/partials/github-comments.md"),
     ),
-    ("rebase.md", include_str!("../defaults/partials/rebase.md")),
-    ("review.md", include_str!("../defaults/partials/review.md")),
-    ("verify.md", include_str!("../defaults/partials/verify.md")),
+    (
+        "rebase.md",
+        include_str!("../../defaults/partials/rebase.md"),
+    ),
+    (
+        "review.md",
+        include_str!("../../defaults/partials/review.md"),
+    ),
+    (
+        "verify.md",
+        include_str!("../../defaults/partials/verify.md"),
+    ),
 ];
+
+/// Embedded default agent skill files — markdown documents teaching coding agents
+/// how to dispatch and monitor ATC. Written to `.atc/skills/<name>.md` and exposed
+/// to specific agents via `atc init <agent>` (symlink or copy).
+pub(crate) const DEFAULT_SKILLS: &[(&str, &str)] = &[
+    (
+        "atc-reference.md",
+        include_str!("../../defaults/skills/atc-reference.md"),
+    ),
+    (
+        "dispatch.md",
+        include_str!("../../defaults/skills/dispatch.md"),
+    ),
+    (
+        "monitor.md",
+        include_str!("../../defaults/skills/monitor.md"),
+    ),
+];
+
+/// Resolve the scaffold base directory from config (defaults to ".").
+pub(crate) fn base_dir(config: &AtcConfig) -> &Path {
+    config
+        .config_dir
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."))
+}
 
 /// Scaffold a `.atc/` directory with embedded default content.
 ///
@@ -120,15 +164,13 @@ const DEFAULT_PARTIALS: &[(&str, &str)] = &[
 /// - `.atc/components/<name>.md` — default component files embedded in the binary
 /// - `.atc/templates/<name>.md` — default template files embedded in the binary
 /// - `.atc/partials/<name>.md` — default partial files (shared template fragments)
+/// - `.atc/skills/<name>.md` — default agent skill files (atc-reference, dispatch, monitor)
 ///
 /// **Re-init behavior:**
 /// - Without `--force`: create files that don't exist, skip files that do.
 /// - With `--force`: overwrite everything.
 pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
-    let base = config
-        .config_dir
-        .as_deref()
-        .unwrap_or_else(|| Path::new("."));
+    let base = base_dir(config);
     let atc_dir = base.join(".atc");
 
     let is_reinit = atc_dir.exists();
@@ -140,6 +182,7 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
         atc_dir.join("templates"),
         atc_dir.join("components"),
         atc_dir.join("partials"),
+        atc_dir.join("skills"),
     ];
     for dir in &dirs {
         std::fs::create_dir_all(dir)
@@ -189,6 +232,13 @@ pub async fn run_init(config: &AtcConfig, force: bool) -> Result<()> {
     for (name, content) in DEFAULT_PARTIALS {
         let path = atc_dir.join("partials").join(name);
         let label = format!(".atc/partials/{name}");
+        write_file(&path, content, &label, force)?;
+    }
+
+    // Write embedded default agent skill files
+    for (name, content) in DEFAULT_SKILLS {
+        let path = atc_dir.join("skills").join(name);
+        let label = format!(".atc/skills/{name}");
         write_file(&path, content, &label, force)?;
     }
 
@@ -503,6 +553,7 @@ mod tests {
         assert!(dir.path().join(".atc/templates").is_dir());
         assert!(dir.path().join(".atc/components").is_dir());
         assert!(dir.path().join(".atc/partials").is_dir());
+        assert!(dir.path().join(".atc/skills").is_dir());
     }
 
     #[tokio::test]
@@ -563,6 +614,27 @@ mod tests {
             let partial = std::fs::read_to_string(&path).unwrap();
             assert!(!partial.is_empty(), "partial {name} should not be empty");
         }
+
+        // Verify embedded skill files are written with content
+        for (name, _) in DEFAULT_SKILLS {
+            let path = dir.path().join(".atc/skills").join(name);
+            assert!(path.exists(), "skill {name} should exist");
+            let skill = std::fs::read_to_string(&path).unwrap();
+            assert!(!skill.is_empty(), "skill {name} should not be empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_init_skill_names_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        run_init(&cfg, false).await.unwrap();
+
+        let names: Vec<&str> = DEFAULT_SKILLS.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"atc-reference.md"));
+        assert!(names.contains(&"dispatch.md"));
+        assert!(names.contains(&"monitor.md"));
     }
 
     #[tokio::test]
@@ -658,6 +730,26 @@ mod tests {
         assert_eq!(
             contents, "# custom",
             "existing config.toml should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_init_skips_existing_skill_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AtcConfig::default();
+        cfg.config_dir = Some(dir.path().to_path_buf());
+        run_init(&cfg, false).await.unwrap();
+
+        // Customize a skill file
+        let skill_path = dir.path().join(".atc/skills/atc-reference.md");
+        std::fs::write(&skill_path, "# customized").unwrap();
+
+        // Re-init without force preserves it
+        run_init(&cfg, false).await.unwrap();
+        let contents = std::fs::read_to_string(&skill_path).unwrap();
+        assert_eq!(
+            contents, "# customized",
+            "existing skill should be preserved"
         );
     }
 
