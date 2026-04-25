@@ -12,7 +12,7 @@
 //! let header = dim().render("dispatched_at");
 //! ```
 
-use atc_core::types::Status;
+use atc_core::types::{Status, WorkUnitStatus};
 use owo_colors::{OwoColorize, Style};
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -106,6 +106,17 @@ pub fn status_style(status: Status) -> Style {
     }
 }
 
+/// Style for a work-unit status cell. Mirrors `status_style` for dispatches.
+pub fn work_unit_status_style(status: WorkUnitStatus) -> Style {
+    let s = Style::new();
+    match status {
+        WorkUnitStatus::Active => s.cyan(),
+        WorkUnitStatus::Merged => s.green(),
+        WorkUnitStatus::Closed => s.dimmed(),
+        WorkUnitStatus::Abandoned => s.red(),
+    }
+}
+
 /// Style for a USD cost cell. Threshold-based emphasis.
 pub fn cost_style(cost: Option<f64>) -> Style {
     let s = Style::new();
@@ -129,6 +140,11 @@ pub fn strong() -> Style {
 /// Convenience: render a status as colored text.
 pub fn render_status(status: Status) -> String {
     apply(status.as_str(), status_style(status))
+}
+
+/// Convenience: render a work-unit status as colored text.
+pub fn render_work_unit_status(status: WorkUnitStatus) -> String {
+    apply(status.as_str(), work_unit_status_style(status))
 }
 
 /// Convenience: render a cost as colored text. Returns "-" when None.

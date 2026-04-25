@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use crate::pager::setup_pager;
-use crate::style::{apply, dim, render_cost, render_status, strong};
+use crate::style::{apply, dim, render_cost, render_status, render_work_unit_status, strong};
 
 /// Maximum PR URLs to render inline in a cell. Excess collapses to `+N more`.
 const PR_LIST_INLINE_CAP: usize = 3;
@@ -260,7 +260,7 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
             branch.to_string(),
             prs,
             dispatch_label,
-            apply(wu.status.as_str(), dim()),
+            render_work_unit_status(wu.status),
             cost_str,
         ]);
     }
@@ -349,6 +349,9 @@ fn parse_since(s: &str) -> Result<Duration> {
 }
 
 /// Apply CLI filters to a registry result set.
+///
+/// `--since` is honored even when `--status` or `--all` narrows the set —
+/// status selection narrows the set; it does not disable the recency bound.
 pub fn apply_filters(
     mut records: Vec<DispatchRecord>,
     explicit_status: Option<&str>,
@@ -357,17 +360,36 @@ pub fn apply_filters(
     since: Option<&Duration>,
     now: DateTime<Utc>,
 ) -> Result<Vec<DispatchRecord>> {
-    if let Some(s) = explicit_status {
-        let parsed: Status = s.to_lowercase().parse()?;
-        records.retain(|r| r.status == parsed);
-        return Ok(records);
-    }
-    if all {
-        return Ok(records);
-    }
-
+    let explicit_status = explicit_status
+        .map(|s| s.to_lowercase().parse::<Status>())
+        .transpose()?;
     let cutoff = since.map(|d| now - *d);
+
     records.retain(|r| {
+        if let Some(status) = explicit_status {
+            // `--status X --since Y` narrows by status AND bounds by recency.
+            if r.status != status {
+                return false;
+            }
+            if let Some(c) = cutoff {
+                if r.updated_at < c {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if all {
+            // `--all --since Y` keeps every status but still bounds by recency.
+            if let Some(c) = cutoff {
+                if r.updated_at < c {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Default mode: interesting statuses (running/retrying/needs-*) are
+        // kept unconditionally; --since only bounds non-default-status rows.
         let in_default = DEFAULT_STATUSES.contains(&r.status);
         if include_done {
             // Drop stopped; keep interesting unconditionally; bound done/failed
@@ -710,6 +732,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn test_apply_filters_status_filter_respects_since() {
+        // `--status done --since 24h` must drop records older than the cutoff,
+        // not bypass `--since` via an early return.
+        let now = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut recent_done = sample_record("done-recent", Status::Done);
+        recent_done.updated_at = now - Duration::hours(2);
+        let mut old_done = sample_record("done-old", Status::Done);
+        old_done.updated_at = now - Duration::days(10);
+        let mut recent_running = sample_record("running-recent", Status::Running);
+        recent_running.updated_at = now - Duration::hours(1);
+
+        let since = Duration::hours(24);
+        let out = apply_filters(
+            vec![recent_done, old_done, recent_running],
+            Some("done"),
+            false,
+            false,
+            Some(&since),
+            now,
+        )
+        .unwrap();
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["done-recent"]);
+    }
+
+    #[test]
+    fn test_apply_filters_all_respects_since() {
+        // `--all --since 24h` keeps every status but still bounds by recency.
+        let now = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut recent_running = sample_record("running-recent", Status::Running);
+        recent_running.updated_at = now - Duration::hours(2);
+        let mut old_running = sample_record("running-old", Status::Running);
+        old_running.updated_at = now - Duration::days(10);
+        let mut recent_stopped = sample_record("stopped-recent", Status::Stopped);
+        recent_stopped.updated_at = now - Duration::hours(3);
+
+        let since = Duration::hours(24);
+        let out = apply_filters(
+            vec![recent_running, old_running, recent_stopped],
+            None,
+            true,
+            false,
+            Some(&since),
+            now,
+        )
+        .unwrap();
+        let mut ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["running-recent", "stopped-recent"]);
     }
 
     #[test]
