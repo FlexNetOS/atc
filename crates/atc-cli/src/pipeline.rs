@@ -1147,6 +1147,17 @@ impl<'a> DispatchPipeline<'a> {
     }
 }
 
+/// Human-readable description of what a worktree policy actually does.
+/// Single source of truth shared by dry-run preview and post-dispatch confirmation.
+fn worktree_policy_label(policy: WorktreePolicy) -> &'static str {
+    match policy {
+        WorktreePolicy::Branch => "create or reuse a worktree by branch name",
+        WorktreePolicy::Document => "use the document workspace path",
+        WorktreePolicy::None => "no worktree — run in the canonical repo root",
+        WorktreePolicy::Current => "no worktree — run in the current working directory",
+    }
+}
+
 /// Describe the resolved worktree location for a dispatch policy.
 ///
 /// Returns `(policy_label, resolved_path, optional_hint)`. The path is
@@ -1167,9 +1178,9 @@ fn describe_worktree(
         .ok()
         .unwrap_or_else(|| process_cwd.clone());
 
+    let label = worktree_policy_label(policy);
     match policy {
         WorktreePolicy::Branch => {
-            let label = "create or reuse a worktree by branch name";
             let worktree_base = config.dispatch.resolved_worktree_base();
             let sanitized = sanitize_slashes(branch);
             let path = match opts.repos.first() {
@@ -1186,19 +1197,10 @@ fn describe_worktree(
             };
             (label, path, hint)
         }
-        WorktreePolicy::Document => {
-            let label = "use the document workspace path";
-            // Without resolving the document we can only show the workspace root.
-            (label, workspace_root, None)
-        }
-        WorktreePolicy::None => {
-            let label = "no worktree — run in the canonical repo root";
-            (label, workspace_root, None)
-        }
-        WorktreePolicy::Current => {
-            let label = "no worktree — run in the current working directory";
-            (label, process_cwd, None)
-        }
+        // Without resolving the document we can only show the workspace root.
+        WorktreePolicy::Document => (label, workspace_root, None),
+        WorktreePolicy::None => (label, workspace_root, None),
+        WorktreePolicy::Current => (label, process_cwd, None),
     }
 }
 
@@ -1223,12 +1225,7 @@ fn print_dispatch_confirmation(
     primary_repo: Option<&str>,
 ) {
     let slug_display = task_slug.unwrap_or("(none)");
-    let policy_label = match worktree_policy {
-        WorktreePolicy::Branch => "create or reuse a worktree by branch name",
-        WorktreePolicy::Document => "use the document workspace path",
-        WorktreePolicy::None => "no worktree — run in the canonical repo root",
-        WorktreePolicy::Current => "no worktree — run in the current working directory",
-    };
+    let policy_label = worktree_policy_label(worktree_policy);
     println!("Dispatched: {}", slug_display);
     println!("  Resolver:  {}", resolver_name);
     println!("  Directive: {}", directive.as_str());
@@ -1480,5 +1477,29 @@ mod tests {
         assert!(!out.contains("\n\n\n"), "no triple blank lines");
         // No leftover template syntax
         assert!(!out.contains("{{"), "no template tags remaining: {}", out);
+    }
+
+    #[test]
+    fn test_worktree_policy_label_covers_all_variants() {
+        // Every variant must produce a non-empty label so the dry-run / confirmation
+        // output never falls back to a missing description.
+        for policy in [
+            WorktreePolicy::Branch,
+            WorktreePolicy::Document,
+            WorktreePolicy::None,
+            WorktreePolicy::Current,
+        ] {
+            let label = worktree_policy_label(policy);
+            assert!(!label.is_empty(), "label empty for {:?}", policy);
+        }
+        // Spot-check a couple to lock in the user-visible wording.
+        assert_eq!(
+            worktree_policy_label(WorktreePolicy::Branch),
+            "create or reuse a worktree by branch name"
+        );
+        assert_eq!(
+            worktree_policy_label(WorktreePolicy::Current),
+            "no worktree — run in the current working directory"
+        );
     }
 }
