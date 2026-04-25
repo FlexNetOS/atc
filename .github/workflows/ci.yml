@@ -24,6 +24,10 @@ env:
 jobs:
   ci:
     name: CI
+    # Cap wall time so a hung step can't hold the self-hosted Mac runner
+    # indefinitely. 45m comfortably covers a cold cache build + full test
+    # suite; healthy runs land well under it.
+    timeout-minutes: 45
     # Trust-boundary routing: fork PRs land on ubuntu-latest (free, public-repo
     # standard runners). Internal PRs, main pushes, and any other event run on
     # our self-hosted Mac Studio. The self-hosted runner is never *requested*
