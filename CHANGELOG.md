@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/gitkb/atc/compare/v0.1.3...v0.1.4) (2026-04-25)
+
+
+### Bug Fixes
+
+* **cli:** atc status — quiet WARN, colors through pager, chop long lines ([#57](https://github.com/gitkb/atc/issues/57)) ([4744e05](https://github.com/gitkb/atc/commit/4744e05a4ebecf34497c78da195bdadbde8631e9))
+
 ## [0.1.3](https://github.com/gitkb/atc/compare/v0.1.2...v0.1.3) (2026-04-25)
 
 
