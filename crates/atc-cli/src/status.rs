@@ -14,8 +14,7 @@ use crate::style::{apply, dim, render_cost, render_status, render_work_unit_stat
 /// Maximum PR URLs to render inline in a cell. Excess collapses to `+N more`.
 const PR_LIST_INLINE_CAP: usize = 3;
 
-/// JSON output schema version. Bump when fields are renamed/removed.
-pub const STATUS_SCHEMA_VERSION: u32 = 1;
+use crate::output_schema::SCHEMA_VERSION;
 
 /// Default statuses shown by `atc status` when no filter is given.
 /// Status-only filter — predictable, no hidden time component.
@@ -465,7 +464,7 @@ pub async fn run_status(
             .collect();
         let summary = StatusSummary::from_records(&records);
         let envelope = StatusOutputV1 {
-            schema_version: STATUS_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             records: &records,
             work_units: &work_units_filtered,
             summary,
@@ -857,7 +856,7 @@ mod tests {
         let records: Vec<DispatchRecord> = vec![sample_record("id", Status::Running)];
         let work_units: Vec<WorkUnit> = vec![];
         let envelope = StatusOutputV1 {
-            schema_version: STATUS_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             records: &records,
             work_units: &work_units,
             summary: StatusSummary::from_records(&records),

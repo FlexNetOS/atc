@@ -19,6 +19,7 @@ pub mod info;
 pub mod init;
 pub mod kb;
 pub mod logs;
+pub mod output_schema;
 pub mod pager;
 pub mod pipeline;
 pub mod post_complete;

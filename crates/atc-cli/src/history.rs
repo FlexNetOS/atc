@@ -6,9 +6,10 @@ use atc_core::types::{DispatchRecord, WorkUnit};
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::output_schema::SCHEMA_VERSION;
 #[cfg(test)]
 use crate::status::format_pr_url;
-use crate::status::{format_duration, format_pr_list, STATUS_SCHEMA_VERSION};
+use crate::status::{format_duration, format_pr_list};
 
 /// JSON envelope for `atc history --json`. Stable across v1 of the schema.
 #[derive(Debug, Serialize)]
@@ -116,7 +117,7 @@ pub async fn run_history(
         if json {
             let empty: Vec<DispatchRecord> = Vec::new();
             let envelope = HistoryOutputV1 {
-                schema_version: STATUS_SCHEMA_VERSION,
+                schema_version: SCHEMA_VERSION,
                 work_unit: None,
                 dispatches: &empty,
             };
@@ -131,7 +132,7 @@ pub async fn run_history(
 
     if json {
         let envelope = HistoryOutputV1 {
-            schema_version: STATUS_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             work_unit: Some(&unit),
             dispatches: &dispatches,
         };

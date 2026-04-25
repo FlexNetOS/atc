@@ -6,8 +6,9 @@ use atc_core::types::DispatchRecord;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::output_schema::SCHEMA_VERSION;
 use crate::resolve::resolve_record;
-use crate::status::{format_duration, STATUS_SCHEMA_VERSION};
+use crate::status::format_duration;
 
 /// JSON envelope for `atc info --json`. Mirrors the v1 schema versioning
 /// shared by the rest of the human-facing commands.
@@ -110,7 +111,7 @@ pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Res
     let record = resolve_record(registry.as_ref(), arg).await?;
     if json {
         let envelope = InfoOutputV1 {
-            schema_version: STATUS_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             record: &record,
         };
         println!("{}", serde_json::to_string_pretty(&envelope)?);

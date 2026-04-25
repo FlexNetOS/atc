@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::status::STATUS_SCHEMA_VERSION;
+use crate::output_schema::SCHEMA_VERSION;
 
 /// JSON envelope for `atc health --json`. Stable across v1 of the schema.
 #[derive(Debug, Serialize)]
@@ -440,7 +440,7 @@ pub async fn run_health(
 
     if json {
         let envelope = HealthOutputV1 {
-            schema_version: STATUS_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             records: &display_records,
         };
         println!("{}", serde_json::to_string_pretty(&envelope)?);
