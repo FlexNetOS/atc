@@ -8,13 +8,12 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::output_schema::SCHEMA_VERSION;
 use crate::pager::setup_pager;
 use crate::style::{apply, dim, render_cost, render_status, render_work_unit_status, strong};
 
 /// Maximum PR URLs to render inline in a cell. Excess collapses to `+N more`.
 const PR_LIST_INLINE_CAP: usize = 3;
-
-use crate::output_schema::SCHEMA_VERSION;
 
 /// Default statuses shown by `atc status` when no filter is given.
 /// Status-only filter — predictable, no hidden time component.

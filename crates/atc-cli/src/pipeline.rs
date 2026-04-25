@@ -1610,4 +1610,70 @@ mod tests {
         );
         assert_eq!(none_path, workspace_root);
     }
+
+    /// Regression: a blank `DISPATCH_WORKTREE_REPO` must fall through to the
+    /// PR/config/meta resolution chain instead of short-circuiting with an
+    /// empty list. Trivially-set blank env vars (e.g. `DISPATCH_WORKTREE_REPO=`
+    /// from an upstream wrapper) used to erase repo context entirely.
+    #[tokio::test]
+    async fn test_resolve_base_repos_blank_env_falls_through_to_config() {
+        // Serialize env mutation across this test family — `set_var`/`remove_var`
+        // are process-global and parallel cargo tests will race otherwise.
+        // Use a tokio::sync::Mutex so the guard can be held across `.await`
+        // points without tripping clippy's await_holding_lock lint.
+        static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = ENV_LOCK.lock().await;
+
+        struct EnvRestore(Option<String>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var("DISPATCH_WORKTREE_REPO", v),
+                    None => std::env::remove_var("DISPATCH_WORKTREE_REPO"),
+                }
+            }
+        }
+        let _restore = EnvRestore(std::env::var("DISPATCH_WORKTREE_REPO").ok());
+
+        let opts = RunOpts {
+            input: String::new(),
+            directive: None,
+            params: Default::default(),
+            pr_url: None,
+            repos: vec![],
+            inline: false,
+            force: false,
+            dry_run: false,
+            directives: None,
+            no_worktree: false,
+            max_budget_usd: None,
+            max_turns: None,
+            retries: 0,
+            list: false,
+            ephemeral: false,
+            timeout: None,
+        };
+        let dispatch_cfg = atc_core::config::DispatchConfig {
+            repo: Some("config-repo".to_string()),
+            ..Default::default()
+        };
+        let workspace_root = PathBuf::from("/tmp/ws");
+
+        // Blank value (and whitespace-only) must NOT short-circuit — config wins.
+        for blank in ["", "   "] {
+            std::env::set_var("DISPATCH_WORKTREE_REPO", blank);
+            let result =
+                resolve_base_repos(&opts, None, &workspace_root, None, &dispatch_cfg).await;
+            assert_eq!(
+                result,
+                vec!["config-repo".to_string()],
+                "blank env var {blank:?} should fall through to dispatch.repo"
+            );
+        }
+
+        // Non-blank value still wins over config.
+        std::env::set_var("DISPATCH_WORKTREE_REPO", "  env-repo  ");
+        let result = resolve_base_repos(&opts, None, &workspace_root, None, &dispatch_cfg).await;
+        assert_eq!(result, vec!["env-repo".to_string()]);
+    }
 }
