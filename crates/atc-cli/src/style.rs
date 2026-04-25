@@ -200,6 +200,39 @@ mod tests {
     }
 
     #[test]
+    fn render_work_unit_status_never_is_plain() {
+        with_mode(ColorMode::Never, || {
+            assert_eq!(render_work_unit_status(WorkUnitStatus::Active), "active");
+            assert_eq!(render_work_unit_status(WorkUnitStatus::Merged), "merged");
+            assert_eq!(render_work_unit_status(WorkUnitStatus::Closed), "closed");
+            assert_eq!(
+                render_work_unit_status(WorkUnitStatus::Abandoned),
+                "abandoned"
+            );
+        });
+    }
+
+    #[test]
+    fn render_work_unit_status_always_emits_ansi() {
+        with_mode(ColorMode::Always, || {
+            // Each variant should produce an ANSI escape with its mapped color.
+            for s in [
+                WorkUnitStatus::Active,
+                WorkUnitStatus::Merged,
+                WorkUnitStatus::Closed,
+                WorkUnitStatus::Abandoned,
+            ] {
+                let out = render_work_unit_status(s);
+                assert!(
+                    out.contains("\x1b["),
+                    "expected ANSI escape for {s:?}, got {out:?}"
+                );
+                assert!(out.contains(s.as_str()));
+            }
+        });
+    }
+
+    #[test]
     fn render_cost_threshold_styles() {
         with_mode(ColorMode::Always, || {
             assert!(render_cost(Some(60.0)).contains("\x1b["));
