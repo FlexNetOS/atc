@@ -123,7 +123,7 @@ pub fn run_picker(base: &Path, copy: bool, force: bool) -> Result<()> {
     let skills_src = base.join(".atc").join("skills");
     if !skills_src.is_dir() {
         anyhow::bail!(
-            "{} does not exist. Run 'atc init' first to scaffold .atc/.",
+            "{} is missing or is not a directory. Run 'atc init' first to scaffold .atc/.",
             skills_src.display()
         );
     }
