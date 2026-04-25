@@ -368,12 +368,21 @@ pub fn apply_filters(
 
     let cutoff = since.map(|d| now - *d);
     records.retain(|r| {
+        let in_default = DEFAULT_STATUSES.contains(&r.status);
         if include_done {
-            // Drop only stopped — keep done/failed even when "interesting" filter is active.
+            // Drop stopped; keep interesting unconditionally; bound done/failed
+            // by --since when set (otherwise keep all).
             if matches!(r.status, Status::Stopped) {
                 return false;
             }
-        } else if !DEFAULT_STATUSES.contains(&r.status) {
+            if !in_default {
+                if let Some(c) = cutoff {
+                    if r.updated_at < c {
+                        return false;
+                    }
+                }
+            }
+        } else if !in_default {
             // Outside the default-interesting set; only kept by --since fallback.
             if let Some(c) = cutoff {
                 if r.updated_at < c {
@@ -443,6 +452,11 @@ pub async fn run_status(
         return Ok(());
     }
 
+    // Capture terminal width *before* the pager replaces fd 1 with a pipe.
+    // After setup_pager(), terminal_size() consults the pipe and falls back
+    // to the default, defeating narrow-terminal truncation.
+    let width = terminal_width();
+
     // Pager — only attached for non-JSON, non-no-pager runs. Must be acquired
     // before any colored writes so `less -R` sees the escapes.
     let _pager_guard = if opts.no_pager {
@@ -463,7 +477,6 @@ pub async fn run_status(
     }
 
     if opts.flat {
-        let width = terminal_width();
         let table = build_table(&records, width);
         println!("{table}");
         println!("{}", build_summary(&records));
@@ -475,7 +488,6 @@ pub async fn run_status(
             .collect();
         work_units.retain(|wu| visible_ids.contains(wu.id.as_str()));
         if work_units.is_empty() {
-            let width = terminal_width();
             let table = build_table(&records, width);
             println!("{table}");
             println!("{}", build_summary(&records));
@@ -656,6 +668,47 @@ mod tests {
         let r3 = sample_record("id-3", Status::Stopped);
 
         let out = apply_filters(vec![r1, r2, r3], None, true, false, None, now).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn test_apply_filters_include_done_with_since_bounds_done_records() {
+        // --include-done alone keeps all done/failed; combined with --since,
+        // it bounds non-default-status records by the cutoff. Interesting
+        // statuses (running/retrying/needs-*) are always kept.
+        let now = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut running = sample_record("running", Status::Running);
+        running.updated_at = now - Duration::days(30); // ancient — still kept
+        let mut recent_done = sample_record("done-recent", Status::Done);
+        recent_done.updated_at = now - Duration::hours(2);
+        let mut old_done = sample_record("done-old", Status::Done);
+        old_done.updated_at = now - Duration::days(10);
+
+        let since = Duration::hours(24);
+        let out = apply_filters(
+            vec![running.clone(), recent_done.clone(), old_done.clone()],
+            None,
+            false,
+            true,
+            Some(&since),
+            now,
+        )
+        .unwrap();
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["running", "done-recent"]);
+
+        // Without --since, --include-done keeps all done.
+        let out = apply_filters(
+            vec![running, recent_done, old_done],
+            None,
+            false,
+            true,
+            None,
+            now,
+        )
+        .unwrap();
         assert_eq!(out.len(), 3);
     }
 
