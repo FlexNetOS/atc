@@ -158,13 +158,31 @@ pub fn build_summary(records: &[DispatchRecord]) -> String {
 
 /// Format a list of PR URLs as a comma-separated compact string, or "-" if empty.
 ///
-/// When more than [`PR_LIST_INLINE_CAP`] URLs are present, the excess collapses
-/// into `+N more`. Invalid URLs render as `(invalid)` and emit a warn.
+/// Invalid URLs are dropped from the rendered list entirely — they don't
+/// appear in the output and don't count toward the `+N more` cap. Historical
+/// records may contain garbage (regex/code fragments) from older extractors;
+/// the upstream fix is tracked separately, and logging on every render is
+/// noise. When more than [`PR_LIST_INLINE_CAP`] valid URLs remain, the excess
+/// collapses into `+N more`.
 pub fn format_pr_list(urls: &[String]) -> String {
     if urls.is_empty() {
         return "-".to_string();
     }
-    let rendered: Vec<String> = urls.iter().map(|u| format_pr_url(u)).collect();
+    let valid: Vec<&String> = urls
+        .iter()
+        .filter(|u| {
+            if is_valid_github_pr_url(u) {
+                true
+            } else {
+                tracing::debug!(url = %u, "skipping malformed PR URL in render");
+                false
+            }
+        })
+        .collect();
+    if valid.is_empty() {
+        return "-".to_string();
+    }
+    let rendered: Vec<String> = valid.iter().map(|u| format_pr_url(u)).collect();
     if rendered.len() <= PR_LIST_INLINE_CAP {
         rendered.join(", ")
     } else {
@@ -188,7 +206,7 @@ fn is_valid_github_pr_url(url: &str) -> bool {
 /// Format PR URLs as compact "repo#N" references. Rejects malformed URLs.
 pub fn format_pr_url(url: &str) -> String {
     if !is_valid_github_pr_url(url) {
-        tracing::warn!(url = %url, "rejected malformed PR URL during render");
+        tracing::debug!(url = %url, "rejected malformed PR URL during render");
         return "(invalid)".to_string();
     }
     url.strip_prefix("https://github.com/")
@@ -477,6 +495,7 @@ pub async fn run_status(
     // After setup_pager(), terminal_size() consults the pipe and falls back
     // to the default, defeating narrow-terminal truncation.
     let width = terminal_width();
+    let stdout_was_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     // Pager — only attached for non-JSON, non-no-pager runs. Must be acquired
     // before any colored writes so `less -R` sees the escapes.
@@ -485,6 +504,18 @@ pub async fn run_status(
     } else {
         setup_pager(pager_config)
     };
+
+    // Once the pager replaces stdout's fd with a pipe, owo_colors' auto-detect
+    // sees a non-TTY and strips ANSI codes — defeating the whole color story.
+    // If we were a TTY before the pager swap, force colors on so `less -R`
+    // actually sees them. The process exits after this function returns, so
+    // no restore is needed.
+    if _pager_guard.is_some()
+        && stdout_was_tty
+        && crate::style::current_mode() == crate::style::ColorMode::Auto
+    {
+        crate::style::set_color_mode(crate::style::ColorMode::Always);
+    }
 
     if records.is_empty() {
         println!("No dispatch records found.");
@@ -639,6 +670,34 @@ mod tests {
             out.contains("repo#1, repo#2, repo#3, +4 more"),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn test_format_pr_list_drops_invalid_urls() {
+        // Mixed valid + invalid input. Invalid entries must not appear in the
+        // rendered cell and must not be counted toward the +N more cap.
+        let urls = vec![
+            "https://github.com/acme/repo/pull/1".to_string(),
+            "https://github.com/org/repo/pull/42\".to_string(),\n".to_string(),
+            "https://github.com/acme/repo/pull/2".to_string(),
+            "https://github.com/[^/]+/[^/]+/pull/([0-9]+).*$".to_string(),
+            "https://github.com/acme/repo/pull/3".to_string(),
+            "https://github.com/acme/repo/pull/4".to_string(),
+            "https://github.com/acme/repo/pull/5".to_string(),
+        ];
+        let out = format_pr_list(&urls);
+        // Only 5 valid URLs → cap=3 → +2 more, NOT +4 more
+        assert!(out.contains("+2 more"), "got: {out}");
+        assert!(!out.contains("(invalid)"), "got: {out}");
+    }
+
+    #[test]
+    fn test_format_pr_list_all_invalid_renders_dash() {
+        let urls = vec![
+            "https://github.com/org/repo/pull/42\".to_string(),\n".to_string(),
+            "garbage".to_string(),
+        ];
+        assert_eq!(format_pr_list(&urls), "-");
     }
 
     #[test]
