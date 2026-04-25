@@ -1016,7 +1016,7 @@ impl<'a> DispatchPipeline<'a> {
             &log_file,
             resolver.name(),
             worktree_policy,
-            opts.repos.first().map(String::as_str),
+            repos_for_context.first().map(String::as_str),
         );
 
         if let Some(exit_code) = handle.inline_exit_code {
