@@ -161,9 +161,9 @@ pub fn run_init_agent(base: &Path, agent_name: &str, opts: AgentOpts) -> Result<
     })?;
 
     let skills_src = base.join(".atc").join("skills");
-    if !skills_src.exists() {
+    if !skills_src.is_dir() {
         bail!(
-            "{} does not exist. Run 'atc init' first to scaffold .atc/.",
+            "{} is missing or is not a directory. Run 'atc init' first to scaffold .atc/.",
             skills_src.display()
         );
     }
@@ -382,13 +382,37 @@ fn wire_fresh(
             Ok(WireOutcome::Created)
         }
         Err(e) => {
-            eprintln!(
-                "warning: symlink failed ({e}); falling back to copy. \
-                Re-run with `atc init {} --copy` to make this permanent.",
-                entry.name
-            );
-            copy_skills(skills_src, target)?;
-            Ok(WireOutcome::SymlinkFallbackToCopy)
+            // Only fall back to copy for errors that mean "this filesystem can't
+            // do symlinks for us" (e.g. Windows without dev mode, restrictive FS).
+            // Other errors — including AlreadyExists from a TOCTOU race against
+            // another process — must propagate, so we never silently overwrite
+            // content that appeared between agent_status() and now.
+            match e.kind() {
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported => {
+                    if std::fs::symlink_metadata(target).is_ok() {
+                        bail!(
+                            "{} appeared while wiring agent '{}'; refusing to overwrite it \
+                            after symlink failure.",
+                            target.display(),
+                            entry.name
+                        );
+                    }
+                    eprintln!(
+                        "warning: symlink failed ({e}); falling back to copy. \
+                        Re-run with `atc init {} --copy` to make this permanent.",
+                        entry.name
+                    );
+                    copy_skills(skills_src, target)?;
+                    Ok(WireOutcome::SymlinkFallbackToCopy)
+                }
+                _ => Err(e).with_context(|| {
+                    format!(
+                        "failed to create symlink {} -> {}",
+                        target.display(),
+                        link_target.display()
+                    )
+                }),
+            }
         }
     }
 }
@@ -459,12 +483,27 @@ fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
 /// never touched.
 fn mirror_skills(skills_src: &Path, target: &Path) -> Result<()> {
     let known_names: HashSet<&str> = DEFAULT_SKILLS.iter().map(|(n, _)| *n).collect();
-    let src_names: HashSet<String> = std::fs::read_dir(skills_src)
+
+    // Build the source file set, propagating any read/stat error. A transient
+    // read failure on a single source file must not silently turn into "file
+    // missing" — that path would let the cleanup loop below delete the matching
+    // target file as if it had been removed upstream.
+    let mut src_names: HashSet<String> = HashSet::new();
+    for entry in std::fs::read_dir(skills_src)
         .with_context(|| format!("failed to read {}", skills_src.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
+    {
+        let entry = entry?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        if let Ok(name) = entry.file_name().into_string() {
+            src_names.insert(name);
+        }
+    }
 
     // Write every source file into the target.
     for name in &src_names {
@@ -474,19 +513,23 @@ fn mirror_skills(skills_src: &Path, target: &Path) -> Result<()> {
             .with_context(|| format!("failed to copy {} -> {}", src.display(), dst.display()))?;
     }
 
-    // Remove ATC-named files in target that no longer exist in source.
-    if let Ok(rd) = std::fs::read_dir(target) {
-        for entry in rd.flatten() {
-            let name_os = entry.file_name();
-            let Some(name) = name_os.to_str() else {
-                continue;
-            };
-            if !known_names.contains(name) {
-                continue; // user file — leave alone
-            }
-            if !src_names.contains(name) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+    // Remove ATC-named files in target that no longer exist in source. Errors
+    // here must surface — silently swallowing them hides cleanup failures and
+    // can leave the mirror inconsistent.
+    for entry in
+        std::fs::read_dir(target).with_context(|| format!("failed to read {}", target.display()))?
+    {
+        let entry = entry?;
+        let name_os = entry.file_name();
+        let Some(name) = name_os.to_str() else {
+            continue;
+        };
+        if !known_names.contains(name) {
+            continue; // user file — leave alone
+        }
+        if !src_names.contains(name) {
+            std::fs::remove_file(entry.path())
+                .with_context(|| format!("failed to remove {}", entry.path().display()))?;
         }
     }
 
@@ -934,5 +977,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         list_agents(dir.path()).unwrap();
         list_agents_json(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn skills_src_must_be_a_directory_not_a_file() {
+        // exists() is satisfied by regular files and broken symlinks; require an
+        // actual directory so we don't try to read non-directory entries below.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::create_dir_all(base.join(".atc")).unwrap();
+        std::fs::write(base.join(".atc/skills"), "not a dir").unwrap();
+
+        let err = run_init_agent(base, "claude", AgentOpts::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("is missing or is not a directory"),
+            "expected directory-check error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mirror_skills_propagates_source_read_failure() {
+        // A read failure on the source dir must surface as an error rather than
+        // turning into "no source files" (which would delete every ATC-named
+        // file in target).
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let nonexistent = base.join("missing-source");
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let err = mirror_skills(&nonexistent, &target).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to read"),
+            "expected read context, got: {err}"
+        );
     }
 }
