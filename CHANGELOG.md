@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/gitkb/atc/compare/v0.1.2...v0.1.3) (2026-04-25)
+
+
+### Features
+
+* bake skills into atc init + add atc init &lt;agent&gt; wiring ([#53](https://github.com/gitkb/atc/issues/53)) ([ed81e96](https://github.com/gitkb/atc/commit/ed81e96e0b24d6fba7e22fdba2e0ace2e868febc))
+* **cli:** human-friendly atc output (pager, colors, sort, hint text) ([#54](https://github.com/gitkb/atc/issues/54)) ([ddc3346](https://github.com/gitkb/atc/commit/ddc3346a602b3f177d4959481b148071ff4c77a7))
+
 ## [0.1.2](https://github.com/gitkb/atc/compare/v0.1.1...v0.1.2) (2026-04-11)
 
 
