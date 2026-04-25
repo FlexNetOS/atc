@@ -435,15 +435,25 @@ fn make_symlink(_link_target: &Path, _link_path: &Path) -> std::io::Result<()> {
     ))
 }
 
-/// Copy every skill file from `skills_src` into `target` (creating it if absent).
+/// Copy every skill file from `skills_src` into a freshly-created `target`.
+///
+/// `target` must NOT exist when this is called: every caller has already
+/// confirmed absence (fresh `Available` status, or just-removed symlink). We
+/// use `create_dir` (not `create_dir_all`) so a raced-in user directory causes
+/// a clean failure rather than a silent overwrite of user content followed by
+/// dropping the ATC marker into it.
 ///
 /// We mirror the on-disk source directory rather than only `DEFAULT_SKILLS`, so
 /// user-authored files in `.atc/skills/` are picked up on the first `--copy`
 /// run and on the symlink fallback path. Falls back to the embedded content for
 /// known skill names that are missing on disk.
 fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
-    std::fs::create_dir_all(target)
-        .with_context(|| format!("failed to create target directory {}", target.display()))?;
+    std::fs::create_dir(target).with_context(|| {
+        format!(
+            "failed to create target directory {} (must not already exist)",
+            target.display()
+        )
+    })?;
 
     let mut copied: HashSet<String> = HashSet::new();
 
@@ -935,6 +945,32 @@ mod tests {
             err.to_string().contains("failed to read"),
             "expected 'failed to read' context, got: {err}"
         );
+    }
+
+    #[test]
+    fn copy_skills_refuses_existing_target() {
+        // copy_skills' contract is that target does not exist yet. A raced-in
+        // user directory must cause a clean failure, not a silent overwrite of
+        // its contents followed by dropping the ATC marker into it.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        make_skills_dir(base);
+        let target = base.join("racy-target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("user-file.md"), "user content").unwrap();
+
+        let err = copy_skills(&base.join(".atc/skills"), &target).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to create target directory"),
+            "expected create-failure context, got: {err}"
+        );
+        // User content is untouched; no ATC marker dropped.
+        assert_eq!(
+            std::fs::read_to_string(target.join("user-file.md")).unwrap(),
+            "user content"
+        );
+        assert!(!target.join(COPY_MARKER_FILENAME).exists());
     }
 
     #[cfg(unix)]
