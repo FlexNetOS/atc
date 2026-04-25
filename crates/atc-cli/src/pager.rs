@@ -12,7 +12,8 @@
 //! 1. `ATC_PAGER` env var (set to `cat` or empty to disable)
 //! 2. `pager.plain` in `.atc/config.toml`
 //! 3. `PAGER` env var
-//! 4. Built-in default: `less -R +G` (`-R` keeps ANSI colors, `+G` opens at end)
+//! 4. Built-in default: `less -R -S +G` (`-R` keeps ANSI colors, `-S` chops
+//!    long lines so wide tables don't wrap onto two visual rows, `+G` opens at end)
 //!
 //! # When the pager is bypassed
 //!
@@ -27,9 +28,14 @@ use std::process::{Child, Command, Stdio};
 
 use atc_core::config::PagerConfig;
 
-/// Built-in default pager — keeps ANSI colors with `-R` and opens at the end
-/// with `+G` so the newest-at-bottom render order is visible immediately.
-pub const DEFAULT_PAGER: &str = "less -R +G";
+/// Built-in default pager.
+///
+/// - `-R` keeps ANSI colors (so `owo-colors` output renders properly)
+/// - `-S` chops long lines instead of wrapping them onto the next visual row
+///   (so wide tables stay row-aligned; arrow-key right scrolls the view)
+/// - `+G` opens scrolled to the end so the newest-at-bottom render order is
+///   visible immediately
+pub const DEFAULT_PAGER: &str = "less -R -S +G";
 
 /// Guard that owns the pager child process.
 ///

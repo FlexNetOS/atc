@@ -54,7 +54,7 @@ pub fn set_color_mode(mode: ColorMode) {
     COLOR_MODE.store(v, Ordering::Relaxed);
 }
 
-fn current_mode() -> ColorMode {
+pub fn current_mode() -> ColorMode {
     match COLOR_MODE.load(Ordering::Relaxed) {
         1 => ColorMode::Always,
         2 => ColorMode::Never,
