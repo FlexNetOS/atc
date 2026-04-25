@@ -13,9 +13,10 @@ use tracing::{info, warn};
 use atc_core::types::{WorkUnit, WorkUnitStatus};
 
 use crate::dispatch::{
-    auto_checkout_to_main, compute_allowed_paths, derive_pr_url_from_comment, ensure_worktree,
-    parse_comment_url, resolve_document_workspace, resolve_gh_token, resolve_pr_repo_path,
-    tmux_session_alive, validate_branch_name, write_diag_file, WorktreeOpts,
+    auto_checkout_to_main, compute_allowed_paths, derive_pr_url_from_comment, discover_meta,
+    ensure_worktree, parse_comment_url, resolve_document_workspace, resolve_gh_token,
+    resolve_pr_repo_path, tmux_session_alive, validate_branch_name, write_diag_file, MetaDiscovery,
+    WorktreeOpts,
 };
 
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
@@ -143,8 +144,25 @@ impl<'a> DispatchPipeline<'a> {
         };
 
         // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
-        //    when dry_run is set), so we can return immediately.
+        //    when dry_run is set), so we can return immediately. Resolve repo
+        //    context up-front so the preview matches what dispatch will use.
         if opts.dry_run {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let meta = discover_meta(&cwd).await;
+            let workspace_root = dispatch_cfg
+                .resolved_meta_workspace_root(self.config.config_dir.as_deref())
+                .ok()
+                .or_else(|| meta.as_ref().map(|m| m.workspace_root.clone()))
+                .unwrap_or_else(|| cwd.clone());
+            let dry_repos = resolve_base_repos(
+                opts,
+                effective_pr_url.as_deref(),
+                &workspace_root,
+                meta.as_ref(),
+                dispatch_cfg,
+            )
+            .await;
+
             // Compute providers for display
             let mut dry_providers =
                 atc_core::providers::providers_for_directive(self.config, &resolved.directive);
@@ -165,7 +183,7 @@ impl<'a> DispatchPipeline<'a> {
                 &provider_names,
                 opts.ephemeral,
                 worktree_policy,
-                opts,
+                &dry_repos,
             );
         }
 
@@ -314,7 +332,7 @@ impl<'a> DispatchPipeline<'a> {
 
         // 5. Ensure worktree — policy-aware routing
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let meta = crate::dispatch::discover_meta(&cwd).await;
+        let meta = discover_meta(&cwd).await;
 
         let workspace_root = dispatch_cfg
             .resolved_meta_workspace_root(self.config.config_dir.as_deref())
@@ -329,52 +347,14 @@ impl<'a> DispatchPipeline<'a> {
         // This mirrors the Branch arm's repo selection logic but runs before
         // worktree creation so Current/None/Document policies still carry
         // repo context through to work unit resolution and meta preamble.
-        let base_repos: Vec<String> = if !opts.repos.is_empty() {
-            opts.repos.clone()
-        } else if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
-            let env_repo = env_repo.trim().to_string();
-            if env_repo.is_empty() {
-                Vec::new()
-            } else {
-                info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
-                vec![env_repo]
-            }
-        } else if let Some(ref pr_url) = effective_pr_url {
-            match resolve_pr_repo_path(pr_url, &workspace_root).await {
-                Ok(Some(r)) => {
-                    info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
-                    vec![r]
-                }
-                Ok(None) => {
-                    info!(pr_url = %pr_url, "could not resolve PR repo to local path, using config/discovery fallback");
-                    match dispatch_cfg.resolved_repo() {
-                        Some(r) => vec![r.to_string()],
-                        None => meta
-                            .as_ref()
-                            .map(|m| vec![m.repo.clone()])
-                            .unwrap_or_default(),
-                    }
-                }
-                Err(e) => {
-                    warn!(pr_url = %pr_url, error = %e, "PR repo resolution failed, using config/discovery fallback");
-                    match dispatch_cfg.resolved_repo() {
-                        Some(r) => vec![r.to_string()],
-                        None => meta
-                            .as_ref()
-                            .map(|m| vec![m.repo.clone()])
-                            .unwrap_or_default(),
-                    }
-                }
-            }
-        } else {
-            match dispatch_cfg.resolved_repo() {
-                Some(r) => vec![r.to_string()],
-                None => meta
-                    .as_ref()
-                    .map(|m| vec![m.repo.clone()])
-                    .unwrap_or_default(),
-            }
-        };
+        let base_repos = resolve_base_repos(
+            opts,
+            effective_pr_url.as_deref(),
+            &workspace_root,
+            meta.as_ref(),
+            dispatch_cfg,
+        )
+        .await;
         let is_meta = meta.is_some();
 
         let (worktree_path, wt_created, wt_is_meta, repos_for_context) = match worktree_policy {
@@ -1096,7 +1076,7 @@ impl<'a> DispatchPipeline<'a> {
         providers: &[&str],
         ephemeral: bool,
         worktree_policy: WorktreePolicy,
-        opts: &RunOpts,
+        repos: &[String],
     ) -> Result<DispatchOutcome> {
         if ephemeral {
             println!("=== DRY RUN (ephemeral) ===");
@@ -1115,16 +1095,17 @@ impl<'a> DispatchPipeline<'a> {
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
 
+        let primary_repo = repos.first().map(String::as_str);
         let (policy_label, resolved_path, hint) =
-            describe_worktree(self.config, &resolved.branch, opts, worktree_policy);
+            describe_worktree(self.config, &resolved.branch, primary_repo, worktree_policy);
         println!(
             "Worktree:    {} ({})",
             worktree_policy.as_str(),
             policy_label
         );
         println!("Path:        {}", resolved_path.display());
-        if !opts.repos.is_empty() {
-            println!("Repo:        {}", opts.repos.join(", "));
+        if !repos.is_empty() {
+            println!("Repo:        {}", repos.join(", "));
         }
         if let Some(h) = hint {
             println!("Hint:        {}", h);
@@ -1163,10 +1144,13 @@ fn worktree_policy_label(policy: WorktreePolicy) -> &'static str {
 /// Returns `(policy_label, resolved_path, optional_hint)`. The path is
 /// computed using the same logic that `ensure_worktree` uses for `Branch`
 /// policy, but does not actually create anything on disk.
+///
+/// `primary_repo` should be the same value the dispatch path resolves via
+/// [`resolve_base_repos`] so the dry-run preview matches execution.
 fn describe_worktree(
     config: &AtcConfig,
     branch: &str,
-    opts: &RunOpts,
+    primary_repo: Option<&str>,
     policy: WorktreePolicy,
 ) -> (&'static str, PathBuf, Option<String>) {
     use crate::dispatch::sanitize_slashes;
@@ -1183,7 +1167,7 @@ fn describe_worktree(
         WorktreePolicy::Branch => {
             let worktree_base = config.dispatch.resolved_worktree_base();
             let sanitized = sanitize_slashes(branch);
-            let path = match opts.repos.first() {
+            let path = match primary_repo {
                 Some(r) => worktree_base.join(&sanitized).join(r),
                 None => worktree_base.join(&sanitized),
             };
@@ -1201,6 +1185,57 @@ fn describe_worktree(
         WorktreePolicy::Document => (label, workspace_root, None),
         WorktreePolicy::None => (label, workspace_root, None),
         WorktreePolicy::Current => (label, process_cwd, None),
+    }
+}
+
+/// Resolve the target repo list using the same fallback chain the main
+/// dispatch path uses. Shared between dry-run preview and actual dispatch
+/// so the printed `Repo:` and worktree path stay aligned with execution.
+///
+/// Order: explicit `--repo` args → `DISPATCH_WORKTREE_REPO` env var → PR URL
+/// resolution → config (`dispatch.repo`) → meta discovery.
+async fn resolve_base_repos(
+    opts: &RunOpts,
+    effective_pr_url: Option<&str>,
+    workspace_root: &Path,
+    meta: Option<&MetaDiscovery>,
+    dispatch_cfg: &atc_core::config::DispatchConfig,
+) -> Vec<String> {
+    if !opts.repos.is_empty() {
+        return opts.repos.clone();
+    }
+    if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
+        let env_repo = env_repo.trim().to_string();
+        if env_repo.is_empty() {
+            return Vec::new();
+        }
+        info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
+        return vec![env_repo];
+    }
+    if let Some(pr_url) = effective_pr_url {
+        match resolve_pr_repo_path(pr_url, workspace_root).await {
+            Ok(Some(r)) => {
+                info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
+                return vec![r];
+            }
+            Ok(None) => {
+                info!(
+                    pr_url = %pr_url,
+                    "could not resolve PR repo to local path, using config/discovery fallback"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    pr_url = %pr_url,
+                    error = %e,
+                    "PR repo resolution failed, using config/discovery fallback"
+                );
+            }
+        }
+    }
+    match dispatch_cfg.resolved_repo() {
+        Some(r) => vec![r.to_string()],
+        None => meta.map(|m| vec![m.repo.clone()]).unwrap_or_default(),
     }
 }
 
@@ -1500,6 +1535,37 @@ mod tests {
         assert_eq!(
             worktree_policy_label(WorktreePolicy::Current),
             "no worktree — run in the current working directory"
+        );
+    }
+
+    #[test]
+    fn test_describe_worktree_branch_uses_primary_repo() {
+        // Branch policy must place the worktree under <base>/<branch>/<repo>
+        // when a primary repo is supplied — otherwise just <base>/<branch>.
+        // This locks the dry-run preview path to the same shape as dispatch.
+        let mut config = AtcConfig::default();
+        config.dispatch.worktree_base = Some(PathBuf::from("/tmp/wt"));
+
+        // Slashes in the branch name are sanitized to `--` to match
+        // ensure_worktree's on-disk layout (so dry-run paths match reality).
+        let (_, with_repo, _) = describe_worktree(
+            &config,
+            "feat/x",
+            Some("open-source/atc"),
+            WorktreePolicy::Branch,
+        );
+        assert_eq!(
+            with_repo,
+            PathBuf::from("/tmp/wt/feat--x/open-source/atc"),
+            "primary_repo must be appended to the branch path"
+        );
+
+        let (_, without_repo, _) =
+            describe_worktree(&config, "feat/x", None, WorktreePolicy::Branch);
+        assert_eq!(
+            without_repo,
+            PathBuf::from("/tmp/wt/feat--x"),
+            "missing primary_repo must yield the bare branch path"
         );
     }
 }
