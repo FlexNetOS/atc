@@ -47,6 +47,22 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Number of leading characters of an id to render in the `id` column.
+/// Work-unit IDs share a long timestamp prefix (e.g. `wu-0019dc...`), so 12
+/// chars are needed to visually disambiguate IDs from the same time window.
+/// Full id remains available in `--json` and via `atc info <id>`.
+const ID_PREFIX_LEN: usize = 12;
+
+/// Short id for table display. Full id remains available in `--json`.
+fn short_id(id: &str) -> String {
+    let count = id.chars().count();
+    if count <= ID_PREFIX_LEN {
+        id.to_string()
+    } else {
+        id.chars().take(ID_PREFIX_LEN).collect()
+    }
+}
+
 /// Detect terminal width. Returns 120 if stdout is not a tty.
 fn terminal_width() -> u16 {
     terminal_size::terminal_size()
@@ -225,8 +241,12 @@ pub fn format_pr_url(url: &str) -> String {
 }
 
 /// Build a work-unit-grouped status table.
-pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) -> String {
-    use comfy_table::{presets::NOTHING, Table};
+pub fn build_grouped_table(
+    work_units: &[WorkUnit],
+    records: &[DispatchRecord],
+    width: u16,
+) -> String {
+    use comfy_table::{presets::NOTHING, ContentArrangement, Table};
     use std::collections::HashMap;
 
     let mut by_wu: HashMap<&str, Vec<&DispatchRecord>> = HashMap::new();
@@ -241,16 +261,23 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
 
     let mut table = Table::new();
     table.load_preset(NOTHING);
+    // Dynamic arrangement keeps headers and rows in lock-step; without it
+    // comfy_table sizes header cells independently of row cells, which
+    // causes visible drift when later rows contain long PR lists.
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_width(width);
     table.set_header(vec![
-        apply("task", dim()),
+        apply("id", dim()),
         apply("branch", dim()),
-        apply("PRs", dim()),
-        apply("dispatches", dim()),
+        apply("task", dim()),
         apply("status", dim()),
+        apply("PRs", dim()),
+        apply("runs", dim()),
         apply("cost", dim()),
     ]);
 
     for wu in work_units {
+        let id = short_id(&wu.id);
         let task = wu.task_slug.as_deref().unwrap_or("(none)");
         let branch = wu.branch.as_deref().unwrap_or("-");
         let prs = format_pr_list(&wu.pr_urls);
@@ -273,25 +300,28 @@ pub fn build_grouped_table(work_units: &[WorkUnit], records: &[DispatchRecord]) 
             render_cost(None)
         };
         table.add_row(vec![
-            apply(task, strong()),
+            id,
             branch.to_string(),
+            apply(task, strong()),
+            render_work_unit_status(wu.status),
             prs,
             dispatch_label,
-            render_work_unit_status(wu.status),
             cost_str,
         ]);
     }
 
     for r in &orphan_records {
-        let task = r.task_slug.as_deref().unwrap_or(r.id.as_str());
+        let id = short_id(&r.id);
+        let task = r.task_slug.as_deref().unwrap_or("(none)");
         let prs = format_pr_list(&r.pr_urls);
         let cost_str = render_cost(r.cost_usd);
         table.add_row(vec![
-            apply(task, strong()),
+            id,
             r.branch.clone(),
+            apply(task, strong()),
+            render_status(r.status),
             prs,
             "1 run".to_string(),
-            render_status(r.status),
             cost_str,
         ]);
     }
@@ -546,7 +576,7 @@ pub async fn run_status(
             println!("{table}");
             println!("{}", build_summary(&records));
         } else {
-            let table = build_grouped_table(&work_units, &records);
+            let table = build_grouped_table(&work_units, &records, width);
             println!("{table}");
             println!("{}", build_summary(&records));
         }
@@ -710,6 +740,84 @@ mod tests {
         ];
         let out = format_pr_list(&urls);
         assert_eq!(out, "repo#1, repo#2");
+    }
+
+    #[test]
+    fn test_short_id_truncates_long_ulid() {
+        let ulid = "01HZX5K3T5RA5SPM00P12ABCDE";
+        assert_eq!(short_id(ulid), "01HZX5K3T5RA");
+    }
+
+    #[test]
+    fn test_short_id_passes_through_short_strings() {
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id("123456789012"), "123456789012");
+    }
+
+    #[test]
+    fn test_build_grouped_table_column_order_and_id_column() {
+        use atc_core::types::{WorkUnit, WorkUnitStatus};
+        crate::style::set_color_mode(crate::style::ColorMode::Never);
+
+        let wu = WorkUnit {
+            id: "01HZX5K3T5RA5SPM00P12345AB".to_string(),
+            task_slug: Some("tasks/harmony-537".to_string()),
+            branch: Some("tasks--harmony-537".to_string()),
+            repos: vec!["open-source/atc".to_string()],
+            pr_urls: vec!["https://github.com/acme/atc/pull/57".to_string()],
+            status: WorkUnitStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut record = sample_record("d-1", Status::Running);
+        record.work_unit_id = Some(wu.id.clone());
+
+        let table = build_grouped_table(std::slice::from_ref(&wu), &[record], 200);
+
+        // Header order: id | branch | task | status | PRs | runs | cost
+        let header_line = table.lines().next().unwrap();
+        let pos = |s: &str| header_line.find(s).expect(s);
+        assert!(pos("id") < pos("branch"));
+        assert!(pos("branch") < pos("task"));
+        assert!(pos("task") < pos("status"));
+        assert!(pos("status") < pos("PRs"));
+        assert!(pos("PRs") < pos("runs"));
+        assert!(pos("runs") < pos("cost"));
+        assert!(
+            !header_line.contains("dispatches"),
+            "header should use 'runs', not 'dispatches'"
+        );
+
+        // Data row contains short id prefix and the rest of the cells.
+        assert!(
+            table.contains("01HZX5K3T5RA"),
+            "missing short id in: {table}"
+        );
+        assert!(table.contains("tasks/harmony-537"));
+        assert!(table.contains("tasks--harmony-537"));
+        assert!(table.contains("atc#57"));
+        assert!(table.contains("1 run"));
+    }
+
+    #[test]
+    fn test_build_grouped_table_orphan_row_uses_dispatch_id_and_none_task() {
+        crate::style::set_color_mode(crate::style::ColorMode::Never);
+
+        // Orphan = no work_unit_id and no task_slug — id column should carry
+        // the dispatch id prefix and the task column should render `(none)`.
+        let mut record = sample_record("orphan-dispatch-12345", Status::Running);
+        record.task_slug = None;
+        record.work_unit_id = None;
+
+        let table = build_grouped_table(&[], &[record], 200);
+        assert!(
+            table.contains("orphan-dispa"),
+            "expected dispatch-id prefix; got: {table}"
+        );
+        assert!(
+            table.contains("(none)"),
+            "expected (none) for task col; got: {table}"
+        );
     }
 
     #[test]
