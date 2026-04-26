@@ -210,12 +210,29 @@ jobs:
               }]
             }')
 
-          HTTP_STATUS=$(curl -s -o /tmp/discord_response.txt -w "%{http_code}" \
+          # Bound the request: connect timeout 10s, total time 30s, up to 3
+          # retries (with backoff) for transient network failures. `set +e`
+          # lets us capture curl's exit code separately from HTTP_STATUS so
+          # pre-HTTP failures (DNS, connection refused, timeout) are logged
+          # distinctly from HTTP-level failures.
+          set +e
+          HTTP_STATUS=$(curl -sS -o /tmp/discord_response.txt -w "%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 2 \
+            --retry-all-errors \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
             "$WEBHOOK_URL")
+          CURL_EXIT=$?
+          set -e
 
-          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::warning::Discord notification request failed before HTTP response (curl exit $CURL_EXIT)"
+            cat /tmp/discord_response.txt 2>/dev/null || true
+            exit 1
+          elif [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
             echo "Discord notification sent successfully (HTTP $HTTP_STATUS)"
           else
             echo "::warning::Discord notification failed (HTTP $HTTP_STATUS)"
