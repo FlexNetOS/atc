@@ -165,6 +165,64 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
 
+  notify-discord:
+    name: Notify Discord
+    needs: [get-tag, release]
+    runs-on: ubuntu-latest
+    # A failed Discord post must not block downstream consumers of the release
+    # (e.g. the homebrew tap update).
+    continue-on-error: true
+    steps:
+      - name: Check webhook configured
+        id: check
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_RELEASES_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Discord webhook not configured, skipping notification"
+          fi
+
+      - name: Post to Discord
+        if: steps.check.outputs.skip != 'true'
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_RELEASES_WEBHOOK_URL }}
+        run: |
+          TAG="${{ needs.get-tag.outputs.tag }}"
+
+          PAYLOAD=$(jq -n \
+            --arg title "ATC $TAG Released" \
+            --arg desc "A new version of ATC, the headless agent orchestrator, is available." \
+            --arg install_brew 'brew install gitkb/tap/atc' \
+            --arg url "https://github.com/gitkb/atc/releases/tag/$TAG" \
+            '{
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 3066993,
+                fields: [
+                  {
+                    name: "Install via Homebrew",
+                    value: ("```sh\n" + $install_brew + "\n```")
+                  }
+                ]
+              }]
+            }')
+
+          HTTP_STATUS=$(curl -s -o /tmp/discord_response.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK_URL")
+
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "Discord notification sent successfully (HTTP $HTTP_STATUS)"
+          else
+            echo "::warning::Discord notification failed (HTTP $HTTP_STATUS)"
+            cat /tmp/discord_response.txt
+            exit 1
+          fi
+
   update-homebrew:
     name: Update Homebrew Formula
     needs: [get-tag, release]
