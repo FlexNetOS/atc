@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/gitkb/atc/compare/v0.1.4...v0.1.5) (2026-04-26)
+
+
+### Features
+
+* **cli:** atc status grouped table — id column, reorder, dynamic alignment ([#59](https://github.com/gitkb/atc/issues/59)) ([d27e033](https://github.com/gitkb/atc/commit/d27e033a13337009a7cbf2a9eb7fed0d604afde5))
+
 ## [0.1.4](https://github.com/gitkb/atc/compare/v0.1.3...v0.1.4) (2026-04-25)
 
 
