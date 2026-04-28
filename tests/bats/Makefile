@@ -8,6 +8,8 @@
 #   FILE=lifecycle     — run only matching test files
 #   JOBS=8             — parallel jobs (default: 4)
 #   DEBUG=1            — show atc commands being executed
+#   ATC_RUN_HARNESS_EVALS=1 FILE=harness_evals
+#                      — run opt-in Codex/Claude harness evals
 
 .PHONY: all test setup clean
 

@@ -52,9 +52,11 @@ setup_test_dir() {
     TEST_TMPDIR="$(mktemp -d -t atc-bats-XXXXXX)"
     export TEST_TMPDIR
     export ATC_BIN="${ATC_BIN:-$(_repo_root)/target/debug/atc}"
+    export ATC_ROOT="$TEST_TMPDIR/atc-root"
+    mkdir -p "$ATC_ROOT"
 
     # Unset any inherited env vars that could leak into tests
-    unset ATC_CONFIG ATC_ROOT ATC_CI ATC_NOTIFY_WEBHOOK RUST_LOG
+    unset ATC_CONFIG ATC_CI ATC_NOTIFY_WEBHOOK RUST_LOG
 }
 
 # ---------------------------------------------------------------------------
@@ -188,4 +190,93 @@ query_dispatch_field() {
     local db="$1" id="$2" field="$3"
     # NOTE: Assumes trusted input — $field is a column name, $id is a dispatch UUID
     sqlite3 "$db" "SELECT $field FROM dispatches WHERE id = '${id//\'/\'\'}';"
+}
+
+# ---------------------------------------------------------------------------
+# skip_unless_harness_evals_enabled — opt-in guard for external harness evals
+# ---------------------------------------------------------------------------
+skip_unless_harness_evals_enabled() {
+    if [[ "${ATC_RUN_HARNESS_EVALS:-0}" != "1" ]]; then
+        skip "set ATC_RUN_HARNESS_EVALS=1 to run external harness evals"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# require_cli — skip if a required CLI is not installed
+# ---------------------------------------------------------------------------
+require_cli() {
+    local tool="$1"
+    command -v "$tool" >/dev/null 2>&1 || skip "$tool is not installed"
+}
+
+# ---------------------------------------------------------------------------
+# require_codex_auth — skip if Codex is unavailable or not authenticated
+# ---------------------------------------------------------------------------
+require_codex_auth() {
+    require_cli codex
+    codex exec --help >/dev/null 2>&1 || skip "codex CLI is unavailable"
+}
+
+# ---------------------------------------------------------------------------
+# require_claude_auth — skip if Claude is unavailable or not authenticated
+# ---------------------------------------------------------------------------
+require_claude_auth() {
+    require_cli claude
+    local probe
+    probe="$(claude -p --bare "Reply with OK." 2>&1 || true)"
+    [[ "$probe" == *"Not logged in"* ]] && skip "claude CLI is not authenticated"
+}
+
+# ---------------------------------------------------------------------------
+# setup_harness_eval_workspace — scaffold .atc/ and wire the requested agent
+# ---------------------------------------------------------------------------
+setup_harness_eval_workspace() {
+    local agent="$1"
+    cd "$TEST_TMPDIR" || return 1
+    mkdir -p ".$agent/skills"
+    atc init --no-interactive >/dev/null
+    atc init "$agent" >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# install_fake_atc — put a fake `atc` first on PATH and log argv to a file
+# ---------------------------------------------------------------------------
+install_fake_atc() {
+    local script_path="$TEST_TMPDIR/bin/atc"
+    mkdir -p "$TEST_TMPDIR/bin"
+    cat > "$script_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%q ' "$@" >> "${ATC_EVAL_LOG:?}"
+printf '\n' >> "${ATC_EVAL_LOG:?}"
+
+case "${1:-}" in
+  run)
+    echo 'Resolver: template'
+    echo 'Directive: review-fix'
+    echo 'Worktree: branch'
+    ;;
+  logs)
+    echo '>>> still running'
+    echo '>>> editing files now'
+    echo '=== RESULT: success cost=$0.01 turns=1 ==='
+    ;;
+  status)
+    echo 'disp-123 running review-fix'
+    ;;
+  info)
+    echo 'id: disp-123'
+    echo 'status: running'
+    ;;
+  *)
+    echo "unsupported fake atc invocation: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+    chmod +x "$script_path"
+    export ATC_EVAL_LOG="$TEST_TMPDIR/atc-eval.log"
+    : > "$ATC_EVAL_LOG"
+    export PATH="$TEST_TMPDIR/bin:$PATH"
 }
