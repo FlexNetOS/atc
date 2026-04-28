@@ -107,7 +107,14 @@ pub fn pager_blocked_by_env() -> bool {
 /// Returns `None` if paging is skipped (no TTY, no pager configured, env block, etc.).
 #[must_use = "PagerGuard restores stdout on drop; binding to `_` immediately undoes the redirection"]
 pub fn setup_pager(config: Option<&PagerConfig>) -> Option<PagerGuard> {
-    if !std::io::stdout().is_terminal() {
+    setup_pager_with_terminal(config, std::io::stdout().is_terminal())
+}
+
+fn setup_pager_with_terminal(
+    config: Option<&PagerConfig>,
+    stdout_is_terminal: bool,
+) -> Option<PagerGuard> {
+    if !stdout_is_terminal {
         return None;
     }
 
@@ -281,13 +288,12 @@ mod tests {
 
     #[test]
     fn setup_pager_returns_none_when_stdout_not_a_tty() {
-        // In `cargo test` stdout is not a TTY (it's captured), so setup_pager
-        // must short-circuit before any fork/dup. Locks the bypass invariant
-        // for piped/redirected runs and CI.
+        // This must be deterministic: do not rely on the test runner's stdout
+        // capture mode or TTY semantics.
         with_clean_env(|| {
             // Even with a real pager configured, no-tty short-circuits first.
             std::env::set_var("ATC_PAGER", "less -R");
-            assert!(setup_pager(None).is_none());
+            assert!(setup_pager_with_terminal(None, false).is_none());
         });
     }
 }
