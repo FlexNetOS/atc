@@ -178,9 +178,17 @@ The queue is the universal interface between selection (what to dispatch) and sc
 │   ├── code-read.md
 │   └── ...
 └── skills/
-    ├── atc-reference.md     # Reference doc for coding agents (CLI surface)
-    ├── dispatch.md          # How to dispatch via ATC
-    └── monitor.md           # How to monitor a running dispatch
+    ├── atc-reference.md     # Shared ATC command reference
+    ├── dispatch.md          # Shared dispatch examples and notes
+    ├── monitor.md           # Shared monitor examples and notes
+    ├── dispatch/
+    │   ├── SKILL.md         # Codex skill: dispatch an agent via ATC
+    │   └── agents/
+    │       └── openai.yaml  # UI metadata for Codex/OpenAI surfaces
+    └── monitor/
+        ├── SKILL.md         # Codex skill: monitor an ATC dispatch
+        └── agents/
+            └── openai.yaml
 ```
 
 ## Hooking Into Your Coding Agent
@@ -188,6 +196,10 @@ The queue is the universal interface between selection (what to dispatch) and sc
 ATC ships agent skills under `.atc/skills/`. To make them visible to a specific
 coding agent, run `atc init <agent>` — it creates a directory-level symlink (or a
 copy with `--copy`) from the agent's skills directory back to `.atc/skills`.
+
+The shared markdown files stay available as references, while `dispatch/SKILL.md`
+and `monitor/SKILL.md` provide the actual Codex skill entrypoints with frontmatter
+and product metadata.
 
 ```bash
 atc init claude        # .claude/skills/atc -> ../../.atc/skills (symlink)

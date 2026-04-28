@@ -1,6 +1,6 @@
-# Skill: Dispatch an Agent via ATC
+# ATC Dispatch Reference
 
-Use this when the user asks you to dispatch, run, or send an agent to work on a task, PR, or prompt.
+Reference commands and examples for dispatching work via ATC.
 
 ## Step 1: Determine Dispatch Type
 

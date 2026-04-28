@@ -187,7 +187,11 @@ mod tests {
         let s = dir.path().join(".atc/skills");
         std::fs::create_dir_all(&s).unwrap();
         for (name, content) in DEFAULT_SKILLS {
-            std::fs::write(s.join(name), content).unwrap();
+            let path = s.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
         }
         if make_claude_parent {
             std::fs::create_dir_all(dir.path().join(".claude/skills")).unwrap();

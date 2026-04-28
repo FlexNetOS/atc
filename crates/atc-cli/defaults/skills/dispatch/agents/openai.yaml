@@ -1,0 +1,7 @@
+interface:
+  display_name: "ATC Dispatch"
+  short_description: "Dispatch ATC agents for work requests"
+  default_prompt: "Use $atc-dispatch to choose and run the right ATC dispatch command for this request."
+
+policy:
+  allow_implicit_invocation: true

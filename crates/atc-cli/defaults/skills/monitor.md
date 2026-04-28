@@ -1,6 +1,6 @@
-# Skill: Monitor a Dispatched Agent
+# ATC Monitor Reference
 
-Use this when the user asks you to watch, monitor, or check on a running agent.
+Reference commands and examples for monitoring an ATC dispatch.
 
 ## Check What's Running
 
@@ -61,7 +61,7 @@ Look for these milestones in the log:
 1. **Exploring** — `Read` and `Bash` calls, understanding the codebase
 2. **Editing** — `Edit` calls, making changes
 3. **Committing** — `git add` + `git commit` in Bash calls
-4. **Verifying** — `cargo test`, `cargo clippy`, or similar in Bash calls
+4. **Verifying** — project-appropriate validation commands in Bash calls
 5. **Pushing** — `git push` in Bash calls
 6. **Review flywheel** (review-fix only) — agent states a confidence score, loops if < threshold
 
@@ -81,7 +81,8 @@ Look for these milestones in the log:
 ```bash
 # Verify what the agent did
 cd <worktree-path>
-git log --oneline <default-branch>..HEAD
+git status
+git log --oneline --decorate -n 10
 
 # Run health checks
 atc health
