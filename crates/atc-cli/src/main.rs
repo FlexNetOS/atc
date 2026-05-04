@@ -10,12 +10,18 @@ use atc_core::registry::SqliteRegistry;
 async fn main() -> anyhow::Result<()> {
     // Initialize structured logging. Controlled by RUST_LOG env var.
     // Default: info-level for atc crates, warn for everything else.
+    //
+    // Logs go to stderr so `--json` callers can pipe stdout into `jq` without
+    // having to scrub tracing output. This matches the standard CLI convention
+    // (logs to stderr, data to stdout) and is required by every `--json`
+    // command in the binary, not just `atc run --json`.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("atc_core=info,atc_cli=info,warn")),
         )
         .with_target(true)
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = atc_cli::Args::parse();

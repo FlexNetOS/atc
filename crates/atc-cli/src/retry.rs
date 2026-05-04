@@ -239,6 +239,7 @@ pub async fn run_retry(
         list: false,
         ephemeral: false,
         timeout: None,
+        json: false,
     };
 
     // Use the recorded resolver directly instead of rebuilding the full chain.

@@ -499,6 +499,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
 
         let resolver = TemplateResolver;
@@ -578,6 +579,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
 
         let resolver = TemplateResolver;
@@ -658,6 +660,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
 
         let resolver = TemplateResolver;
@@ -718,6 +721,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         }
     }
 
@@ -910,6 +914,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
 
         let resolver = TemplateResolver;

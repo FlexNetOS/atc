@@ -66,7 +66,7 @@ mod args {
     pub enum Commands {
         /// Run an agent (direct dispatch, no queue)
         #[command(
-            after_help = "EXAMPLES:\n  atc run task tasks/gitkb-42                  # Implement a task\n  atc run review-fix --param pr=<pr-url>       # Address PR review\n  atc run pr-comments --param pr=<pr-url>      # Resolve PR comments\n  atc run task tasks/foo --dry-run             # Preview without launching\n  atc run my-template --inline --no-worktree   # Run a template in cwd\n\nNOTE: pass PR URLs via --param pr=<url> or --pr-url <url>; never as a\npositional argument (it falls through to the prompt resolver).\n"
+            after_help = "EXAMPLES:\n  atc run task tasks/gitkb-42                  # Implement a task\n  atc run review-fix --param pr=<pr-url>       # Address PR review\n  atc run pr-comments --param pr=<pr-url>      # Resolve PR comments\n  atc run task tasks/foo --dry-run             # Preview without launching\n  atc run my-template --inline --no-worktree   # Run a template in cwd\n  atc run task tasks/foo --json | jq           # Stable v1 envelope on stdout\n\nJSON OUTPUT (--json):\n  Emits a stable v1 envelope on stdout instead of the human-readable\n  confirmation. Errors also emit a structured envelope on stdout and exit\n  non-zero. Schema:\n\n    {\n      \"schema_version\": 1,\n      \"kind\": \"dispatch\" | \"error\",\n      \"data\": {\n        // dispatch (success):\n        \"dispatch_id\": \"<id>\",\n        \"task_slug\": \"tasks/...\" | null,\n        \"branch\": \"...\",\n        \"session\": \"...\",\n        \"directive\": \"implement\" | ...,\n        \"worktree_path\": \"/path/...\",\n        \"status\": \"running\" | \"done\" | \"failed\" | \"preview\",\n        \"resolver\": \"task\" | \"template\" | \"prompt\",\n        \"pr_urls\": [...],\n        \"log_file\": \"/path/...\" | null,\n        \"is_dry_run\": false,\n        \"inline_exit_code\": null | <i32>,\n        \"dispatched_at\": \"<rfc3339>\"\n        // error:\n        // \"code\": \"<category>\", \"message\": \"<msg>\", \"task_slug\": \"...\"?\n      }\n    }\n\n  Future fields are additive; consumers should ignore unknown keys.\n\nNOTE: pass PR URLs via --param pr=<url> or --pr-url <url>; never as a\npositional argument (it falls through to the prompt resolver).\n"
         )]
         Run {
             /// Input: "task <slug>", template name, or raw prompt string
@@ -113,6 +113,10 @@ mod args {
             /// Timeout in seconds for inline execution (kill after N seconds)
             #[arg(long)]
             timeout: Option<u32>,
+            /// Emit a stable v1 JSON envelope on stdout (success and error). Suppresses
+            /// human-readable confirmation. Errors also emit on stdout, exit non-zero.
+            #[arg(long)]
+            json: bool,
         },
         /// Check health of all active dispatches
         #[command(
@@ -488,94 +492,120 @@ pub async fn run(
             max_turns,
             ephemeral,
             timeout,
+            json,
         } => {
-            // Handle --list
-            if *list {
-                let templates = resolvers::template::TemplateResolver::list_templates(config);
-                if templates.is_empty() {
-                    println!("No templates found.");
-                } else {
-                    println!("Available templates:");
-                    for name in &templates {
-                        println!("  {name}");
+            let json_mode = *json;
+            // In --json mode, every failure path (including pre-pipeline argument
+            // validation) must surface as a structured envelope on stdout instead
+            // of the default anyhow stderr trace. Wrap the whole handler in a
+            // closure so we can intercept errors uniformly.
+            let result: Result<()> = (async {
+                if *list {
+                    let templates = resolvers::template::TemplateResolver::list_templates(config);
+                    if json_mode {
+                        let payload = serde_json::json!({
+                            "schema_version": output_schema::SCHEMA_VERSION,
+                            "kind": "templates",
+                            "data": { "templates": templates },
+                        });
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else if templates.is_empty() {
+                        println!("No templates found.");
+                    } else {
+                        println!("Available templates:");
+                        for name in &templates {
+                            println!("  {name}");
+                        }
                     }
+                    return Ok(());
                 }
-                return Ok(());
-            }
 
-            if input.is_empty() || input.iter().all(|s| s.trim().is_empty()) {
-                anyhow::bail!(
-                    "input is required: provide a task slug, template name, or prompt string\n\
-                     hint: try `atc run --list` to see templates, or `atc run task <slug>` for a task."
-                );
-            }
-
-            // Parse input: if first word is "task", strip it and route to TaskResolver explicitly
-            let (raw_input, force_task) = if input.first().map(|s| s.as_str()) == Some("task") {
-                let slug = input[1..].join(" ");
-                if slug.is_empty() {
+                if input.is_empty() || input.iter().all(|s| s.trim().is_empty()) {
                     anyhow::bail!(
-                        "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'\n\
-                         hint: list slugs with `git kb list --type task` or check `atc status`."
+                        "input is required: provide a task slug, template name, or prompt string\n\
+                         hint: try `atc run --list` to see templates, or `atc run task <slug>` for a task."
                     );
                 }
-                (slug, true)
-            } else {
-                (input.join(" "), false)
-            };
 
-            let is_inline = *inline
-                || std::env::var("ATC_CI")
-                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-                    .unwrap_or(false);
+                let (raw_input, force_task) = if input.first().map(|s| s.as_str()) == Some("task") {
+                    let slug = input[1..].join(" ");
+                    if slug.is_empty() {
+                        anyhow::bail!(
+                            "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'\n\
+                             hint: list slugs with `git kb list --type task` or check `atc status`."
+                        );
+                    }
+                    (slug, true)
+                } else {
+                    (input.join(" "), false)
+                };
 
-            let params = parse_params(param)?;
+                let is_inline = *inline
+                    || std::env::var("ATC_CI")
+                        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                        .unwrap_or(false);
 
-            let opts = RunOpts {
-                input: raw_input.clone(),
-                directive: directive.clone(),
-                params,
-                pr_url: pr_url.clone(),
-                repos: repos.clone(),
-                inline: is_inline,
-                force: *force,
-                dry_run: *dry_run,
-                directives: directives.clone(),
-                no_worktree: *no_worktree,
-                max_budget_usd: *max_budget_usd,
-                max_turns: *max_turns,
-                retries: 0,
-                list: false,
-                ephemeral: *ephemeral,
-                timeout: *timeout,
-            };
+                let params = parse_params(param)?;
 
-            // Build resolver chain
-            let all_resolvers = resolvers::build_resolvers(config);
-            let resolvers_to_use = if force_task {
-                // "task <slug>" explicitly routes to TaskResolver
-                all_resolvers
-                    .into_iter()
-                    .filter(|r| r.name() == "task")
-                    .collect()
-            } else {
-                all_resolvers
-            };
+                let opts = RunOpts {
+                    input: raw_input.clone(),
+                    directive: directive.clone(),
+                    params,
+                    pr_url: pr_url.clone(),
+                    repos: repos.clone(),
+                    inline: is_inline,
+                    force: *force,
+                    dry_run: *dry_run,
+                    directives: directives.clone(),
+                    no_worktree: *no_worktree,
+                    max_budget_usd: *max_budget_usd,
+                    max_turns: *max_turns,
+                    retries: 0,
+                    list: false,
+                    ephemeral: *ephemeral,
+                    timeout: *timeout,
+                    json: json_mode,
+                };
 
-            let pipeline = pipeline::DispatchPipeline {
-                resolvers: resolvers_to_use,
-                config,
-                registry: registry.as_ref(),
-                executor: executor.as_ref(),
-            };
+                let all_resolvers = resolvers::build_resolvers(config);
+                let resolvers_to_use = if force_task {
+                    all_resolvers
+                        .into_iter()
+                        .filter(|r| r.name() == "task")
+                        .collect()
+                } else {
+                    all_resolvers
+                };
 
-            let outcome = pipeline.execute(&raw_input, &opts).await?;
-            if let Some(code) = outcome.inline_exit_code {
-                if code != 0 {
-                    anyhow::bail!("inline dispatch failed with exit code {code}");
+                let pipeline = pipeline::DispatchPipeline {
+                    resolvers: resolvers_to_use,
+                    config,
+                    registry: registry.as_ref(),
+                    executor: executor.as_ref(),
+                };
+
+                let outcome = pipeline.execute(&raw_input, &opts).await?;
+                if let Some(code) = outcome.inline_exit_code {
+                    if code != 0 {
+                        // In --json mode the dispatch envelope was already emitted
+                        // with `inline_exit_code` populated; bailing here just
+                        // sets a non-zero process exit so scripts can detect it.
+                        anyhow::bail!("inline dispatch failed with exit code {code}");
+                    }
                 }
+                Ok(())
+            })
+            .await;
+
+            if json_mode {
+                if let Err(e) = result {
+                    pipeline::emit_run_error_envelope(&e);
+                    std::process::exit(1);
+                }
+                Ok(())
+            } else {
+                result
             }
-            Ok(())
         }
         Commands::Health { json, all, auto } => {
             health::run_health(
@@ -817,6 +847,7 @@ pub async fn run(
                 list: false,
                 ephemeral: true,
                 timeout: Some(*timeout),
+                json: false,
             };
 
             // Quick is template-only — don't allow fallthrough to prompt/task resolvers.
