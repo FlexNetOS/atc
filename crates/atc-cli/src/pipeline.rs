@@ -65,10 +65,8 @@ pub struct ErrorEnvelope {
     pub message: String,
 }
 
-/// Emit the `kind: "error"` envelope on stdout. Caller is responsible for
-/// exiting non-zero. The error message includes the full anyhow chain so
-/// programmatic consumers and humans both have enough context to act.
-pub fn emit_run_error_envelope(err: &anyhow::Error) {
+/// Format the full error chain as a colon-separated string.
+pub fn format_error_chain(err: &anyhow::Error) -> String {
     let mut chain = Vec::new();
     chain.push(format!("{err}"));
     let mut cause = err.source();
@@ -76,12 +74,19 @@ pub fn emit_run_error_envelope(err: &anyhow::Error) {
         chain.push(format!("{c}"));
         cause = c.source();
     }
+    chain.join(": ")
+}
+
+/// Emit the `kind: "error"` envelope on stdout. Caller is responsible for
+/// exiting non-zero. The error message includes the full anyhow chain so
+/// programmatic consumers and humans both have enough context to act.
+pub fn emit_run_error_envelope(err: &anyhow::Error) {
     let envelope = RunOutputV1 {
         schema_version: SCHEMA_VERSION,
         kind: "error",
         data: ErrorEnvelope {
             code: "dispatch_error",
-            message: chain.join(": "),
+            message: format_error_chain(err),
         },
     };
     match serde_json::to_string_pretty(&envelope) {
@@ -242,6 +247,40 @@ impl<'a> DispatchPipeline<'a> {
             )
             .await;
 
+            // Resolve document workspace so the preview path matches dispatch.
+            let effective_workspace_root = if worktree_policy == WorktreePolicy::Document {
+                let slug = resolved
+                    .task_slug
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        effective_params
+                            .get("task")
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| {
+                        effective_params
+                            .get("slug")
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                    });
+                if let Some(slug) = slug {
+                    let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
+                    let worktree_base = dispatch_cfg.resolved_worktree_base();
+                    match resolve_document_workspace(slug, kb_root, &worktree_base, &workspace_root)
+                        .await
+                    {
+                        Ok(Some(doc_ws)) => doc_ws.cwd,
+                        _ => workspace_root.clone(),
+                    }
+                } else {
+                    workspace_root.clone()
+                }
+            } else {
+                workspace_root.clone()
+            };
+
             // Compute providers for display
             let mut dry_providers =
                 atc_core::providers::providers_for_directive(self.config, &resolved.directive);
@@ -263,7 +302,7 @@ impl<'a> DispatchPipeline<'a> {
                 opts.ephemeral,
                 worktree_policy,
                 &dry_repos,
-                &workspace_root,
+                &effective_workspace_root,
                 opts.json,
             );
         }
@@ -1766,14 +1805,7 @@ mod tests {
         // them in the UI without losing the inner reason.
         let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let err = anyhow::Error::new(inner).context("failed to read template");
-        let mut chain = Vec::new();
-        chain.push(format!("{err}"));
-        let mut cause = err.source();
-        while let Some(c) = cause {
-            chain.push(format!("{c}"));
-            cause = c.source();
-        }
-        let joined = chain.join(": ");
+        let joined = format_error_chain(&err);
         assert!(joined.contains("failed to read template"));
         assert!(joined.contains("no such file"));
     }
