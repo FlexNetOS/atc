@@ -311,6 +311,10 @@ pub struct RunOpts {
     pub ephemeral: bool,
     /// Inline timeout in seconds.
     pub timeout: Option<u32>,
+    /// Emit a structured JSON envelope on stdout instead of human-readable
+    /// confirmation. Suppresses the post-dispatch text block and the dry-run
+    /// preview text. See `atc run --help` for the v1 schema.
+    pub json: bool,
 }
 
 /// Outcome of a successful dispatch.
@@ -344,9 +348,11 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
         assert!(!opts.ephemeral, "ephemeral should default to false");
         assert_eq!(opts.timeout, None, "timeout should default to None");
+        assert!(!opts.json, "json should default to false");
     }
 
     #[test]

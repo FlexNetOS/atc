@@ -6,7 +6,8 @@ use atc_core::resolver::InputResolver;
 use atc_core::types::{
     Directive, DispatchOutcome, DispatchRecord, HealthChecks, RunOpts, Status, WorktreePolicy,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -18,6 +19,89 @@ use crate::dispatch::{
     resolve_pr_repo_path, tmux_session_alive, validate_branch_name, write_diag_file, MetaDiscovery,
     WorktreeOpts,
 };
+use crate::output_schema::SCHEMA_VERSION;
+
+/// JSON envelope shared by `atc run --json`. v1 schema; future fields are additive.
+///
+/// `kind` is `"dispatch"` for both real and dry-run dispatches and `"error"` when
+/// the dispatch could not be created. Consumers should switch on `kind` and
+/// ignore unknown fields. Dry runs are tagged via `data.is_dry_run = true` and
+/// `data.status = "preview"`.
+#[derive(Debug, Serialize)]
+pub struct RunOutputV1<T: Serialize> {
+    pub schema_version: u32,
+    pub kind: &'static str,
+    pub data: T,
+}
+
+/// Successful or dry-run dispatch payload. All fields are populated whenever
+/// available; missing data is omitted (e.g. `log_file` is `None` for dry runs
+/// and ephemeral dispatches that do not write a log file).
+#[derive(Debug, Serialize)]
+pub struct DispatchEnvelope<'a> {
+    pub dispatch_id: &'a str,
+    pub task_slug: Option<&'a str>,
+    pub branch: &'a str,
+    pub session: &'a str,
+    pub directive: &'a str,
+    pub worktree_path: String,
+    pub worktree_policy: &'static str,
+    pub status: &'static str,
+    pub resolver: &'a str,
+    pub pr_urls: Vec<&'a str>,
+    pub log_file: Option<String>,
+    pub is_dry_run: bool,
+    pub inline_exit_code: Option<i32>,
+    pub dispatched_at: DateTime<Utc>,
+}
+
+/// Error payload emitted on stdout when `--json` is set and the dispatch
+/// fails before reaching the registry. `code` is a coarse category — v1 keeps
+/// it as a single `dispatch_error` so consumers don't take a hard dependency
+/// on a category set that hasn't stabilized yet.
+#[derive(Debug, Serialize)]
+pub struct ErrorEnvelope {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// Format the full error chain as a colon-separated string.
+pub fn format_error_chain(err: &anyhow::Error) -> String {
+    let mut chain = Vec::new();
+    chain.push(format!("{err}"));
+    let mut cause = err.source();
+    while let Some(c) = cause {
+        chain.push(format!("{c}"));
+        cause = c.source();
+    }
+    chain.join(": ")
+}
+
+/// Emit the `kind: "error"` envelope on stdout. Caller is responsible for
+/// exiting non-zero. The error message includes the full anyhow chain so
+/// programmatic consumers and humans both have enough context to act.
+pub fn emit_run_error_envelope(err: &anyhow::Error) {
+    let envelope = RunOutputV1 {
+        schema_version: SCHEMA_VERSION,
+        kind: "error",
+        data: ErrorEnvelope {
+            code: "dispatch_error",
+            message: format_error_chain(err),
+        },
+    };
+    match serde_json::to_string_pretty(&envelope) {
+        Ok(s) => println!("{s}"),
+        Err(e) => {
+            // Serialization is essentially infallible for these owned types;
+            // if it ever does fail, fall back to a hand-written envelope so
+            // consumers still see structured output rather than nothing.
+            eprintln!("warning: failed to serialize error envelope: {e}");
+            println!(
+                "{{\"schema_version\":{SCHEMA_VERSION},\"kind\":\"error\",\"data\":{{\"code\":\"dispatch_error\",\"message\":\"<unserializable>\"}}}}"
+            );
+        }
+    }
+}
 
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
 pub struct DispatchPipeline<'a> {
@@ -163,6 +247,40 @@ impl<'a> DispatchPipeline<'a> {
             )
             .await;
 
+            // Resolve document workspace so the preview path matches dispatch.
+            let effective_workspace_root = if worktree_policy == WorktreePolicy::Document {
+                let slug = resolved
+                    .task_slug
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        effective_params
+                            .get("task")
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .or_else(|| {
+                        effective_params
+                            .get("slug")
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                    });
+                if let Some(slug) = slug {
+                    let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
+                    let worktree_base = dispatch_cfg.resolved_worktree_base();
+                    match resolve_document_workspace(slug, kb_root, &worktree_base, &workspace_root)
+                        .await
+                    {
+                        Ok(Some(doc_ws)) => doc_ws.cwd,
+                        _ => workspace_root.clone(),
+                    }
+                } else {
+                    workspace_root.clone()
+                }
+            } else {
+                workspace_root.clone()
+            };
+
             // Compute providers for display
             let mut dry_providers =
                 atc_core::providers::providers_for_directive(self.config, &resolved.directive);
@@ -184,7 +302,8 @@ impl<'a> DispatchPipeline<'a> {
                 opts.ephemeral,
                 worktree_policy,
                 &dry_repos,
-                &workspace_root,
+                &effective_workspace_root,
+                opts.json,
             );
         }
 
@@ -323,6 +442,36 @@ impl<'a> DispatchPipeline<'a> {
             // Cleanup resolver state on success (ephemeral has no registry record to reference)
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
             resolver.on_cleanup(&tmp_record, self.config, None).await;
+
+            if opts.json {
+                let status = match handle.inline_exit_code {
+                    Some(0) => Status::Done,
+                    Some(_) => Status::Failed,
+                    None => Status::Running,
+                };
+                let pr_urls: Vec<&str> = effective_pr_url.iter().map(String::as_str).collect();
+                let envelope = RunOutputV1 {
+                    schema_version: SCHEMA_VERSION,
+                    kind: "dispatch",
+                    data: DispatchEnvelope {
+                        dispatch_id: &resolved.dispatch_id,
+                        task_slug: resolved.task_slug.as_deref(),
+                        branch: &resolved.branch,
+                        session: &handle.session,
+                        directive: resolved.directive.as_str(),
+                        worktree_path: agent_opts.worktree_path.to_string_lossy().into_owned(),
+                        worktree_policy: worktree_policy.as_str(),
+                        status: status.as_str(),
+                        resolver: resolver.name(),
+                        pr_urls,
+                        log_file: None,
+                        is_dry_run: false,
+                        inline_exit_code: handle.inline_exit_code,
+                        dispatched_at: Utc::now(),
+                    },
+                };
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            }
 
             return Ok(DispatchOutcome {
                 id: resolved.dispatch_id.clone(),
@@ -986,19 +1135,47 @@ impl<'a> DispatchPipeline<'a> {
             inline_exit_code: handle.inline_exit_code,
         };
 
-        // Post-dispatch confirmation
-        print_dispatch_confirmation(
-            resolved.task_slug.as_deref(),
-            &resolved.directive,
-            &resolved.dispatch_id,
-            &resolved.branch,
-            &worktree_path,
-            &handle.session,
-            &log_file,
-            resolver.name(),
-            worktree_policy,
-            repos_for_context.first().map(String::as_str),
-        );
+        if opts.json {
+            // Stable v1 envelope. Mirrors the human-readable confirmation but
+            // adds machine-parseable fields (status, dispatched_at, log_file)
+            // so consumers can wire up follow-on actions (e.g. "Run with ATC"
+            // citation insertion) without scraping text.
+            let pr_urls: Vec<&str> = record.pr_urls.iter().map(String::as_str).collect();
+            let envelope = RunOutputV1 {
+                schema_version: SCHEMA_VERSION,
+                kind: "dispatch",
+                data: DispatchEnvelope {
+                    dispatch_id: &resolved.dispatch_id,
+                    task_slug: resolved.task_slug.as_deref(),
+                    branch: &resolved.branch,
+                    session: &handle.session,
+                    directive: resolved.directive.as_str(),
+                    worktree_path: worktree_path.to_string_lossy().into_owned(),
+                    worktree_policy: worktree_policy.as_str(),
+                    status: status.as_str(),
+                    resolver: resolver.name(),
+                    pr_urls,
+                    log_file: Some(log_file.to_string_lossy().into_owned()),
+                    is_dry_run: false,
+                    inline_exit_code: handle.inline_exit_code,
+                    dispatched_at: now,
+                },
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        } else {
+            print_dispatch_confirmation(
+                resolved.task_slug.as_deref(),
+                &resolved.directive,
+                &resolved.dispatch_id,
+                &resolved.branch,
+                &worktree_path,
+                &handle.session,
+                &log_file,
+                resolver.name(),
+                worktree_policy,
+                repos_for_context.first().map(String::as_str),
+            );
+        }
 
         if let Some(exit_code) = handle.inline_exit_code {
             info!(
@@ -1079,7 +1256,55 @@ impl<'a> DispatchPipeline<'a> {
         worktree_policy: WorktreePolicy,
         repos: &[String],
         workspace_root: &Path,
+        json: bool,
     ) -> Result<DispatchOutcome> {
+        let primary_repo = repos.first().map(String::as_str);
+        let (policy_label, resolved_path, hint) = describe_worktree(
+            self.config,
+            &resolved.branch,
+            primary_repo,
+            worktree_policy,
+            workspace_root,
+        );
+
+        if json {
+            // Dry-run JSON mirrors the success envelope so consumers parse a
+            // single shape: `is_dry_run = true` and `status = "preview"` are
+            // the discriminators. `dispatch_id` is still populated (the
+            // resolver produced one) so consumers can correlate previews
+            // with subsequent real runs if they choose to.
+            let pr_urls: Vec<&str> = pr_url.into_iter().collect();
+            let envelope = RunOutputV1 {
+                schema_version: SCHEMA_VERSION,
+                kind: "dispatch",
+                data: DispatchEnvelope {
+                    dispatch_id: &resolved.dispatch_id,
+                    task_slug: resolved.task_slug.as_deref(),
+                    branch: &resolved.branch,
+                    session: &resolved.dispatch_id,
+                    directive: resolved.directive.as_str(),
+                    worktree_path: resolved_path.to_string_lossy().into_owned(),
+                    worktree_policy: worktree_policy.as_str(),
+                    status: "preview",
+                    resolver: resolver_name,
+                    pr_urls,
+                    log_file: None,
+                    is_dry_run: true,
+                    inline_exit_code: None,
+                    dispatched_at: Utc::now(),
+                },
+            };
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            // Suppress unused-arg warnings while keeping the same arg list as
+            // the human path (so future fields can flow into both branches).
+            let _ = (budget, turns, providers, hint, ephemeral, policy_label);
+            return Ok(DispatchOutcome {
+                id: resolved.dispatch_id.clone(),
+                session: resolved.dispatch_id.clone(),
+                inline_exit_code: Some(0),
+            });
+        }
+
         if ephemeral {
             println!("=== DRY RUN (ephemeral) ===");
         } else {
@@ -1097,14 +1322,6 @@ impl<'a> DispatchPipeline<'a> {
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
 
-        let primary_repo = repos.first().map(String::as_str);
-        let (policy_label, resolved_path, hint) = describe_worktree(
-            self.config,
-            &resolved.branch,
-            primary_repo,
-            worktree_policy,
-            workspace_root,
-        );
         println!(
             "Worktree:    {} ({})",
             worktree_policy.as_str(),
@@ -1482,6 +1699,116 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_run_output_v1_dispatch_envelope_shape() {
+        // Lock the v1 success envelope so consumers (the GitKB ATC app, scripts)
+        // can rely on exact field names. Renaming any of these is a v2 change.
+        let envelope = RunOutputV1 {
+            schema_version: SCHEMA_VERSION,
+            kind: "dispatch",
+            data: DispatchEnvelope {
+                dispatch_id: "tasks--foo@implement@1234567890-0001",
+                task_slug: Some("tasks/foo"),
+                branch: "tasks--foo",
+                session: "tasks--foo@implement@1234567890-0001",
+                directive: "implement",
+                worktree_path: "/tmp/wt/tasks--foo".to_string(),
+                worktree_policy: "branch",
+                status: "running",
+                resolver: "task",
+                pr_urls: vec!["https://github.com/o/r/pull/1"],
+                log_file: Some("/tmp/logs/tasks--foo.jsonl".to_string()),
+                is_dry_run: false,
+                inline_exit_code: None,
+                dispatched_at: chrono::DateTime::parse_from_rfc3339("2026-05-04T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["kind"], "dispatch");
+        let data = &json["data"];
+        assert_eq!(data["dispatch_id"], "tasks--foo@implement@1234567890-0001");
+        assert_eq!(data["task_slug"], "tasks/foo");
+        assert_eq!(data["branch"], "tasks--foo");
+        assert_eq!(data["session"], "tasks--foo@implement@1234567890-0001");
+        assert_eq!(data["directive"], "implement");
+        assert_eq!(data["worktree_path"], "/tmp/wt/tasks--foo");
+        assert_eq!(data["worktree_policy"], "branch");
+        assert_eq!(data["status"], "running");
+        assert_eq!(data["resolver"], "task");
+        assert_eq!(data["pr_urls"][0], "https://github.com/o/r/pull/1");
+        assert_eq!(data["log_file"], "/tmp/logs/tasks--foo.jsonl");
+        assert_eq!(data["is_dry_run"], false);
+        assert!(data["inline_exit_code"].is_null());
+        assert_eq!(data["dispatched_at"], "2026-05-04T12:00:00Z");
+    }
+
+    #[test]
+    fn test_run_output_v1_dry_run_envelope_uses_preview_status() {
+        // Dry-run envelopes are the same shape as the success envelope but
+        // discriminate via `is_dry_run = true` and `status = "preview"` so
+        // consumers don't insert citations for previews.
+        let envelope = RunOutputV1 {
+            schema_version: SCHEMA_VERSION,
+            kind: "dispatch",
+            data: DispatchEnvelope {
+                dispatch_id: "tasks--foo@implement@1234567890-0001",
+                task_slug: Some("tasks/foo"),
+                branch: "tasks--foo",
+                session: "tasks--foo@implement@1234567890-0001",
+                directive: "implement",
+                worktree_path: "/tmp/wt/tasks--foo".to_string(),
+                worktree_policy: "branch",
+                status: "preview",
+                resolver: "task",
+                pr_urls: vec![],
+                log_file: None,
+                is_dry_run: true,
+                inline_exit_code: None,
+                dispatched_at: Utc::now(),
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["data"]["is_dry_run"], true);
+        assert_eq!(json["data"]["status"], "preview");
+        assert!(json["data"]["log_file"].is_null());
+    }
+
+    #[test]
+    fn test_run_output_v1_error_envelope_shape() {
+        let err = anyhow::anyhow!("tasks/harmony-9999 not found in KB");
+        let envelope = RunOutputV1 {
+            schema_version: SCHEMA_VERSION,
+            kind: "error",
+            data: ErrorEnvelope {
+                code: "dispatch_error",
+                message: err.to_string(),
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["kind"], "error");
+        assert_eq!(json["data"]["code"], "dispatch_error");
+        assert!(json["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found in KB"));
+    }
+
+    #[test]
+    fn test_emit_run_error_envelope_includes_full_chain() {
+        // anyhow chains nested errors with `.context()`. The envelope message
+        // must include all causes, joined so a programmatic consumer can show
+        // them in the UI without losing the inner reason.
+        let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err = anyhow::Error::new(inner).context("failed to read template");
+        let joined = format_error_chain(&err);
+        assert!(joined.contains("failed to read template"));
+        assert!(joined.contains("no such file"));
+    }
 
     #[test]
     fn test_render_pr_start_comment_with_task() {

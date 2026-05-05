@@ -121,6 +121,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
 
         let result = resolver
@@ -156,6 +157,7 @@ mod tests {
             list: false,
             ephemeral: false,
             timeout: None,
+            json: false,
         };
 
         let result = resolver.resolve("test", &opts, &config).await.unwrap();

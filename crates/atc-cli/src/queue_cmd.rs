@@ -209,6 +209,7 @@ pub async fn dispatch_queue_item(
         list: false,
         ephemeral: false,
         timeout: None,
+        json: false,
     };
 
     // Build resolver chain
