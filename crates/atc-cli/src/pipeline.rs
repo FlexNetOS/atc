@@ -404,6 +404,36 @@ impl<'a> DispatchPipeline<'a> {
             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
             resolver.on_cleanup(&tmp_record, self.config, None).await;
 
+            if opts.json {
+                let status = match handle.inline_exit_code {
+                    Some(0) => Status::Done,
+                    Some(_) => Status::Failed,
+                    None => Status::Running,
+                };
+                let pr_urls: Vec<&str> = effective_pr_url.iter().map(String::as_str).collect();
+                let envelope = RunOutputV1 {
+                    schema_version: SCHEMA_VERSION,
+                    kind: "dispatch",
+                    data: DispatchEnvelope {
+                        dispatch_id: &resolved.dispatch_id,
+                        task_slug: resolved.task_slug.as_deref(),
+                        branch: &resolved.branch,
+                        session: &handle.session,
+                        directive: resolved.directive.as_str(),
+                        worktree_path: agent_opts.worktree_path.to_string_lossy().into_owned(),
+                        worktree_policy: worktree_policy.as_str(),
+                        status: status.as_str(),
+                        resolver: resolver.name(),
+                        pr_urls,
+                        log_file: None,
+                        is_dry_run: false,
+                        inline_exit_code: handle.inline_exit_code,
+                        dispatched_at: Utc::now(),
+                    },
+                };
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            }
+
             return Ok(DispatchOutcome {
                 id: resolved.dispatch_id.clone(),
                 session: handle.session.clone(),

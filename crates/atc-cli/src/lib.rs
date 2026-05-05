@@ -587,9 +587,9 @@ pub async fn run(
                 let outcome = pipeline.execute(&raw_input, &opts).await?;
                 if let Some(code) = outcome.inline_exit_code {
                     if code != 0 {
-                        // In --json mode the dispatch envelope was already emitted
-                        // with `inline_exit_code` populated; bailing here just
-                        // sets a non-zero process exit so scripts can detect it.
+                        if json_mode {
+                            std::process::exit(1);
+                        }
                         anyhow::bail!("inline dispatch failed with exit code {code}");
                     }
                 }
