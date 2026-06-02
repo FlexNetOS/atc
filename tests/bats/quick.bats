@@ -9,20 +9,6 @@ load helpers/common
 # Helpers
 # ---------------------------------------------------------------------------
 
-require_jq() {
-    if ! command -v jq >/dev/null 2>&1; then
-        skip "jq not installed"
-    fi
-}
-
-run_split() {
-    local stdout_file="$TEST_TMPDIR/.stdout"
-    local stderr_file="$TEST_TMPDIR/.stderr"
-    "$@" >"$stdout_file" 2>"$stderr_file" && SPLIT_STATUS=0 || SPLIT_STATUS=$?
-    STDOUT="$(cat "$stdout_file")"
-    STDERR="$(cat "$stderr_file")"
-}
-
 init_named_git_branch() {
     git init --quiet
     git symbolic-ref HEAD refs/heads/main

@@ -11,6 +11,8 @@
 
 .PHONY: all test setup clean
 
+SHELL := /bin/bash
+
 BATS_CORE_REPO   := https://github.com/bats-core/bats-core.git
 BATS_SUPPORT_REPO := https://github.com/bats-core/bats-support.git
 BATS_ASSERT_REPO  := https://github.com/bats-core/bats-assert.git
@@ -31,10 +33,30 @@ all: test
 
 setup:
 	@mkdir -p bats
-	@[[ -d bats/bats-core ]]    || git clone --depth 1 $(BATS_CORE_REPO)    bats/bats-core
-	@[[ -d bats/bats-support ]]  || git clone --depth 1 $(BATS_SUPPORT_REPO)  bats/bats-support
-	@[[ -d bats/bats-assert ]]   || git clone --depth 1 $(BATS_ASSERT_REPO)   bats/bats-assert
-	@[[ -d bats/bats-file ]]     || git clone --depth 1 $(BATS_FILE_REPO)     bats/bats-file
+	@lock="bats/.setup.lock"; \
+	while ! mkdir "$$lock" 2>/dev/null; do \
+		if [[ ! -f "$$lock/pid" ]] || ! kill -0 "$$(cat "$$lock/pid" 2>/dev/null)" 2>/dev/null; then \
+			rm -rf "$$lock"; \
+		else \
+			sleep 0.1; \
+		fi; \
+	done; \
+	echo "$$$$" > "$$lock/pid"; \
+	trap 'rm -rf "$$lock"' EXIT; \
+	clone_dep() { \
+		local repo="$$1" dir="$$2" tmp; \
+		if [[ ! -d "$$dir/.git" ]]; then \
+			tmp="$$dir.tmp.$$$$"; \
+			rm -rf "$$tmp"; \
+			git clone --depth 1 "$$repo" "$$tmp"; \
+			rm -rf "$$dir"; \
+			mv "$$tmp" "$$dir"; \
+		fi; \
+	}; \
+	clone_dep "$(BATS_CORE_REPO)" bats/bats-core; \
+	clone_dep "$(BATS_SUPPORT_REPO)" bats/bats-support; \
+	clone_dep "$(BATS_ASSERT_REPO)" bats/bats-assert; \
+	clone_dep "$(BATS_FILE_REPO)" bats/bats-file
 
 test: setup
 	$(BATS) --jobs $(JOBS) $(TEST_FILES)

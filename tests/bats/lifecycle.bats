@@ -44,6 +44,7 @@ load helpers/common
 }
 
 @test "status --json returns valid JSON envelope" {
+    require_jq
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     sqlite3 "$TEST_TMPDIR/atc.db" \
@@ -62,6 +63,7 @@ load helpers/common
 }
 
 @test "info --json returns structured agent metadata" {
+    require_jq
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     sqlite3 "$TEST_TMPDIR/atc.db" \
@@ -76,6 +78,32 @@ load helpers/common
     echo "$output" | jq -e '.record.agent_capabilities.supports_resume_by_session_id == true'
     echo "$output" | jq -e '.record.agent_capabilities.supports_tmux_attach == false'
     echo "$output" | jq -e '.record | has("agent_capabilities_json") | not'
+}
+
+@test "status/info --json tolerate malformed optional agent metadata" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json' WHERE id = 'disp-001';"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.schema_version == 1'
+    echo "$STDOUT" | jq -e '.records[0].id == "disp-001"'
+    echo "$STDOUT" | jq -e '.records[0].agent_provider == "claude"'
+    echo "$STDOUT" | jq -e '.records[0].agent_session_id == null'
+    echo "$STDOUT" | jq -e '.records[0].agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.records[0] | has("agent_capabilities_json") | not'
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.schema_version == 1'
+    echo "$STDOUT" | jq -e '.record.id == "disp-001"'
+    echo "$STDOUT" | jq -e '.record.agent_provider == "claude"'
+    echo "$STDOUT" | jq -e '.record.agent_session_id == null'
+    echo "$STDOUT" | jq -e '.record.agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.record | has("agent_capabilities_json") | not'
 }
 
 @test "info: shows correct fields for a dispatch" {

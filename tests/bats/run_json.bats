@@ -8,27 +8,6 @@
 
 load helpers/common
 
-# All --json tests pipe through `jq -e` so a malformed envelope fails the
-# test loudly instead of silently passing on substring matches.
-require_jq() {
-    if ! command -v jq >/dev/null 2>&1; then
-        skip "jq not installed"
-    fi
-}
-
-# Run a command and split stdout/stderr so we can assert on the envelope
-# without tracing noise. BATS `run` merges them by default. We must NOT
-# return a non-zero status from this function — bats' implicit errexit on the
-# test body would abort the test before our exit-code assertion runs. Stash
-# the rc in $SPLIT_STATUS for the caller to read.
-run_split() {
-    local stdout_file="$TEST_TMPDIR/.stdout"
-    local stderr_file="$TEST_TMPDIR/.stderr"
-    "$@" >"$stdout_file" 2>"$stderr_file" && SPLIT_STATUS=0 || SPLIT_STATUS=$?
-    STDOUT="$(cat "$stdout_file")"
-    STDERR="$(cat "$stderr_file")"
-}
-
 # ---------------------------------------------------------------------------
 # Help text documents the schema
 # ---------------------------------------------------------------------------

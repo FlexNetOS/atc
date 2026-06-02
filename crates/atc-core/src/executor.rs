@@ -1163,4 +1163,104 @@ exit 0
             body
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_build_tmux_bash_body_escapes_session_id_and_hostile_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+
+        let fake_atc = bin_dir.join("atc");
+        std::fs::write(&fake_atc, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_atc, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let capture = tmp.path().join("args.txt");
+        let claude_bin = bin_dir.join("claude '$(touch pwned-bin)'");
+        std::fs::write(
+            &claude_bin,
+            r#"#!/bin/sh
+printf '%s
+' "$@" > "$ATC_ARG_CAPTURE"
+cat >/dev/null
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let worktree_path = tmp.path().join("work '$(touch pwned-worktree)' ; dir");
+        std::fs::create_dir(&worktree_path).unwrap();
+        let prompt_path = tmp.path().join("prompt '$(touch pwned-prompt)'.md");
+        let task_doc_path = tmp.path().join("task '$(touch pwned-taskdoc)'.md");
+        let log_file = tmp.path().join("log '$(touch pwned-log)'.jsonl");
+        std::fs::write(&task_doc_path, "task body").unwrap();
+
+        let mut env = HashMap::new();
+        env.insert(
+            "ATC_ARG_CAPTURE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let executor = ClaudeExecutor { claude_bin };
+        let opts = AgentOpts {
+            slug: "task '$(touch pwned-slug)'".to_string(),
+            worktree_path,
+            log_file: Some(log_file),
+            stdin_content: Some("content".to_string()),
+            env,
+            agent_session_id: Some(session_id("33333333-3333-4333-8333-333333333333")),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+        assert!(
+            body.contains("--session-id '33333333-3333-4333-8333-333333333333'"),
+            "bash body should pass Claude session id, got: {}",
+            body
+        );
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&body)
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "bash body failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for sentinel in [
+            "pwned-bin",
+            "pwned-worktree",
+            "pwned-prompt",
+            "pwned-taskdoc",
+            "pwned-log",
+            "pwned-slug",
+        ] {
+            assert!(
+                !tmp.path().join(sentinel).exists(),
+                "shell expansion created unexpected sentinel file: {sentinel}"
+            );
+        }
+
+        let args = std::fs::read_to_string(capture).unwrap();
+        assert!(args.contains("--session-id"));
+        assert!(args.contains("33333333-3333-4333-8333-333333333333"));
+    }
 }

@@ -55,6 +55,54 @@ pub struct DispatchRecord {
 
 pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentProviderDescriptor {
+    pub name: &'static str,
+    pub supports_durable_session_on_start: bool,
+}
+
+impl AgentProviderDescriptor {
+    pub fn durable_session_metadata(&self, transcript_cwd: PathBuf) -> AgentSessionMetadata {
+        AgentSessionMetadata {
+            provider: self.name.to_string(),
+            session_id: self
+                .supports_durable_session_on_start
+                .then(AgentSessionId::new),
+            transcript_cwd: Some(transcript_cwd),
+            resume_of_dispatch_id: None,
+            capabilities: Some(self.capabilities()),
+        }
+    }
+
+    /// Ephemeral/preview dispatches know the provider but deliberately do not
+    /// create a durable provider-native session that ATC cannot persist.
+    pub fn ephemeral_session_metadata(&self) -> AgentSessionMetadata {
+        AgentSessionMetadata {
+            provider: self.name.to_string(),
+            session_id: None,
+            transcript_cwd: None,
+            resume_of_dispatch_id: None,
+            capabilities: None,
+        }
+    }
+
+    pub fn capabilities(&self) -> AgentCapabilities {
+        match self.name {
+            CLAUDE_AGENT_PROVIDER => claude_agent_capabilities(),
+            _ => AgentCapabilities::default(),
+        }
+    }
+}
+
+pub const CLAUDE_AGENT_DESCRIPTOR: AgentProviderDescriptor = AgentProviderDescriptor {
+    name: CLAUDE_AGENT_PROVIDER,
+    supports_durable_session_on_start: true,
+};
+
+pub fn claude_agent_provider() -> AgentProviderDescriptor {
+    CLAUDE_AGENT_DESCRIPTOR
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AgentSessionId(uuid::Uuid);
 
@@ -142,25 +190,11 @@ pub struct AgentSessionMetadata {
 
 impl AgentSessionMetadata {
     pub fn new_claude(transcript_cwd: PathBuf) -> Self {
-        Self {
-            provider: CLAUDE_AGENT_PROVIDER.to_string(),
-            session_id: Some(AgentSessionId::new()),
-            transcript_cwd: Some(transcript_cwd),
-            resume_of_dispatch_id: None,
-            capabilities: Some(claude_agent_capabilities()),
-        }
+        claude_agent_provider().durable_session_metadata(transcript_cwd)
     }
 
-    /// Ephemeral/preview dispatches know the provider but deliberately do not
-    /// create a durable provider-native session that ATC cannot persist.
     pub fn claude_without_session() -> Self {
-        Self {
-            provider: CLAUDE_AGENT_PROVIDER.to_string(),
-            session_id: None,
-            transcript_cwd: None,
-            resume_of_dispatch_id: None,
-            capabilities: None,
-        }
+        claude_agent_provider().ephemeral_session_metadata()
     }
 }
 
@@ -488,6 +522,39 @@ mod tests {
     fn test_agent_session_id_rejects_invalid_values() {
         assert!(AgentSessionId::parse_str("not-a-uuid").is_err());
         assert!(AgentSessionId::parse_str("00000000-0000-4000-8000-000000000001\0").is_err());
+    }
+
+    #[test]
+    fn test_agent_session_id_serde_round_trip() {
+        let id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000010").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"00000000-0000-4000-8000-000000000010\"");
+
+        let parsed: AgentSessionId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+        assert!(serde_json::from_str::<AgentSessionId>("\"not-a-uuid\"").is_err());
+    }
+
+    #[test]
+    fn test_claude_agent_provider_descriptor_creates_metadata() {
+        let provider = claude_agent_provider();
+        assert_eq!(provider.name, CLAUDE_AGENT_PROVIDER);
+        assert!(provider.supports_durable_session_on_start);
+
+        let metadata = provider.durable_session_metadata(PathBuf::from("/tmp/worktree"));
+        assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
+        assert!(metadata.session_id.is_some());
+        assert_eq!(
+            metadata.transcript_cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert!(metadata.capabilities.is_some());
+
+        let ephemeral = provider.ephemeral_session_metadata();
+        assert_eq!(ephemeral.provider, CLAUDE_AGENT_PROVIDER);
+        assert!(ephemeral.session_id.is_none());
+        assert!(ephemeral.transcript_cwd.is_none());
+        assert!(ephemeral.capabilities.is_none());
     }
 
     #[test]

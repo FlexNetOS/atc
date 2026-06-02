@@ -21,6 +21,22 @@ atc() {
     "$ATC_BIN" "$@"
 }
 
+require_jq() {
+    if ! command -v jq >/dev/null 2>&1; then
+        skip "jq not installed"
+    fi
+}
+
+# Run a command with stdout/stderr split into globals so JSON tests can parse
+# stdout without tracing or warning lines.
+run_split() {
+    local stdout_file="$TEST_TMPDIR/.stdout"
+    local stderr_file="$TEST_TMPDIR/.stderr"
+    "$@" >"$stdout_file" 2>"$stderr_file" && SPLIT_STATUS=0 || SPLIT_STATUS=$?
+    STDOUT="$(cat "$stdout_file")"
+    STDERR="$(cat "$stderr_file")"
+}
+
 # ---------------------------------------------------------------------------
 # Build the atc binary once per test file (not per test).
 # ---------------------------------------------------------------------------

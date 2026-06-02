@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::executor::{AgentExecutor, AgentOpts};
 use atc_core::registry::Registry;
-use atc_core::resolver::InputResolver;
+use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{
-    AgentCapabilities, AgentSessionMetadata, Directive, DispatchOutcome, DispatchRecord,
+    claude_agent_provider, AgentCapabilities, Directive, DispatchOutcome, DispatchRecord,
     HealthChecks, RunOpts, Status, WorktreePolicy,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -107,6 +108,50 @@ pub fn emit_run_error_envelope(err: &anyhow::Error) {
             );
         }
     }
+}
+
+fn document_policy_slug<'a>(
+    resolved: &'a ResolvedInput,
+    params: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    resolved
+        .task_slug
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            params
+                .get("task")
+                .map(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            params
+                .get("slug")
+                .map(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+fn validate_document_policy_slug(slug: &str) -> Result<()> {
+    let slug_path = Path::new(slug);
+    let unsafe_slug = slug_path.is_absolute()
+        || slug.contains('\\')
+        || slug.contains('\0')
+        || slug_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+    anyhow::ensure!(
+        !unsafe_slug,
+        "invalid slug for document policy: unsafe path '{}'",
+        slug
+    );
+    Ok(())
 }
 
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
@@ -336,42 +381,13 @@ impl<'a> DispatchPipeline<'a> {
                 }
                 WorktreePolicy::Document => {
                     // Resolve CWD from document location when a slug is available.
-                    let slug = resolved
-                        .task_slug
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| {
-                            effective_params
-                                .get("task")
-                                .map(|s| s.as_str())
-                                .filter(|s| !s.is_empty())
-                        })
-                        .or_else(|| {
-                            effective_params
-                                .get("slug")
-                                .map(|s| s.as_str())
-                                .filter(|s| !s.is_empty())
-                        });
-                    if let Some(slug) = slug {
-                        // Validate slug (mirrors the non-ephemeral Document path).
-                        let slug_path = std::path::Path::new(slug);
-                        if slug_path.is_absolute()
-                            || slug.contains('\\')
-                            || slug.contains('\0')
-                            || slug_path.components().any(|c| {
-                                matches!(
-                                    c,
-                                    std::path::Component::ParentDir
-                                        | std::path::Component::CurDir
-                                        | std::path::Component::RootDir
-                                        | std::path::Component::Prefix(_)
-                                )
-                            })
-                        {
-                            anyhow::bail!(
-                                "invalid slug for document policy: unsafe path '{}'",
-                                slug
-                            );
+                    let slug =
+                        document_policy_slug(&resolved, &effective_params).map(str::to_string);
+                    if let Some(slug) = slug.as_deref() {
+                        if let Err(e) = validate_document_policy_slug(slug) {
+                            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                            resolver.on_cleanup(&tmp_record, self.config, None).await;
+                            return Err(e);
                         }
                         let workspace_root = dispatch_cfg
                             .resolved_meta_workspace_root(self.config.config_dir.as_deref())
@@ -408,7 +424,7 @@ impl<'a> DispatchPipeline<'a> {
                 _ => process_cwd.clone(),
             };
             let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
-            let agent_metadata = AgentSessionMetadata::claude_without_session();
+            let agent_metadata = claude_agent_provider().ephemeral_session_metadata();
 
             // Security invariants (mirrors step 8 in the normal path):
             // clear CLAUDECODE to prevent recursive agent-spawning,
@@ -534,47 +550,13 @@ impl<'a> DispatchPipeline<'a> {
             }
             WorktreePolicy::Document => {
                 // Resolve CWD from document location.
-                let slug = resolved
-                    .task_slug
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        effective_params
-                            .get("task")
-                            .map(|s| s.as_str())
-                            .filter(|s| !s.is_empty())
-                    })
-                    .or_else(|| {
-                        effective_params
-                            .get("slug")
-                            .map(|s| s.as_str())
-                            .filter(|s| !s.is_empty())
-                    });
-                match slug {
+                let slug = document_policy_slug(&resolved, &effective_params).map(str::to_string);
+                match slug.as_deref() {
                     Some(slug) => {
-                        // Validate slug to prevent path traversal and absolute path injection.
-                        // resolve_document_workspace() joins this into a workspace-relative path,
-                        // so we must reject anything that could escape .kb/workspaces/.
-                        let slug_path = std::path::Path::new(slug);
-                        if slug_path.is_absolute()
-                            || slug.contains('\\')
-                            || slug.contains('\0')
-                            || slug_path.components().any(|c| {
-                                matches!(
-                                    c,
-                                    std::path::Component::ParentDir
-                                        | std::path::Component::CurDir
-                                        | std::path::Component::RootDir
-                                        | std::path::Component::Prefix(_)
-                                )
-                            })
-                        {
+                        if let Err(e) = validate_document_policy_slug(slug) {
                             let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
                             resolver.on_cleanup(&tmp_record, self.config, None).await;
-                            anyhow::bail!(
-                                "invalid slug for document policy: unsafe path '{}'",
-                                slug
-                            );
+                            return Err(e);
                         }
                         let worktree_base = dispatch_cfg.resolved_worktree_base();
                         match resolve_document_workspace(
@@ -1022,7 +1004,8 @@ impl<'a> DispatchPipeline<'a> {
                 resolved.branch
             ))
         };
-        let agent_metadata = AgentSessionMetadata::new_claude(worktree_path.clone());
+        let agent_metadata =
+            claude_agent_provider().durable_session_metadata(worktree_path.clone());
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
@@ -1274,7 +1257,9 @@ impl<'a> DispatchPipeline<'a> {
             duration_ms: None,
             artifacts: None,
             work_unit_id: None,
-            agent_provider: AgentSessionMetadata::claude_without_session().provider,
+            agent_provider: claude_agent_provider()
+                .ephemeral_session_metadata()
+                .provider,
             agent_session_id: None,
             agent_transcript_cwd: None,
             resume_of_dispatch_id: None,
@@ -1310,7 +1295,7 @@ impl<'a> DispatchPipeline<'a> {
         );
 
         if json {
-            let agent_metadata = AgentSessionMetadata::claude_without_session();
+            let agent_metadata = claude_agent_provider().ephemeral_session_metadata();
             // Dry-run JSON mirrors the success envelope so consumers parse a
             // single shape: `is_dry_run = true` and `status = "preview"` are
             // the discriminators. `dispatch_id` is still populated (the
@@ -1747,6 +1732,66 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolved_input_for_slug(task_slug: Option<&str>) -> ResolvedInput {
+        ResolvedInput {
+            system_prompt: String::new(),
+            directive: Directive::Implement,
+            task_slug: task_slug.map(str::to_string),
+            branch: "test-branch".to_string(),
+            dispatch_id: "test-dispatch".to_string(),
+            env_overrides: HashMap::new(),
+            kb_root: None,
+            is_template: false,
+            template_body: None,
+            max_turns: None,
+            worktree_policy: None,
+        }
+    }
+
+    #[test]
+    fn test_document_policy_slug_prefers_task_slug_then_params() {
+        let mut params = HashMap::new();
+        params.insert("task".to_string(), "tasks/from-param".to_string());
+        params.insert("slug".to_string(), "tasks/from-slug".to_string());
+
+        let resolved = resolved_input_for_slug(Some("tasks/from-record"));
+        assert_eq!(
+            document_policy_slug(&resolved, &params),
+            Some("tasks/from-record")
+        );
+
+        let resolved = resolved_input_for_slug(None);
+        assert_eq!(
+            document_policy_slug(&resolved, &params),
+            Some("tasks/from-param")
+        );
+
+        params.insert("task".to_string(), String::new());
+        assert_eq!(
+            document_policy_slug(&resolved, &params),
+            Some("tasks/from-slug")
+        );
+    }
+
+    #[test]
+    fn test_validate_document_policy_slug_rejects_unsafe_paths() {
+        for slug in [
+            "../tasks/foo",
+            "./tasks/foo",
+            "/tmp/tasks/foo",
+            "tasks\\foo",
+            "tasks/foo\0bar",
+        ] {
+            let err = validate_document_policy_slug(slug).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid slug for document policy"),
+                "unexpected error for {slug:?}: {err}"
+            );
+        }
+        validate_document_policy_slug("tasks/foo").unwrap();
+        validate_document_policy_slug("specs/atc-agent-harness-contract").unwrap();
+    }
 
     #[test]
     fn test_run_output_v1_dispatch_envelope_shape() {
