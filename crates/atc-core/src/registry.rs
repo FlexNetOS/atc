@@ -40,6 +40,22 @@ pub trait Registry: Send + Sync {
     /// Implementations with concurrent writers must make the active-session
     /// check and insert atomic when `force` is false.
     async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()>;
+    /// Find a non-terminal dispatch using the provider-native session.
+    async fn find_active_by_agent_session(
+        &self,
+        provider: &str,
+        session_id: AgentSessionId,
+    ) -> Result<Option<DispatchRecord>> {
+        Ok(self
+            .list(StatusFilter::All)
+            .await?
+            .into_iter()
+            .find(|record| {
+                record.agent_provider == provider
+                    && record.agent_session_id == Some(session_id)
+                    && !record.status.is_terminal()
+            }))
+    }
     async fn update_status(&self, id: &str, status: Status) -> Result<()>;
     async fn update_dispatch_work_unit(
         &self,
@@ -209,6 +225,7 @@ const CREATE_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_active_agent_session ON dispatches(agent_provider, agent_session_id, dispatched_at DESC, id DESC) WHERE status IN ('running', 'retrying') AND agent_session_id IS NOT NULL;",
 ];
 
 const CREATE_WORK_UNITS_TABLE_SQL: &str = r#"
@@ -728,16 +745,20 @@ impl Registry for SqliteRegistry {
     }
 
     async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()> {
-        if force || record.status.is_terminal() || record.agent_session_id.is_none() {
-            return self.insert(record).await;
-        }
-
         anyhow::ensure!(
             record.resume_of_dispatch_id.is_some(),
             "resume reservations require resume_of_dispatch_id"
         );
 
-        let session_id = record.agent_session_id.expect("checked above").to_string();
+        let Some(session_id) = record.agent_session_id else {
+            anyhow::bail!("resume reservations require agent_session_id");
+        };
+
+        if force || record.status.is_terminal() {
+            return self.insert(record).await;
+        }
+
+        let session_id = session_id.to_string();
         let mut conn = self.pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
@@ -775,6 +796,30 @@ impl Registry for SqliteRegistry {
         }
 
         result
+    }
+
+    async fn find_active_by_agent_session(
+        &self,
+        provider: &str,
+        session_id: AgentSessionId,
+    ) -> Result<Option<DispatchRecord>> {
+        let row = sqlx::query(
+            "SELECT * FROM dispatches
+             WHERE agent_provider = ?1
+               AND agent_session_id = ?2
+               AND status IN ('running', 'retrying')
+             ORDER BY dispatched_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(provider)
+        .bind(session_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_record(r)?)),
+            None => Ok(None),
+        }
     }
 
     async fn update_status(&self, id: &str, status: Status) -> Result<()> {
@@ -2122,6 +2167,66 @@ mod tests {
             .insert_resume_reservation(&forced_resume, true)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_find_active_by_agent_session_returns_only_non_terminal_dispatch() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let session_id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000099").unwrap();
+
+        let mut done = sample_record("active-session-done");
+        done.status = Status::Done;
+        done.agent_session_id = Some(session_id);
+        registry.insert(&done).await.unwrap();
+
+        let mut running = sample_record("active-session-running");
+        running.status = Status::Running;
+        running.agent_session_id = Some(session_id);
+        registry.insert(&running).await.unwrap();
+
+        let found = registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .expect("running dispatch should be returned");
+        assert_eq!(found.id, "active-session-running");
+
+        registry
+            .update_status("active-session-running", Status::Stopped)
+            .await
+            .unwrap();
+        assert!(registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resume_reservation_requires_resume_metadata_even_when_forced() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        let missing_resume_link = sample_record("forced-missing-resume-link");
+        let err = registry
+            .insert_resume_reservation(&missing_resume_link, true)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("resume_of_dispatch_id"),
+            "unexpected missing resume link error: {err}"
+        );
+
+        let mut missing_session = sample_record("forced-missing-session");
+        missing_session.resume_of_dispatch_id = Some("source".to_string());
+        missing_session.agent_session_id = None;
+        let err = registry
+            .insert_resume_reservation(&missing_session, true)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("agent_session_id"),
+            "unexpected missing session error: {err}"
+        );
     }
 
     #[tokio::test]

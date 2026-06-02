@@ -420,6 +420,15 @@ fn count_diag_files(log_dir: &Path) -> usize {
         .count()
 }
 
+fn count_jsonl_files(log_dir: &Path) -> usize {
+    std::fs::read_dir(log_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .count()
+}
+
 fn dispatch_record_fixture(
     id: &str,
     status: Status,
@@ -659,6 +668,68 @@ async fn test_dispatch_resume_prompt_uses_source_session_and_transcript_cwd() {
 }
 
 #[tokio::test]
+async fn test_dispatch_resume_task_input_uses_source_session() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+
+    let source = dispatch_source_task(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-task-source",
+    )
+    .await;
+    let source_session_id = source.agent_session_id.unwrap();
+    let source_transcript_cwd =
+        std::fs::canonicalize(source.agent_transcript_cwd.clone().unwrap()).unwrap();
+
+    let mut resume_opts = default_run_opts("tasks/gitkb-task-followup", Directive::Implement);
+    resume_opts.resume = Some(source.id.clone());
+    let resumed_outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-task-followup",
+        &resume_opts,
+    )
+    .await
+    .expect("task-input resume dispatch failed");
+
+    let resumed = registry.get(&resumed_outcome.id).await.unwrap().unwrap();
+    assert_eq!(resumed.resolver, "task");
+    assert_eq!(
+        resumed.task_slug.as_deref(),
+        Some("tasks/gitkb-task-followup")
+    );
+    assert_eq!(resumed.directive, Directive::Implement);
+    assert_eq!(
+        resumed.resume_of_dispatch_id.as_deref(),
+        Some(source.id.as_str())
+    );
+    assert_eq!(resumed.agent_session_id, Some(source_session_id));
+    assert_eq!(resumed.worktree_path, source_transcript_cwd);
+
+    let captures = executor.captures.lock().await.clone();
+    let resume_capture = captures.last().expect("resume dispatch should spawn");
+    assert_eq!(
+        resume_capture.agent_invocation,
+        AgentInvocation::Resume(source_session_id)
+    );
+    assert_eq!(resume_capture.worktree_path, source_transcript_cwd);
+    assert!(
+        resume_capture.stdin_content.is_none(),
+        "task resume should keep the task-doc stdin path"
+    );
+}
+
+#[tokio::test]
 async fn test_dispatch_resume_template_with_params_uses_source_session() {
     let _guard = PATH_MUTEX.lock().await;
 
@@ -869,6 +940,69 @@ async fn test_dispatch_resume_refuses_active_session_unless_forced() {
     assert_eq!(
         forced.resume_of_dispatch_id.as_deref(),
         Some(source_outcome.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_dry_run_has_no_registry_log_or_diag_side_effects() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+    let source = dispatch_source_task(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-dry-run-source",
+    )
+    .await;
+
+    let records_before = registry.list(StatusFilter::All).await.unwrap().len();
+    let log_dir = fix.config.dispatch.resolved_log_dir();
+    let diag_before = count_diag_files(&log_dir);
+    let jsonl_before = count_jsonl_files(&log_dir);
+    let captures_before = executor.captures.lock().await.len();
+
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+    let mut opts = default_run_opts("Dry-run follow up", Directive::Implement);
+    opts.resume = Some(source.id.clone());
+    opts.dry_run = true;
+    let outcome = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Dry-run follow up",
+        &opts,
+    )
+    .await
+    .expect("resume dry-run should succeed");
+    assert_eq!(outcome.inline_exit_code, Some(0));
+
+    assert_eq!(
+        registry.list(StatusFilter::All).await.unwrap().len(),
+        records_before,
+        "resume dry-run must not insert a registry record"
+    );
+    assert_eq!(
+        count_diag_files(&log_dir),
+        diag_before,
+        "resume dry-run must not write a diagnostic file"
+    );
+    assert_eq!(
+        count_jsonl_files(&log_dir),
+        jsonl_before,
+        "resume dry-run must not create a log file"
+    );
+    assert_eq!(
+        executor.captures.lock().await.len(),
+        captures_before,
+        "resume dry-run must not spawn the executor"
     );
 }
 

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::executor::{AgentExecutor, AgentInvocation, AgentOpts};
-use atc_core::registry::{Registry, StatusFilter};
+use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{
     claude_agent_provider, AgentCapabilities, AgentSessionMetadata, Directive, DispatchOutcome,
@@ -192,6 +192,50 @@ fn is_home_dir(path: &Path) -> bool {
         .map(PathBuf::from)
         .and_then(|home| canonical_if_exists(&home))
         .is_some_and(|home| path == home)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dispatch_record(
+    resolved: &ResolvedInput,
+    opts: &RunOpts,
+    original_input: &str,
+    resolver_name: &str,
+    pr_url: Option<&str>,
+    worktree_path: &Path,
+    session_name: &str,
+    log_file: &Path,
+    agent_metadata: &AgentSessionMetadata,
+    now: DateTime<Utc>,
+) -> DispatchRecord {
+    DispatchRecord {
+        id: resolved.dispatch_id.clone(),
+        task_slug: resolved.task_slug.clone(),
+        branch: resolved.branch.clone(),
+        worktree_path: worktree_path.to_path_buf(),
+        session: session_name.to_string(),
+        log_file: log_file.to_path_buf(),
+        status: Status::Running,
+        directive: resolved.directive.clone(),
+        retries: opts.retries,
+        resolver: resolver_name.to_string(),
+        pr_urls: pr_url.into_iter().map(str::to_string).collect(),
+        no_worktree: opts.no_worktree,
+        original_input: Some(original_input.to_string()),
+        checks: HealthChecks::default(),
+        kb_root: resolved.kb_root.clone(),
+        cost_usd: None,
+        num_turns: None,
+        duration_ms: None,
+        artifacts: None,
+        work_unit_id: None,
+        agent_provider: agent_metadata.provider.clone(),
+        agent_session_id: agent_metadata.session_id,
+        agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
+        resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
+        agent_capabilities: agent_metadata.capabilities,
+        dispatched_at: now,
+        updated_at: now,
+    }
 }
 
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
@@ -826,35 +870,18 @@ impl<'a> DispatchPipeline<'a> {
         });
         let reserved_before_spawn = agent_metadata.resume_of_dispatch_id.is_some();
         let now = Utc::now();
-        let mut record = DispatchRecord {
-            id: resolved.dispatch_id.clone(),
-            task_slug: resolved.task_slug.clone(),
-            branch: resolved.branch.clone(),
-            worktree_path: worktree_path.clone(),
-            session: session_name.clone(),
-            log_file: log_file.clone(),
-            status: Status::Running,
-            directive: resolved.directive.clone(),
-            retries: opts.retries,
-            resolver: resolver.name().to_string(),
-            pr_urls: effective_pr_url.iter().cloned().collect(),
-            no_worktree: opts.no_worktree,
-            original_input: Some(input.to_string()),
-            checks: HealthChecks::default(),
-            kb_root: resolved.kb_root.clone(),
-            cost_usd: None,
-            num_turns: None,
-            duration_ms: None,
-            artifacts: None,
-            work_unit_id: None,
-            agent_provider: agent_metadata.provider.clone(),
-            agent_session_id: agent_metadata.session_id,
-            agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
-            resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
-            agent_capabilities: agent_metadata.capabilities,
-            dispatched_at: now,
-            updated_at: now,
-        };
+        let mut record = build_dispatch_record(
+            &resolved,
+            opts,
+            input,
+            resolver.name(),
+            effective_pr_url.as_deref(),
+            &worktree_path,
+            &session_name,
+            &log_file,
+            &agent_metadata,
+            now,
+        );
         info!(
             id = %resolved.dispatch_id,
             agent_provider = %record.agent_provider,
@@ -884,19 +911,8 @@ impl<'a> DispatchPipeline<'a> {
         // per-dispatch files for a dispatch that never starts.
         if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
             if reserved_before_spawn {
-                if let Err(update_err) = self
-                    .registry
-                    .update_status(&record.id, Status::Failed)
-                    .await
-                {
-                    warn!(
-                        id = %record.id,
-                        error = %update_err,
-                        "failed to mark resume reservation failed after log directory error"
-                    );
-                }
-                record.status = Status::Failed;
-                record.updated_at = Utc::now();
+                self.mark_resume_reservation_failed(&mut record, "log directory error")
+                    .await;
                 resolver
                     .on_cleanup(&record, self.config, Some(self.registry))
                     .await;
@@ -1173,19 +1189,8 @@ impl<'a> DispatchPipeline<'a> {
             Ok(h) => h,
             Err(e) => {
                 if reserved_before_spawn {
-                    if let Err(update_err) = self
-                        .registry
-                        .update_status(&record.id, Status::Failed)
-                        .await
-                    {
-                        warn!(
-                            id = %record.id,
-                            error = %update_err,
-                            "failed to mark resume reservation failed after spawn error"
-                        );
-                    }
-                    record.status = Status::Failed;
-                    record.updated_at = Utc::now();
+                    self.mark_resume_reservation_failed(&mut record, "spawn error")
+                        .await;
                     resolver
                         .on_cleanup(&record, self.config, Some(self.registry))
                         .await;
@@ -1412,17 +1417,11 @@ impl<'a> DispatchPipeline<'a> {
         let transcript_cwd = self.validate_resume_transcript_cwd(&source)?;
 
         if !force {
-            let conflict = self
+            if let Some(conflict) = self
                 .registry
-                .list(StatusFilter::All)
+                .find_active_by_agent_session(&source.agent_provider, session_id)
                 .await?
-                .into_iter()
-                .find(|record| {
-                    record.agent_provider == source.agent_provider
-                        && record.agent_session_id == Some(session_id)
-                        && !record.status.is_terminal()
-                });
-            if let Some(conflict) = conflict {
+            {
                 anyhow::bail!(
                     "cannot resume dispatch {}: provider session {} is already active in dispatch {} (status {}). Use --force to override.",
                     source.id,
@@ -1438,6 +1437,23 @@ impl<'a> DispatchPipeline<'a> {
             session_id,
             source.id,
         )))
+    }
+
+    async fn mark_resume_reservation_failed(&self, record: &mut DispatchRecord, reason: &str) {
+        if let Err(update_err) = self
+            .registry
+            .update_status(&record.id, Status::Failed)
+            .await
+        {
+            warn!(
+                id = %record.id,
+                reason,
+                error = %update_err,
+                "failed to mark resume reservation failed"
+            );
+        }
+        record.status = Status::Failed;
+        record.updated_at = Utc::now();
     }
 
     fn validate_resume_transcript_cwd(&self, source: &DispatchRecord) -> Result<PathBuf> {

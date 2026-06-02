@@ -211,6 +211,90 @@ SQL
     echo "$STDOUT" | jq -e '.data.log_file == null' >/dev/null
 }
 
+@test "atc run --json --resume task slug launches provider session" {
+    require_jq
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    init_test_db "$TEST_TMPDIR/atc.db"
+    mkdir -p "$TEST_TMPDIR/workspace" "$TEST_TMPDIR/bin"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-resume-spawn" "tasks/test-1" "done"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET agent_session_id = '00000000-0000-4000-8000-000000000705',
+    worktree_path = '$TEST_TMPDIR/workspace',
+    agent_transcript_cwd = '$TEST_TMPDIR/workspace',
+    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true}'
+WHERE id = 'disp-resume-spawn';
+SQL
+
+    cat > "$TEST_TMPDIR/bin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$ATC_ARG_CAPTURE"
+pwd > "$ATC_CWD_CAPTURE"
+cat >/dev/null
+printf '%s\n' '{"type":"result","subtype":"success","total_cost_usd":0.01,"num_turns":1,"duration_ms":10}'
+exit 0
+SH
+    chmod +x "$TEST_TMPDIR/bin/claude"
+    export PATH="$TEST_TMPDIR/bin:$PATH"
+    export ATC_ARG_CAPTURE="$TEST_TMPDIR/claude.args"
+    export ATC_CWD_CAPTURE="$TEST_TMPDIR/claude.cwd"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Follow up via task slug" --directive implement \
+        --resume tasks/test-1 --inline --no-worktree --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    expected_cwd="$(cd "$TEST_TMPDIR/workspace" && pwd -P)"
+    echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.status == "done"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.resume_of_dispatch_id == "disp-resume-spawn"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id == "00000000-0000-4000-8000-000000000705"' >/dev/null
+    echo "$STDOUT" | jq -e --arg cwd "$expected_cwd" '.data.worktree_path == $cwd' >/dev/null
+    [ "$(grep -c -- '^--resume$' "$ATC_ARG_CAPTURE")" -eq 1 ]
+    grep -Fx "00000000-0000-4000-8000-000000000705" "$ATC_ARG_CAPTURE" >/dev/null
+    if grep -q -- '^--session-id$' "$ATC_ARG_CAPTURE"; then
+        fail "task-slug resume dispatch also passed --session-id"
+    fi
+    [ "$(cat "$ATC_CWD_CAPTURE")" = "$expected_cwd" ]
+}
+
+@test "atc run --json --resume dry-run has no registry or log side effects" {
+    require_jq
+    cat > "$TEST_TMPDIR/atc.toml" <<EOF
+[dispatch]
+repo = "core"
+meta_workspace_root = "$TEST_TMPDIR/workspace"
+log_dir = "$TEST_TMPDIR/logs"
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
+EOF
+    init_test_db "$TEST_TMPDIR/atc.db"
+    mkdir -p "$TEST_TMPDIR/workspace"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-resume-preview" "tasks/test-1" "done"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET agent_session_id = '00000000-0000-4000-8000-000000000706',
+    worktree_path = '$TEST_TMPDIR/workspace',
+    agent_transcript_cwd = '$TEST_TMPDIR/workspace',
+    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true}'
+WHERE id = 'disp-resume-preview';
+SQL
+
+    before_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Preview only" --directive implement \
+        --resume disp-resume-preview --dry-run --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    after_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+
+    echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.is_dry_run == true' >/dev/null
+    echo "$STDOUT" | jq -e '.data.resume_of_dispatch_id == "disp-resume-preview"' >/dev/null
+    [ "$after_count" = "$before_count" ]
+    [ ! -e "$TEST_TMPDIR/logs" ]
+}
+
 # ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------
