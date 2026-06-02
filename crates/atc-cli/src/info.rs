@@ -43,6 +43,21 @@ pub fn format_info(record: &DispatchRecord) -> String {
 
     add_line(&mut lines, "session", &record.session);
 
+    add_line(&mut lines, "agent_provider", &record.agent_provider);
+    if let Some(ref session_id) = record.agent_session_id {
+        add_line(&mut lines, "agent_session_id", &session_id.to_string());
+    }
+    if let Some(ref transcript_cwd) = record.agent_transcript_cwd {
+        add_line(
+            &mut lines,
+            "agent_transcript_cwd",
+            &transcript_cwd.to_string_lossy(),
+        );
+    }
+    if let Some(ref resume_of) = record.resume_of_dispatch_id {
+        add_line(&mut lines, "resume_of_dispatch_id", resume_of);
+    }
+
     if !record.pr_urls.is_empty() {
         add_line(&mut lines, "pr_urls", &record.pr_urls.join(", "));
     }
@@ -124,7 +139,9 @@ pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atc_core::types::{Directive, HealthChecks, Status};
+    use atc_core::types::{
+        claude_agent_capabilities, AgentSessionId, Directive, HealthChecks, Status,
+    };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
 
@@ -157,6 +174,15 @@ mod tests {
             duration_ms: Some(592_000),
             artifacts: None,
             work_unit_id: None,
+            agent_provider: "claude".to_string(),
+            agent_session_id: Some(
+                AgentSessionId::parse_str("00000000-0000-4000-8000-000000000300").unwrap(),
+            ),
+            agent_transcript_cwd: Some(PathBuf::from(
+                "/tmp/worktrees/harmony/tasks-gitkb-42/gitkb",
+            )),
+            resume_of_dispatch_id: None,
+            agent_capabilities: Some(claude_agent_capabilities()),
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41+00:00")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -179,6 +205,11 @@ mod tests {
         assert!(output.contains("resolver:"));
         assert!(output.contains("task"));
         assert!(output.contains("branch:"));
+        assert!(output.contains("agent_provider:"));
+        assert!(output.contains("claude"));
+        assert!(output.contains("agent_session_id:"));
+        assert!(output.contains("00000000-0000-4000-8000-000000000300"));
+        assert!(output.contains("agent_transcript_cwd:"));
         assert!(output.contains("pr_urls:"));
         assert!(output.contains("pull/275"));
         assert!(output.contains("cost_usd:"));
@@ -196,11 +227,17 @@ mod tests {
         record.num_turns = None;
         record.duration_ms = None;
         record.retries = 0;
+        record.agent_session_id = None;
+        record.agent_transcript_cwd = None;
+        record.resume_of_dispatch_id = None;
 
         let output = format_info(&record);
         assert!(!output.contains("task_slug:"));
         assert!(!output.contains("pr_urls:"));
         assert!(!output.contains("cost_usd:"));
+        assert!(!output.contains("agent_session_id:"));
+        assert!(!output.contains("agent_transcript_cwd:"));
+        assert!(!output.contains("resume_of_dispatch_id:"));
         assert!(output.contains("id:"));
         assert!(output.contains("checks:"));
     }

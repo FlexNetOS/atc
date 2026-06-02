@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DispatchRecord {
@@ -37,8 +39,192 @@ pub struct DispatchRecord {
     pub artifacts: Option<String>,
     /// Work unit this dispatch belongs to (nullable for pre-work-unit dispatches).
     pub work_unit_id: Option<String>,
+    /// Agent harness/provider that ran this dispatch, initially `claude`.
+    pub agent_provider: String,
+    /// Provider-native durable session/conversation ID, distinct from ATC's tmux session name.
+    pub agent_session_id: Option<AgentSessionId>,
+    /// CWD the provider uses for transcript/session persistence.
+    pub agent_transcript_cwd: Option<PathBuf>,
+    /// Dispatch ID this record resumes from. Populated by future resume work.
+    pub resume_of_dispatch_id: Option<String>,
+    /// Capability snapshot for the provider at dispatch time.
+    pub agent_capabilities: Option<AgentCapabilities>,
     pub dispatched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentProviderDescriptor {
+    pub name: &'static str,
+    pub supports_durable_session_on_start: bool,
+    pub capabilities: AgentCapabilities,
+}
+
+impl AgentProviderDescriptor {
+    pub fn durable_session_metadata(&self, transcript_cwd: PathBuf) -> AgentSessionMetadata {
+        AgentSessionMetadata {
+            provider: self.name.to_string(),
+            session_id: self
+                .supports_durable_session_on_start
+                .then(AgentSessionId::new),
+            transcript_cwd: Some(transcript_cwd),
+            resume_of_dispatch_id: None,
+            capabilities: Some(self.capabilities()),
+        }
+    }
+
+    pub fn resume_session_metadata(
+        &self,
+        transcript_cwd: PathBuf,
+        session_id: AgentSessionId,
+        resume_of_dispatch_id: impl Into<String>,
+    ) -> AgentSessionMetadata {
+        AgentSessionMetadata {
+            provider: self.name.to_string(),
+            session_id: Some(session_id),
+            transcript_cwd: Some(transcript_cwd),
+            resume_of_dispatch_id: Some(resume_of_dispatch_id.into()),
+            capabilities: Some(self.capabilities()),
+        }
+    }
+
+    /// Ephemeral/preview dispatches know the provider but deliberately do not
+    /// create a durable provider-native session that ATC cannot persist.
+    pub fn ephemeral_session_metadata(&self) -> AgentSessionMetadata {
+        AgentSessionMetadata {
+            provider: self.name.to_string(),
+            session_id: None,
+            transcript_cwd: None,
+            resume_of_dispatch_id: None,
+            capabilities: Some(self.capabilities),
+        }
+    }
+
+    pub fn capabilities(&self) -> AgentCapabilities {
+        self.capabilities
+    }
+}
+
+pub const CLAUDE_AGENT_DESCRIPTOR: AgentProviderDescriptor = AgentProviderDescriptor {
+    name: CLAUDE_AGENT_PROVIDER,
+    supports_durable_session_on_start: true,
+    capabilities: CLAUDE_AGENT_CAPABILITIES,
+};
+
+pub static AGENT_PROVIDER_DESCRIPTORS: &[AgentProviderDescriptor] = &[CLAUDE_AGENT_DESCRIPTOR];
+
+pub fn agent_provider_descriptor(name: &str) -> Option<AgentProviderDescriptor> {
+    AGENT_PROVIDER_DESCRIPTORS
+        .iter()
+        .copied()
+        .find(|provider| provider.name == name)
+}
+
+pub fn agent_provider_descriptors() -> &'static [AgentProviderDescriptor] {
+    AGENT_PROVIDER_DESCRIPTORS
+}
+
+pub fn claude_agent_provider() -> AgentProviderDescriptor {
+    agent_provider_descriptor(CLAUDE_AGENT_PROVIDER).expect("Claude provider must be registered")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AgentSessionId(uuid::Uuid);
+
+impl AgentSessionId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    pub fn parse_str(value: &str) -> anyhow::Result<Self> {
+        let uuid = uuid::Uuid::parse_str(value)
+            .map_err(|e| anyhow::anyhow!("invalid agent session id {value:?}: {e}"))?;
+        Ok(Self(uuid))
+    }
+}
+
+impl Default for AgentSessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for AgentSessionId {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(value)
+    }
+}
+
+impl Serialize for AgentSessionId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse_str(&value).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentCapabilities {
+    pub supports_resume_by_session_id: bool,
+    pub supports_explicit_session_id_on_start: bool,
+    pub supports_tmux_attach: bool,
+    pub supports_tmux_redirect: bool,
+    pub supports_stream_json_output: bool,
+    pub supports_cost_and_turn_reporting: bool,
+}
+
+pub const CLAUDE_AGENT_CAPABILITIES: AgentCapabilities = AgentCapabilities {
+    supports_resume_by_session_id: true,
+    supports_explicit_session_id_on_start: true,
+    supports_tmux_attach: true,
+    supports_tmux_redirect: true,
+    supports_stream_json_output: true,
+    supports_cost_and_turn_reporting: true,
+};
+
+pub fn claude_agent_capabilities() -> AgentCapabilities {
+    CLAUDE_AGENT_CAPABILITIES
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionMetadata {
+    pub provider: String,
+    pub session_id: Option<AgentSessionId>,
+    pub transcript_cwd: Option<PathBuf>,
+    pub resume_of_dispatch_id: Option<String>,
+    pub capabilities: Option<AgentCapabilities>,
+}
+
+impl AgentSessionMetadata {
+    pub fn new_claude(transcript_cwd: PathBuf) -> Self {
+        claude_agent_provider().durable_session_metadata(transcript_cwd)
+    }
+
+    pub fn claude_without_session() -> Self {
+        claude_agent_provider().ephemeral_session_metadata()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +539,128 @@ mod tests {
         assert!(!opts.ephemeral, "ephemeral should default to false");
         assert_eq!(opts.timeout, None, "timeout should default to None");
         assert!(!opts.json, "json should default to false");
+    }
+
+    #[test]
+    fn test_agent_session_id_new_is_uuid() {
+        let id = AgentSessionId::new();
+        uuid::Uuid::parse_str(&id.to_string()).expect("agent session id should be a valid UUID");
+    }
+
+    #[test]
+    fn test_agent_session_id_rejects_invalid_values() {
+        assert!(AgentSessionId::parse_str("not-a-uuid").is_err());
+        assert!(AgentSessionId::parse_str("00000000-0000-4000-8000-000000000001\0").is_err());
+    }
+
+    #[test]
+    fn test_agent_session_id_serde_round_trip() {
+        let id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000010").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"00000000-0000-4000-8000-000000000010\"");
+
+        let parsed: AgentSessionId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+        assert!(serde_json::from_str::<AgentSessionId>("\"not-a-uuid\"").is_err());
+    }
+
+    #[test]
+    fn test_claude_agent_provider_descriptor_creates_metadata() {
+        let provider = claude_agent_provider();
+        assert_eq!(provider.name, CLAUDE_AGENT_PROVIDER);
+        assert!(provider.supports_durable_session_on_start);
+        assert_eq!(provider.capabilities(), claude_agent_capabilities());
+
+        let metadata = provider.durable_session_metadata(PathBuf::from("/tmp/worktree"));
+        assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
+        assert!(metadata.session_id.is_some());
+        assert_eq!(
+            metadata.transcript_cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert!(metadata.capabilities.is_some());
+
+        let ephemeral = provider.ephemeral_session_metadata();
+        assert_eq!(ephemeral.provider, CLAUDE_AGENT_PROVIDER);
+        assert!(ephemeral.session_id.is_none());
+        assert!(ephemeral.transcript_cwd.is_none());
+        assert_eq!(ephemeral.capabilities, Some(claude_agent_capabilities()));
+    }
+
+    #[test]
+    fn test_agent_provider_registry_contains_claude() {
+        let providers = agent_provider_descriptors();
+        assert_eq!(providers, &[CLAUDE_AGENT_DESCRIPTOR]);
+        assert_eq!(
+            agent_provider_descriptor(CLAUDE_AGENT_PROVIDER),
+            Some(CLAUDE_AGENT_DESCRIPTOR)
+        );
+        assert_eq!(agent_provider_descriptor("unknown"), None);
+    }
+
+    #[test]
+    fn test_agent_provider_descriptor_creates_resume_metadata() {
+        let provider = claude_agent_provider();
+        let session_id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000011").unwrap();
+
+        let metadata = provider.resume_session_metadata(
+            PathBuf::from("/tmp/worktree"),
+            session_id,
+            "dispatch-1",
+        );
+
+        assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
+        assert_eq!(metadata.session_id, Some(session_id));
+        assert_eq!(
+            metadata.transcript_cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert_eq!(
+            metadata.resume_of_dispatch_id.as_deref(),
+            Some("dispatch-1")
+        );
+        assert_eq!(metadata.capabilities, Some(claude_agent_capabilities()));
+    }
+
+    #[test]
+    fn test_claude_agent_metadata_creates_durable_session() {
+        let metadata = AgentSessionMetadata::new_claude(PathBuf::from("/tmp/worktree"));
+        assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
+        assert!(metadata.session_id.is_some());
+        assert_eq!(
+            metadata.transcript_cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert!(metadata.capabilities.is_some());
+    }
+
+    #[test]
+    fn test_claude_without_session_is_not_durable() {
+        let metadata = AgentSessionMetadata::claude_without_session();
+        assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
+        assert!(metadata.session_id.is_none());
+        assert!(metadata.transcript_cwd.is_none());
+        assert_eq!(metadata.capabilities, Some(claude_agent_capabilities()));
+    }
+
+    #[test]
+    fn test_agent_capabilities_missing_fields_default_false() {
+        let value: AgentCapabilities =
+            serde_json::from_str(r#"{"supports_resume_by_session_id":true}"#).unwrap();
+        assert!(value.supports_resume_by_session_id);
+        assert!(!value.supports_explicit_session_id_on_start);
+        assert!(!value.supports_tmux_attach);
+        assert!(!value.supports_tmux_redirect);
+        assert!(!value.supports_stream_json_output);
+        assert!(!value.supports_cost_and_turn_reporting);
+    }
+
+    #[test]
+    fn test_claude_agent_capabilities_shape() {
+        let value = claude_agent_capabilities();
+        assert!(value.supports_resume_by_session_id);
+        assert!(value.supports_explicit_session_id_on_start);
+        assert!(value.supports_stream_json_output);
     }
 
     #[test]

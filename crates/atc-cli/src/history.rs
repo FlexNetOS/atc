@@ -180,22 +180,15 @@ mod tests {
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status: Status::Done,
             directive,
-            retries: 0,
             resolver: "task".to_string(),
-            pr_urls: vec![],
-            no_worktree: false,
-            original_input: None,
-            checks: HealthChecks::default(),
-            kb_root: None,
             cost_usd: cost,
             num_turns: Some(10),
             duration_ms: Some(300_000),
-            artifacts: None,
             work_unit_id: Some("wu-test-001".to_string()),
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-26T18:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            updated_at: Utc::now(),
+            ..crate::test_support::dispatch_record_fixture()
         }
     }
 

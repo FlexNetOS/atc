@@ -40,3 +40,4 @@ toml = { workspace = true }
 [dev-dependencies]
 async-trait.workspace = true
 tempfile.workspace = true
+uuid.workspace = true

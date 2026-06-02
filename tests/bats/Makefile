@@ -5,39 +5,122 @@
 #   make test          — run all tests (clones BATS libs on first run)
 #   make setup         — clone BATS libraries only
 #   make clean         — remove BATS libraries
-#   FILE=lifecycle     — run only matching test files
+#   FILE=lifecycle     — run only matching test files (A-Z, a-z, 0-9, ., _, -)
 #   JOBS=8             — parallel jobs (default: 4)
 #   DEBUG=1            — show atc commands being executed
 
-.PHONY: all test setup clean
+.PHONY: all test setup clean preflight
+
+SHELL := /bin/bash
 
 BATS_CORE_REPO   := https://github.com/bats-core/bats-core.git
 BATS_SUPPORT_REPO := https://github.com/bats-core/bats-support.git
 BATS_ASSERT_REPO  := https://github.com/bats-core/bats-assert.git
 BATS_FILE_REPO    := https://github.com/bats-core/bats-file.git
 
-BATS := ./bats/bats-core/bin/bats
 JOBS ?= 4
 FILE ?=
+SETUP_LOCK_TIMEOUT_SECONDS ?= 60
 
-# Find test files, optionally filtered by FILE pattern
-TEST_FILES := $(shell find . -maxdepth 1 -name '*$(FILE)*.bats' | sort)
+unexport BATS_CORE_REPO
+unexport BATS_SUPPORT_REPO
+unexport BATS_ASSERT_REPO
+unexport BATS_FILE_REPO
+unexport JOBS
+unexport FILE
+unexport SETUP_LOCK_TIMEOUT_SECONDS
 
-ifeq ($(TEST_FILES),)
-$(error No test files matching '*$(FILE)*.bats' found)
-endif
+export ATC_BATS_CORE_REPO := $(value BATS_CORE_REPO)
+export ATC_BATS_SUPPORT_REPO := $(value BATS_SUPPORT_REPO)
+export ATC_BATS_ASSERT_REPO := $(value BATS_ASSERT_REPO)
+export ATC_BATS_FILE_REPO := $(value BATS_FILE_REPO)
+export ATC_BATS_FILE_FILTER := $(value FILE)
+export ATC_BATS_JOBS := $(value JOBS)
+export ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS := $(value SETUP_LOCK_TIMEOUT_SECONDS)
 
 all: test
 
-setup:
-	@mkdir -p bats
-	@[[ -d bats/bats-core ]]    || git clone --depth 1 $(BATS_CORE_REPO)    bats/bats-core
-	@[[ -d bats/bats-support ]]  || git clone --depth 1 $(BATS_SUPPORT_REPO)  bats/bats-support
-	@[[ -d bats/bats-assert ]]   || git clone --depth 1 $(BATS_ASSERT_REPO)   bats/bats-assert
-	@[[ -d bats/bats-file ]]     || git clone --depth 1 $(BATS_FILE_REPO)     bats/bats-file
+preflight:
+	@set -euo pipefail; \
+	timeout="$${ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS:-60}"; \
+	jobs="$${ATC_BATS_JOBS:-4}"; \
+	file_filter="$${ATC_BATS_FILE_FILTER:-}"; \
+	if [[ ! "$$timeout" =~ ^[0-9]+$$ ]]; then \
+		echo "error: SETUP_LOCK_TIMEOUT_SECONDS must be an integer" >&2; \
+		exit 2; \
+	fi; \
+	if (( $${#timeout} > 4 || 10#$$timeout > 3600 )); then \
+		echo "error: SETUP_LOCK_TIMEOUT_SECONDS must be <= 3600" >&2; \
+		exit 2; \
+	fi; \
+	if [[ ! "$$jobs" =~ ^[1-9][0-9]*$$ ]]; then \
+		echo "error: JOBS must be a positive integer" >&2; \
+		exit 2; \
+	fi; \
+	if (( $${#jobs} > 3 || 10#$$jobs > 128 )); then \
+		echo "error: JOBS must be <= 128" >&2; \
+		exit 2; \
+	fi; \
+	if [[ ! "$$file_filter" =~ ^[A-Za-z0-9_.-]*$$ ]]; then \
+		echo "error: FILE may contain only letters, numbers, '.', '_', and '-'" >&2; \
+		exit 2; \
+	fi
+
+setup: preflight
+	@set -euo pipefail; \
+	mkdir -p bats; \
+	lock="bats/.setup.lock"; \
+	timeout="$${ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS:-60}"; \
+	deadline=$$((SECONDS + 10#$$timeout)); \
+	while true; do \
+		if ( set -o noclobber; printf '%s\n' "$$$$" > "$$lock" ) 2>/dev/null; then \
+			break; \
+		fi; \
+		owner="$$(cat "$$lock" 2>/dev/null || true)"; \
+		if [[ "$$owner" =~ ^[0-9]+$$ ]] && ! kill -0 "$$owner" 2>/dev/null; then \
+			rm -f "$$lock"; \
+		elif (( SECONDS >= deadline )); then \
+			echo "error: timed out waiting for BATS setup lock at $$lock" >&2; \
+			exit 1; \
+		else \
+			sleep 0.1; \
+		fi; \
+	done; \
+	trap 'rm -f "$$lock"' EXIT; \
+	clone_dep() { \
+		local repo="$$1" dir="$$2" tmp; \
+		if [[ ! -d "$$dir/.git" ]]; then \
+			tmp="$$dir.tmp.$$$$"; \
+			rm -rf "$$tmp"; \
+			if ! git clone --depth 1 -- "$$repo" "$$tmp"; then \
+				rm -rf "$$tmp"; \
+				return 1; \
+			fi; \
+			rm -rf "$$dir"; \
+			if ! mv "$$tmp" "$$dir"; then \
+				rm -rf "$$tmp"; \
+				return 1; \
+			fi; \
+		fi; \
+	}; \
+	clone_dep "$$ATC_BATS_CORE_REPO" bats/bats-core; \
+	clone_dep "$$ATC_BATS_SUPPORT_REPO" bats/bats-support; \
+	clone_dep "$$ATC_BATS_ASSERT_REPO" bats/bats-assert; \
+	clone_dep "$$ATC_BATS_FILE_REPO" bats/bats-file
 
 test: setup
-	$(BATS) --jobs $(JOBS) $(TEST_FILES)
+	@set -euo pipefail; \
+	jobs="$${ATC_BATS_JOBS:-4}"; \
+	file_filter="$${ATC_BATS_FILE_FILTER:-}"; \
+	test_files=(); \
+	while IFS= read -r test_file; do \
+		test_files+=("$$test_file"); \
+	done < <(find . -maxdepth 1 -name "*$$file_filter*.bats" | sort); \
+	if (( $${#test_files[@]} == 0 )); then \
+		echo "error: No test files matching '*$$file_filter*.bats' found" >&2; \
+		exit 2; \
+	fi; \
+	./bats/bats-core/bin/bats --jobs "$$jobs" "$${test_files[@]}"
 
 clean:
 	rm -rf bats/

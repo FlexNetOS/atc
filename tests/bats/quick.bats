@@ -9,6 +9,11 @@ load helpers/common
 # Helpers
 # ---------------------------------------------------------------------------
 
+init_named_git_branch() {
+    git init --quiet
+    git symbolic-ref HEAD refs/heads/main
+}
+
 # Create a minimal .atc/ directory with templates for testing.
 setup_atc_dir() {
     mkdir -p "$TEST_TMPDIR/.atc/templates" "$TEST_TMPDIR/.atc/components" "$TEST_TMPDIR/.atc/partials"
@@ -33,11 +38,14 @@ Edit the GitKB document at {{slug}}.
 User directive: {{directive}}
 EOF
     # Write minimal atc.toml
-    cat > "$TEST_TMPDIR/.atc/config.toml" <<'EOF'
+    cat > "$TEST_TMPDIR/.atc/config.toml" <<EOF
 [prompt]
-templates_dir = ".atc/templates"
-components_dir = ".atc/components"
-partials_dir = ".atc/partials"
+templates_dir = "$TEST_TMPDIR/.atc/templates"
+components_dir = "$TEST_TMPDIR/.atc/components"
+partials_dir = "$TEST_TMPDIR/.atc/partials"
+
+[registry]
+path = "$TEST_TMPDIR/atc.db"
 EOF
 }
 
@@ -64,6 +72,7 @@ EOF
 @test "atc quick commit-message --dry-run succeeds and shows ephemeral" {
     setup_atc_dir
     cd "$TEST_TMPDIR"
+    init_named_git_branch
     run atc quick --dry-run commit-message --param slug=test/doc --param diff="added field"
     assert_success
     assert_output --partial "(ephemeral)"
@@ -77,4 +86,38 @@ EOF
     run atc run --ephemeral commit-message --param slug=x --param diff=y
     assert_failure
     assert_output --partial "--ephemeral requires --inline"
+}
+
+@test "atc run --ephemeral --inline --json does not pass provider session id" {
+    require_jq
+    setup_atc_dir
+    mkdir -p "$TEST_TMPDIR/bin"
+    cat > "$TEST_TMPDIR/bin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$ATC_ARG_CAPTURE"
+exit 0
+SH
+    chmod +x "$TEST_TMPDIR/bin/claude"
+    export PATH="$TEST_TMPDIR/bin:$PATH"
+    export ATC_ARG_CAPTURE="$TEST_TMPDIR/claude.args"
+
+    cd "$TEST_TMPDIR"
+    init_named_git_branch
+    run_split atc run commit-message --ephemeral --inline --no-worktree --json \
+        --param slug=test/doc --param diff="added field"
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_provider == "claude"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_transcript_cwd == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_resume_by_session_id == true' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_stream_json_output == true' >/dev/null
+    [[ "$STDOUT" != *"--session-id"* ]]
+    if grep -q -- "--session-id" "$ATC_ARG_CAPTURE"; then
+        fail "ephemeral dispatch passed --session-id to claude"
+    fi
+    if [[ -f "$TEST_TMPDIR/atc.db" ]]; then
+        [ "$(sqlite3 "$TEST_TMPDIR/atc.db" "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatches') THEN (SELECT COUNT(*) FROM dispatches) ELSE 0 END;")" -eq 0 ]
+    fi
 }

@@ -1,4 +1,4 @@
-use crate::types::Directive;
+use crate::types::{AgentSessionId, Directive};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -20,6 +20,7 @@ pub struct AgentOpts {
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
     pub session_name: String,      // tmux session name (derived from slug)
     pub dispatch_id: String,       // stable registry ID (used for post-complete --id)
+    pub agent_session_id: Option<AgentSessionId>, // provider-native session ID for Claude resume
     pub sandbox: bool,             // false = pass --settings with sandbox.enabled=false to claude
     pub inline: bool,              // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
@@ -198,6 +199,9 @@ impl ClaudeExecutor {
             .arg(opts.max_turns.to_string())
             .arg("--max-budget-usd")
             .arg(opts.max_budget_usd.to_string());
+        if let Some(session_id) = opts.agent_session_id {
+            cmd.arg("--session-id").arg(session_id.to_string());
+        }
 
         if let Some(ref sf) = sandbox_file {
             cmd.arg("--settings").arg(sf.path());
@@ -221,7 +225,11 @@ impl ClaudeExecutor {
         // the `2>&1 | tee` behavior of spawn_tmux.
         cmd.stderr(std::process::Stdio::piped());
 
-        info!(slug = %opts.slug, "spawning claude (inline)");
+        info!(
+            slug = %opts.slug,
+            agent_session_id = opts.agent_session_id.map(|id| id.to_string()),
+            "spawning claude (inline)"
+        );
         let mut child = cmd.spawn()?;
 
         // Write stdin content (task doc or pre-built content) to claude stdin
@@ -281,6 +289,11 @@ impl ClaudeExecutor {
     async fn spawn_inline_ephemeral(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         use tokio::process::Command;
 
+        anyhow::ensure!(
+            opts.agent_session_id.is_none(),
+            "ephemeral inline dispatch must not set agent_session_id"
+        );
+
         // The -p argument is the rendered template body directly (no build_user_prompt wrapper)
         let user_prompt = opts
             .stdin_content
@@ -306,7 +319,6 @@ impl ClaudeExecutor {
             .arg(opts.max_turns.to_string())
             .arg("--max-budget-usd")
             .arg(opts.max_budget_usd.to_string());
-
         if let Some(ref sf) = sandbox_file {
             cmd.arg("--settings").arg(sf.path());
         }
@@ -328,7 +340,11 @@ impl ClaudeExecutor {
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());
 
-        info!(slug = %opts.slug, "spawning claude (ephemeral inline)");
+        info!(
+            slug = %opts.slug,
+            agent_session_id = opts.agent_session_id.map(|id| id.to_string()),
+            "spawning claude (ephemeral inline)"
+        );
         let mut child = cmd.spawn()?;
 
         // Wait with optional timeout (shared helper)
@@ -468,6 +484,12 @@ impl ClaudeExecutor {
                 shell_escape(&sp.to_string_lossy())?
             ));
         }
+        if let Some(session_id) = opts.agent_session_id {
+            claude_cmd.push_str(&format!(
+                " --session-id '{}'",
+                shell_escape(&session_id.to_string())?
+            ));
+        }
 
         claude_cmd.push_str(&format!(" 2>&1 | tee '{}'", shell_escape(&log_file_str)?));
 
@@ -550,7 +572,11 @@ impl ClaudeExecutor {
         };
 
         // 5. Create tmux session
-        info!(session = %opts.session_name, "creating tmux session");
+        info!(
+            session = %opts.session_name,
+            agent_session_id = opts.agent_session_id.map(|id| id.to_string()),
+            "creating tmux session"
+        );
         let output = match Command::new("tmux")
             .args([
                 "new-session",
@@ -671,6 +697,10 @@ mod tests {
     use super::*;
     use crate::types::Directive;
 
+    fn session_id(value: &str) -> AgentSessionId {
+        AgentSessionId::parse_str(value).unwrap()
+    }
+
     #[test]
     fn test_build_user_prompt() {
         let opts = AgentOpts {
@@ -682,6 +712,7 @@ mod tests {
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
+            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000001")),
             sandbox: false,
             inline: true,
             max_turns: 10_000,
@@ -708,6 +739,7 @@ mod tests {
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
+            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000002")),
             sandbox: false,
             inline: true,
             max_turns: 10_000,
@@ -791,6 +823,7 @@ mod tests {
             env,
             session_name: "test-session".to_string(),
             dispatch_id: "test-dispatch".to_string(),
+            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000003")),
             sandbox: false,
             inline: true,
             max_turns: 100,
@@ -821,6 +854,47 @@ mod tests {
 
         let result = executor.spawn_inline(&opts).await;
         assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_spawn_inline_includes_agent_session_id() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let capture = tmp.path().join("args.txt");
+        let script = tmp.path().join("claude-capture");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s
+' "$@" > "$ATC_ARG_CAPTURE"
+cat >/dev/null
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut env = HashMap::new();
+        env.insert(
+            "ATC_ARG_CAPTURE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        );
+        let executor = ClaudeExecutor { claude_bin: script };
+        let opts = AgentOpts {
+            log_file: Some(tmp.path().join("test.jsonl")),
+            worktree_path: tmp.path().to_path_buf(),
+            agent_session_id: Some(session_id("22222222-2222-4222-8222-222222222222")),
+            ..make_test_opts(Some("Hello from stdin content".to_string()), env)
+        };
+
+        let result = executor.spawn_inline(&opts).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+
+        let args = std::fs::read_to_string(capture).unwrap();
+        assert!(args.contains("--session-id"));
+        assert!(args.contains("22222222-2222-4222-8222-222222222222"));
     }
 
     #[tokio::test]
@@ -1022,6 +1096,7 @@ mod tests {
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
+            agent_session_id: None,
             sandbox: false,
             inline: true,
             max_turns: 1,
@@ -1040,5 +1115,175 @@ mod tests {
             wrapped,
             "ephemeral mode should pass stdin_content directly, not through build_user_prompt"
         );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_inline_ephemeral_rejects_agent_session_id() {
+        let executor = ClaudeExecutor {
+            claude_bin: PathBuf::from("echo"),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = AgentOpts {
+            worktree_path: tmp.path().to_path_buf(),
+            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000004")),
+            ephemeral: true,
+            log_file: None,
+            stdin_content: Some("Generate a commit message".to_string()),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let result = executor.spawn_inline_ephemeral(&opts).await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ephemeral inline dispatch must not set agent_session_id"));
+    }
+
+    #[test]
+    fn test_build_tmux_bash_body_includes_agent_session_id() {
+        let executor = ClaudeExecutor::default();
+        let opts = AgentOpts {
+            stdin_content: Some("content".to_string()),
+            agent_session_id: Some(session_id("11111111-1111-4111-8111-111111111111")),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+
+        assert!(
+            body.contains("--session-id '11111111-1111-4111-8111-111111111111'"),
+            "bash body should pass Claude session id, got: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_build_tmux_bash_body_omits_agent_session_id_when_none() {
+        let executor = ClaudeExecutor::default();
+        let opts = AgentOpts {
+            stdin_content: Some("content".to_string()),
+            agent_session_id: None,
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+
+        assert!(
+            !body.contains("--session-id"),
+            "bash body should omit Claude session id when absent, got: {}",
+            body
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_build_tmux_bash_body_escapes_session_id_and_hostile_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+
+        let fake_atc = bin_dir.join("atc");
+        std::fs::write(&fake_atc, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_atc, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let capture = tmp.path().join("args.txt");
+        let claude_bin = bin_dir.join("claude '$(touch pwned-bin)'");
+        std::fs::write(
+            &claude_bin,
+            r#"#!/bin/sh
+printf '%s
+' "$@" > "$ATC_ARG_CAPTURE"
+cat >/dev/null
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let worktree_path = tmp.path().join("work '$(touch pwned-worktree)' ; dir");
+        std::fs::create_dir(&worktree_path).unwrap();
+        let prompt_path = tmp.path().join("prompt '$(touch pwned-prompt)'.md");
+        let task_doc_path = tmp.path().join("task '$(touch pwned-taskdoc)'.md");
+        let log_file = tmp.path().join("log '$(touch pwned-log)'.jsonl");
+        std::fs::write(&task_doc_path, "task body").unwrap();
+
+        let mut env = HashMap::new();
+        env.insert(
+            "ATC_ARG_CAPTURE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let executor = ClaudeExecutor { claude_bin };
+        let opts = AgentOpts {
+            slug: "task '$(touch pwned-slug)'".to_string(),
+            worktree_path,
+            log_file: Some(log_file),
+            stdin_content: Some("content".to_string()),
+            env,
+            agent_session_id: Some(session_id("33333333-3333-4333-8333-333333333333")),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+        assert!(
+            body.contains("--session-id '33333333-3333-4333-8333-333333333333'"),
+            "bash body should pass Claude session id, got: {}",
+            body
+        );
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&body)
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "bash body failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for sentinel in [
+            "pwned-bin",
+            "pwned-worktree",
+            "pwned-prompt",
+            "pwned-taskdoc",
+            "pwned-log",
+            "pwned-slug",
+        ] {
+            assert!(
+                !tmp.path().join(sentinel).exists(),
+                "shell expansion created unexpected sentinel file: {sentinel}"
+            );
+        }
+
+        let args = std::fs::read_to_string(capture).unwrap();
+        assert!(args.contains("--session-id"));
+        assert!(args.contains("33333333-3333-4333-8333-333333333333"));
     }
 }

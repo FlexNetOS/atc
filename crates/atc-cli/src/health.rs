@@ -459,7 +459,6 @@ pub async fn run_health(
 mod tests {
     use super::*;
     use atc_core::types::{Directive, HealthChecks};
-    use chrono::Utc;
 
     fn make_record(status: Status, checks: HealthChecks) -> DispatchRecord {
         DispatchRecord {
@@ -471,20 +470,9 @@ mod tests {
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status,
             directive: Directive::Implement,
-            retries: 0,
             resolver: "task".to_string(),
-            pr_urls: vec![],
-            no_worktree: false,
-            original_input: None,
             checks,
-            kb_root: None,
-            cost_usd: None,
-            num_turns: None,
-            duration_ms: None,
-            artifacts: None,
-            work_unit_id: None,
-            dispatched_at: Utc::now(),
-            updated_at: Utc::now(),
+            ..crate::test_support::dispatch_record_fixture()
         }
     }
 

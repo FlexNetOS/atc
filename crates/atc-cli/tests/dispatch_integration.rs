@@ -355,6 +355,25 @@ async fn test_dispatch_inline_inserts_registry_record() {
     assert_eq!(record.directive, Directive::Implement);
     assert_eq!(record.resolver, "task");
     assert!(record.session.starts_with("tasks--gitkb-42@implement@"));
+    assert_eq!(record.agent_provider, "claude");
+    let agent_session_id = record
+        .agent_session_id
+        .as_ref()
+        .map(ToString::to_string)
+        .expect("new dispatch should persist an agent session id");
+    uuid::Uuid::parse_str(&agent_session_id).expect("agent_session_id should be a valid UUID");
+    assert_ne!(record.session, agent_session_id);
+    assert_eq!(
+        record.agent_transcript_cwd.as_deref(),
+        Some(record.worktree_path.as_path())
+    );
+    assert_eq!(
+        record
+            .agent_capabilities
+            .as_ref()
+            .map(|capabilities| capabilities.supports_resume_by_session_id),
+        Some(true)
+    );
 }
 
 #[tokio::test]
@@ -744,6 +763,58 @@ async fn test_dispatch_dry_run() {
     // No registry record should exist (dry run doesn't dispatch)
     let all = registry.list(StatusFilter::All).await.unwrap();
     assert!(all.is_empty(), "dry run should not create registry records");
+}
+
+#[tokio::test]
+async fn test_dispatch_dry_run_document_policy_rejects_unsafe_slug() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let tmpl_dir = fix.tmp.path().join("templates");
+    std::fs::create_dir_all(&tmpl_dir).unwrap();
+    std::fs::write(
+        tmpl_dir.join("doc-close.md"),
+        "---\ndirective: close\nworktree: document\nrequired_params: [task]\n---\nClose {{task}}.",
+    )
+    .unwrap();
+
+    let partials_dir = fix.tmp.path().join("partials");
+    std::fs::create_dir_all(&partials_dir).unwrap();
+    let comp_dir = fix.tmp.path().join("components");
+    std::fs::create_dir_all(&comp_dir).unwrap();
+
+    let mut config = fix.config.clone();
+    config.prompt.templates_dir = "templates".to_string();
+    config.prompt.partials_dir = "partials".to_string();
+    config.prompt.components_dir = "components".to_string();
+    config.resolvers.task.enabled = false;
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    let mut opts = default_run_opts("doc-close", Directive::Close);
+    opts.directive = None;
+    opts.dry_run = true;
+    opts.params
+        .insert("task".to_string(), "../tasks/bad".to_string());
+
+    let err = dispatch_via_pipeline(
+        &config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "doc-close",
+        &opts,
+    )
+    .await
+    .expect_err("dry-run document policy should reject unsafe slug");
+
+    assert!(
+        err.to_string().contains("invalid slug for document policy"),
+        "unexpected dry-run document-policy error: {err}"
+    );
 }
 
 // --- Resolver-specific tests ---

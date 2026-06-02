@@ -43,14 +43,73 @@ load helpers/common
     refute_output --partial "running"
 }
 
-@test "status --json returns valid JSON array" {
+@test "status --json returns valid JSON envelope" {
+    require_jq
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET agent_session_id = '00000000-0000-4000-8000-000000000901', agent_capabilities_json = '{\"supports_resume_by_session_id\":true}' WHERE id = 'disp-001';"
 
     run atc --config "$TEST_TMPDIR/atc.toml" status --json
     assert_success
     # Verify it's valid JSON containing the dispatch
-    echo "$output" | jq -e '.[0].id == "disp-001"'
+    echo "$output" | jq -e '.schema_version == 1'
+    echo "$output" | jq -e '.records[0].id == "disp-001"'
+    echo "$output" | jq -e '.records[0].agent_provider == "claude"'
+    echo "$output" | jq -e '.records[0].agent_session_id == "00000000-0000-4000-8000-000000000901"'
+    echo "$output" | jq -e '.records[0].agent_capabilities.supports_resume_by_session_id == true'
+    echo "$output" | jq -e '.records[0].agent_capabilities.supports_tmux_attach == false'
+    echo "$output" | jq -e '.records[0] | has("agent_capabilities_json") | not'
+}
+
+@test "info --json returns structured agent metadata" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET agent_session_id = '00000000-0000-4000-8000-000000000902', agent_capabilities_json = '{\"supports_resume_by_session_id\":true}' WHERE id = 'disp-001';"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
+    assert_success
+    echo "$output" | jq -e '.schema_version == 1'
+    echo "$output" | jq -e '.record.id == "disp-001"'
+    echo "$output" | jq -e '.record.agent_provider == "claude"'
+    echo "$output" | jq -e '.record.agent_session_id == "00000000-0000-4000-8000-000000000902"'
+    echo "$output" | jq -e '.record.agent_capabilities.supports_resume_by_session_id == true'
+    echo "$output" | jq -e '.record.agent_capabilities.supports_tmux_attach == false'
+    echo "$output" | jq -e '.record | has("agent_capabilities_json") | not'
+}
+
+@test "status/info --json tolerate malformed optional agent metadata" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json' WHERE id = 'disp-001';"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.schema_version == 1'
+    echo "$STDOUT" | jq -e '.records[0].id == "disp-001"'
+    echo "$STDOUT" | jq -e '.records[0].agent_provider == "claude"'
+    echo "$STDOUT" | jq -e '.records[0].agent_session_id == null'
+    echo "$STDOUT" | jq -e '.records[0].agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.records[0] | has("agent_capabilities_json") | not'
+    echo "$STDERR" | grep -F "dispatch_id=disp-001"
+    echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
+    echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.schema_version == 1'
+    echo "$STDOUT" | jq -e '.record.id == "disp-001"'
+    echo "$STDOUT" | jq -e '.record.agent_provider == "claude"'
+    echo "$STDOUT" | jq -e '.record.agent_session_id == null'
+    echo "$STDOUT" | jq -e '.record.agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.record | has("agent_capabilities_json") | not'
+    echo "$STDERR" | grep -F "dispatch_id=disp-001"
+    echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
+    echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
 }
 
 @test "info: shows correct fields for a dispatch" {
@@ -67,6 +126,8 @@ load helpers/common
     assert_output --partial "running"
     assert_output --partial "directive:"
     assert_output --partial "implement"
+    assert_output --partial "agent_provider:"
+    assert_output --partial "claude"
 }
 
 @test "info: resolves by task slug (latest dispatch)" {
