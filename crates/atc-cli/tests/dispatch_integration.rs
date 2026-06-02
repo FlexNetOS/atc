@@ -1,11 +1,15 @@
 use anyhow::Result;
 use atc_core::config::{AtcConfig, DirectiveConfig, DispatchConfig};
-use atc_core::executor::{AgentExecutor, AgentHandle, AgentOpts};
+use atc_core::executor::{AgentExecutor, AgentHandle, AgentInvocation, AgentOpts};
 use atc_core::registry::{Registry, SqliteRegistry, StatusFilter};
-use atc_core::types::{Directive, RunOpts, Status};
+use atc_core::types::{
+    claude_agent_capabilities, AgentCapabilities, AgentSessionId, Directive, DispatchRecord,
+    HealthChecks, RunOpts, Status, CLAUDE_AGENT_PROVIDER,
+};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// Guards PATH manipulation so integration tests don't race.
 static PATH_MUTEX: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
@@ -49,6 +53,100 @@ impl RecordingExecutor {
 impl AgentExecutor for RecordingExecutor {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
         *self.prompt.lock().await = Some(opts.prompt.clone());
+
+        if let Some(ref log_file) = opts.log_file {
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(log_file, b"")?;
+        }
+
+        Ok(AgentHandle {
+            session: opts.session_name.clone(),
+            inline_exit_code: Some(0),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CapturedSpawn {
+    worktree_path: PathBuf,
+    agent_invocation: AgentInvocation,
+    directive: Directive,
+    stdin_content: Option<String>,
+}
+
+/// A stub executor that records execution options and returns success.
+struct RecordingOptsExecutor {
+    exit_code: i32,
+    captures: Mutex<Vec<CapturedSpawn>>,
+}
+
+impl RecordingOptsExecutor {
+    fn new(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            captures: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentExecutor for RecordingOptsExecutor {
+    async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        self.captures.lock().await.push(CapturedSpawn {
+            worktree_path: opts.worktree_path.clone(),
+            agent_invocation: opts.agent_invocation,
+            directive: opts.directive.clone(),
+            stdin_content: opts.stdin_content.clone(),
+        });
+
+        if let Some(ref log_file) = opts.log_file {
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(log_file, b"")?;
+        }
+
+        Ok(AgentHandle {
+            session: opts.session_name.clone(),
+            inline_exit_code: Some(self.exit_code),
+        })
+    }
+}
+
+/// A recording executor that pauses resumed invocations after the registry
+/// reservation should exist but before the inline run can complete.
+struct BlockingResumeExecutor {
+    captures: Mutex<Vec<CapturedSpawn>>,
+    resume_started: Notify,
+    release_resume: Notify,
+}
+
+impl BlockingResumeExecutor {
+    fn new() -> Self {
+        Self {
+            captures: Mutex::new(Vec::new()),
+            resume_started: Notify::new(),
+            release_resume: Notify::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentExecutor for BlockingResumeExecutor {
+    async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        self.captures.lock().await.push(CapturedSpawn {
+            worktree_path: opts.worktree_path.clone(),
+            agent_invocation: opts.agent_invocation,
+            directive: opts.directive.clone(),
+            stdin_content: opts.stdin_content.clone(),
+        });
+
+        if matches!(opts.agent_invocation, AgentInvocation::Resume(_)) {
+            self.resume_started.notify_one();
+            self.release_resume.notified().await;
+        }
 
         if let Some(ref log_file) = opts.log_file {
             if let Some(parent) = log_file.parent() {
@@ -294,11 +392,55 @@ fn default_run_opts(input: &str, directive: Directive) -> RunOpts {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,
         timeout: None,
         json: false,
+    }
+}
+
+fn session_id(value: &str) -> AgentSessionId {
+    AgentSessionId::parse_str(value).unwrap()
+}
+
+fn dispatch_record_fixture(
+    id: &str,
+    status: Status,
+    transcript_cwd: PathBuf,
+    session_id: Option<AgentSessionId>,
+    capabilities: Option<AgentCapabilities>,
+) -> DispatchRecord {
+    let now = chrono::Utc::now();
+    DispatchRecord {
+        id: id.to_string(),
+        task_slug: Some(format!("tasks/{id}")),
+        branch: format!("tasks--{id}"),
+        worktree_path: transcript_cwd.clone(),
+        session: id.to_string(),
+        log_file: transcript_cwd.join(format!("{id}.jsonl")),
+        status,
+        directive: Directive::Implement,
+        retries: 0,
+        resolver: "task".to_string(),
+        pr_urls: vec![],
+        no_worktree: false,
+        original_input: Some(format!("tasks/{id}")),
+        checks: HealthChecks::default(),
+        kb_root: None,
+        cost_usd: None,
+        num_turns: None,
+        duration_ms: None,
+        artifacts: None,
+        work_unit_id: None,
+        agent_provider: CLAUDE_AGENT_PROVIDER.to_string(),
+        agent_session_id: session_id,
+        agent_transcript_cwd: Some(transcript_cwd),
+        resume_of_dispatch_id: None,
+        agent_capabilities: capabilities,
+        dispatched_at: now,
+        updated_at: now,
     }
 }
 
@@ -318,6 +460,23 @@ async fn dispatch_via_pipeline(
         executor,
     };
     pipeline.execute(input, opts).await
+}
+
+async fn dispatch_source_task(
+    config: &AtcConfig,
+    registry: &dyn Registry,
+    executor: &dyn AgentExecutor,
+    slug: &str,
+) -> DispatchRecord {
+    let opts = default_run_opts(slug, Directive::Implement);
+    let outcome = dispatch_via_pipeline(config, registry, executor, slug, &opts)
+        .await
+        .expect("source dispatch failed");
+    registry
+        .get(&outcome.id)
+        .await
+        .unwrap()
+        .expect("source dispatch should be recorded")
 }
 
 #[tokio::test]
@@ -374,6 +533,549 @@ async fn test_dispatch_inline_inserts_registry_record() {
             .map(|capabilities| capabilities.supports_resume_by_session_id),
         Some(true)
     );
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_prompt_uses_source_session_and_transcript_cwd() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+
+    let source_opts = default_run_opts("tasks/gitkb-resume", Directive::Implement);
+    let source_outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-resume",
+        &source_opts,
+    )
+    .await
+    .expect("source dispatch failed");
+
+    let source = registry
+        .get(&source_outcome.id)
+        .await
+        .unwrap()
+        .expect("source dispatch should be recorded");
+    let source_session_id = source
+        .agent_session_id
+        .expect("source should persist an agent session id");
+    let source_transcript_cwd = source
+        .agent_transcript_cwd
+        .clone()
+        .expect("source should persist transcript cwd");
+    assert!(
+        source_transcript_cwd.is_dir(),
+        "source transcript cwd should exist"
+    );
+
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+
+    let mut resume_opts = default_run_opts("Follow up on the previous work", Directive::Implement);
+    resume_opts.resume = Some(source.id.clone());
+    let resumed_outcome = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Follow up on the previous work",
+        &resume_opts,
+    )
+    .await
+    .expect("resume dispatch failed");
+
+    assert_ne!(source_outcome.id, resumed_outcome.id);
+    let resumed = registry
+        .get(&resumed_outcome.id)
+        .await
+        .unwrap()
+        .expect("resume dispatch should be recorded");
+    assert_eq!(resumed.resolver, "prompt");
+    assert_eq!(
+        resumed.resume_of_dispatch_id.as_deref(),
+        Some(source.id.as_str())
+    );
+    assert_eq!(resumed.agent_session_id, Some(source_session_id));
+    assert_eq!(
+        resumed.agent_transcript_cwd.as_deref(),
+        Some(source_transcript_cwd.as_path())
+    );
+    assert_eq!(resumed.worktree_path, source_transcript_cwd);
+
+    let captures = executor.captures.lock().await.clone();
+    assert_eq!(captures.len(), 2);
+    assert_eq!(
+        captures[0].agent_invocation,
+        AgentInvocation::Fresh(source_session_id)
+    );
+    assert_eq!(
+        captures[1].agent_invocation,
+        AgentInvocation::Resume(source_session_id)
+    );
+    assert_eq!(captures[1].worktree_path, resumed.worktree_path);
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_template_with_params_uses_source_session() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+
+    let source = dispatch_source_task(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-template-resume",
+    )
+    .await;
+    let source_session_id = source.agent_session_id.unwrap();
+    let source_transcript_cwd = source.agent_transcript_cwd.clone().unwrap();
+
+    let tmpl_dir = fix.tmp.path().join("templates");
+    std::fs::create_dir_all(&tmpl_dir).unwrap();
+    std::fs::write(
+        tmpl_dir.join("resume-template.md"),
+        "---\ndirective: implement\nrequired_params: [topic]\n---\nResume {{topic}} work.",
+    )
+    .unwrap();
+    std::fs::create_dir_all(fix.tmp.path().join("partials")).unwrap();
+    std::fs::create_dir_all(fix.tmp.path().join("components")).unwrap();
+
+    let mut template_config = fix.config.clone();
+    template_config.prompt.templates_dir = "templates".to_string();
+    template_config.prompt.partials_dir = "partials".to_string();
+    template_config.prompt.components_dir = "components".to_string();
+    template_config.resolvers.task.enabled = false;
+
+    let mut resume_opts = default_run_opts("resume-template", Directive::Implement);
+    resume_opts.directive = None;
+    resume_opts.resume = Some(source.id.clone());
+    resume_opts
+        .params
+        .insert("topic".to_string(), "auth".to_string());
+
+    let resumed_outcome = dispatch_via_pipeline(
+        &template_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "resume-template",
+        &resume_opts,
+    )
+    .await
+    .expect("template resume dispatch failed");
+
+    let resumed = registry.get(&resumed_outcome.id).await.unwrap().unwrap();
+    assert_eq!(resumed.resolver, "template");
+    assert_eq!(
+        resumed.resume_of_dispatch_id.as_deref(),
+        Some(source.id.as_str())
+    );
+    assert_eq!(resumed.agent_session_id, Some(source_session_id));
+    assert_eq!(
+        resumed.agent_transcript_cwd.as_deref(),
+        Some(source_transcript_cwd.as_path())
+    );
+
+    let captures = executor.captures.lock().await.clone();
+    let resume_capture = captures.last().expect("resume dispatch should spawn");
+    assert_eq!(
+        resume_capture.agent_invocation,
+        AgentInvocation::Resume(source_session_id)
+    );
+    assert_eq!(resume_capture.worktree_path, source_transcript_cwd);
+    assert!(
+        resume_capture
+            .stdin_content
+            .as_deref()
+            .is_some_and(|content| content.contains("Resume auth work.")),
+        "template params should render into stdin content"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_review_fix_with_pr_url_uses_source_session() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+
+    let source = dispatch_source_task(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-pr-resume",
+    )
+    .await;
+    let source_session_id = source.agent_session_id.unwrap();
+    let source_transcript_cwd = source.agent_transcript_cwd.clone().unwrap();
+
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+    prompt_config.resolvers.template.enabled = false;
+
+    let pr_url = "https://github.com/org/repo/pull/123".to_string();
+    let mut resume_opts = default_run_opts("Address the review feedback", Directive::ReviewFix);
+    resume_opts.resume = Some(source.id.clone());
+    resume_opts.pr_url = Some(pr_url.clone());
+
+    let resumed_outcome = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Address the review feedback",
+        &resume_opts,
+    )
+    .await
+    .expect("review-fix resume dispatch failed");
+
+    let resumed = registry.get(&resumed_outcome.id).await.unwrap().unwrap();
+    assert_eq!(resumed.resolver, "prompt");
+    assert_eq!(resumed.directive, Directive::ReviewFix);
+    assert_eq!(resumed.pr_urls, vec![pr_url]);
+    assert_eq!(
+        resumed.resume_of_dispatch_id.as_deref(),
+        Some(source.id.as_str())
+    );
+    assert_eq!(resumed.agent_session_id, Some(source_session_id));
+    assert_eq!(
+        resumed.agent_transcript_cwd.as_deref(),
+        Some(source_transcript_cwd.as_path())
+    );
+
+    let captures = executor.captures.lock().await.clone();
+    let resume_capture = captures.last().expect("resume dispatch should spawn");
+    assert_eq!(resume_capture.directive, Directive::ReviewFix);
+    assert_eq!(
+        resume_capture.agent_invocation,
+        AgentInvocation::Resume(source_session_id)
+    );
+    assert_eq!(resume_capture.worktree_path, source_transcript_cwd);
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_refuses_active_session_unless_forced() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+
+    let source_opts = default_run_opts("tasks/gitkb-active-resume", Directive::Implement);
+    let source_outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-active-resume",
+        &source_opts,
+    )
+    .await
+    .expect("source dispatch failed");
+    registry
+        .update_status(&source_outcome.id, Status::Running)
+        .await
+        .unwrap();
+
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+
+    let mut resume_opts =
+        default_run_opts("Follow up despite active session", Directive::Implement);
+    resume_opts.resume = Some(source_outcome.id.clone());
+    let err = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Follow up despite active session",
+        &resume_opts,
+    )
+    .await
+    .expect_err("active source session should be rejected");
+    assert!(
+        err.to_string().contains("already active"),
+        "unexpected resume collision error: {err}"
+    );
+
+    resume_opts.force = true;
+    let forced_outcome = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Follow up despite active session",
+        &resume_opts,
+    )
+    .await
+    .expect("--force should allow resuming an active provider session");
+    let forced = registry.get(&forced_outcome.id).await.unwrap().unwrap();
+    assert_eq!(
+        forced.resume_of_dispatch_id.as_deref(),
+        Some(source_outcome.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_rejects_malformed_source_metadata() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+
+    let valid_cwd = fix.worktree_base().join("source-cwd");
+    std::fs::create_dir_all(&valid_cwd).unwrap();
+    let transcript_file = fix.worktree_base().join("transcript-file");
+    std::fs::write(&transcript_file, b"not a directory").unwrap();
+    let mismatch_cwd = fix.worktree_base().join("mismatch-cwd");
+    let mismatch_worktree = fix.worktree_base().join("mismatch-worktree");
+    std::fs::create_dir_all(&mismatch_cwd).unwrap();
+    std::fs::create_dir_all(&mismatch_worktree).unwrap();
+    let mut unsupported = claude_agent_capabilities();
+    unsupported.supports_resume_by_session_id = false;
+
+    let mut unsupported_provider = dispatch_record_fixture(
+        "unsupported-provider",
+        Status::Done,
+        valid_cwd.clone(),
+        Some(session_id("00000000-0000-4000-8000-000000000500")),
+        Some(claude_agent_capabilities()),
+    );
+    unsupported_provider.agent_provider = "codex".to_string();
+
+    let mut missing_transcript_field = dispatch_record_fixture(
+        "missing-transcript-field",
+        Status::Done,
+        valid_cwd.clone(),
+        Some(session_id("00000000-0000-4000-8000-000000000503")),
+        Some(claude_agent_capabilities()),
+    );
+    missing_transcript_field.agent_transcript_cwd = None;
+
+    let mut mismatched_worktree = dispatch_record_fixture(
+        "mismatched-worktree",
+        Status::Done,
+        mismatch_cwd,
+        Some(session_id("00000000-0000-4000-8000-000000000507")),
+        Some(claude_agent_capabilities()),
+    );
+    mismatched_worktree.worktree_path = mismatch_worktree;
+
+    let records = vec![
+        dispatch_record_fixture(
+            "missing-session",
+            Status::Done,
+            valid_cwd.clone(),
+            None,
+            Some(claude_agent_capabilities()),
+        ),
+        unsupported_provider,
+        dispatch_record_fixture(
+            "unsupported-resume",
+            Status::Done,
+            valid_cwd.clone(),
+            Some(session_id("00000000-0000-4000-8000-000000000501")),
+            Some(unsupported),
+        ),
+        dispatch_record_fixture(
+            "missing-transcript-cwd",
+            Status::Done,
+            fix.worktree_base().join("missing-cwd"),
+            Some(session_id("00000000-0000-4000-8000-000000000502")),
+            Some(claude_agent_capabilities()),
+        ),
+        missing_transcript_field,
+        dispatch_record_fixture(
+            "transcript-file",
+            Status::Done,
+            transcript_file,
+            Some(session_id("00000000-0000-4000-8000-000000000504")),
+            Some(claude_agent_capabilities()),
+        ),
+        dispatch_record_fixture(
+            "unsafe-root",
+            Status::Done,
+            PathBuf::from("/"),
+            Some(session_id("00000000-0000-4000-8000-000000000505")),
+            Some(claude_agent_capabilities()),
+        ),
+        mismatched_worktree,
+    ];
+    for record in records {
+        registry.insert(&record).await.unwrap();
+    }
+
+    for (target, expected) in [
+        ("missing-session", "missing agent_session_id"),
+        ("unsupported-provider", "provider 'codex' is not supported"),
+        (
+            "unsupported-resume",
+            "does not support resume by session id",
+        ),
+        ("missing-transcript-cwd", "is not accessible"),
+        ("missing-transcript-field", "missing agent_transcript_cwd"),
+        ("transcript-file", "is not a directory"),
+        ("unsafe-root", "unsafe transcript cwd"),
+        ("mismatched-worktree", "does not match source worktree_path"),
+    ] {
+        let mut opts = default_run_opts("Resume validation probe", Directive::Implement);
+        opts.dry_run = true;
+        opts.resume = Some(target.to_string());
+
+        let err = dispatch_via_pipeline(
+            &prompt_config,
+            registry.as_ref(),
+            executor.as_ref(),
+            "Resume validation probe",
+            &opts,
+        )
+        .await
+        .expect_err("malformed resume source should fail before dispatch");
+        assert!(
+            err.to_string().contains(expected),
+            "expected {expected:?} for {target}, got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let source_executor = Arc::new(StubExecutor { exit_code: 0 });
+    let source = dispatch_source_task(
+        &fix.config,
+        registry.as_ref(),
+        source_executor.as_ref(),
+        "tasks/gitkb-concurrent-resume",
+    )
+    .await;
+
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+    let executor = Arc::new(BlockingResumeExecutor::new());
+
+    let mut first_opts = default_run_opts("Concurrent resume one", Directive::Implement);
+    first_opts.resume = Some(source.id.clone());
+    let first_config = prompt_config.clone();
+    let first_registry = registry.clone();
+    let first_executor = executor.clone();
+    let first = tokio::spawn(async move {
+        dispatch_via_pipeline(
+            &first_config,
+            first_registry.as_ref(),
+            first_executor.as_ref(),
+            "Concurrent resume one",
+            &first_opts,
+        )
+        .await
+    });
+
+    executor.resume_started.notified().await;
+
+    let mut second_opts = default_run_opts("Concurrent resume two", Directive::Implement);
+    second_opts.resume = Some(source.id.clone());
+    let err = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Concurrent resume two",
+        &second_opts,
+    )
+    .await
+    .expect_err("second concurrent resume should be rejected");
+    assert!(
+        err.to_string().contains("already active"),
+        "unexpected concurrent resume error: {err}"
+    );
+
+    let captures = executor.captures.lock().await.clone();
+    assert_eq!(
+        captures.len(),
+        1,
+        "rejected concurrent resume must not reach executor"
+    );
+
+    executor.release_resume.notify_waiters();
+    first
+        .await
+        .expect("first resume task panicked")
+        .expect("first resume should complete");
+}
+
+#[tokio::test]
+async fn test_dispatch_resume_spawn_failure_marks_pre_spawn_reservation_failed() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let source_executor = Arc::new(StubExecutor { exit_code: 0 });
+    let source = dispatch_source_task(
+        &fix.config,
+        registry.as_ref(),
+        source_executor.as_ref(),
+        "tasks/gitkb-resume-spawn-failure",
+    )
+    .await;
+
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+    let mut opts = default_run_opts("Resume should fail before spawn", Directive::Implement);
+    opts.resume = Some(source.id.clone());
+
+    let err = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        &FailingExecutor,
+        "Resume should fail before spawn",
+        &opts,
+    )
+    .await
+    .expect_err("failing executor should fail dispatch");
+    assert!(
+        err.to_string().contains("executor spawn failed"),
+        "unexpected spawn error: {err}"
+    );
+
+    let records = registry.list(StatusFilter::All).await.unwrap();
+    let failed = records
+        .iter()
+        .find(|record| record.resume_of_dispatch_id.as_deref() == Some(source.id.as_str()))
+        .expect("resume reservation should remain recorded");
+    assert_eq!(failed.status, Status::Failed);
 }
 
 #[tokio::test]
@@ -506,6 +1208,7 @@ async fn test_dispatch_resolves_directive_from_frontmatter() {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,
@@ -642,6 +1345,7 @@ async fn test_dispatch_directive_survives_into_rendered_prompt() {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,
@@ -695,6 +1399,7 @@ async fn test_dispatch_review_fix_requires_pr_url() {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,
@@ -742,6 +1447,7 @@ async fn test_dispatch_dry_run() {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,
@@ -844,6 +1550,7 @@ async fn test_prompt_resolver_dispatch() {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,
@@ -918,6 +1625,7 @@ async fn test_template_resolver_dispatch() {
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,

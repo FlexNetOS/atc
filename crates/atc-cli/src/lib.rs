@@ -69,7 +69,7 @@ mod args {
     pub enum Commands {
         /// Run an agent (direct dispatch, no queue)
         #[command(
-            after_help = "EXAMPLES:\n  atc run task tasks/gitkb-42                  # Implement a task\n  atc run review-fix --param pr=<pr-url>       # Address PR review\n  atc run pr-comments --param pr=<pr-url>      # Resolve PR comments\n  atc run task tasks/foo --dry-run             # Preview without launching\n  atc run my-template --inline --no-worktree   # Run a template in cwd\n  atc run task tasks/foo --json | jq           # Stable v1 envelope on stdout\n\nJSON OUTPUT (--json):\n  Emits a stable v1 envelope on stdout instead of the human-readable\n  confirmation. Errors also emit a structured envelope on stdout and exit\n  non-zero. Schema:\n\n    {\n      \"schema_version\": 1,\n      \"kind\": \"dispatch\" | \"error\" | \"templates\",\n      \"data\": {\n        // dispatch (success):\n        \"dispatch_id\": \"<id>\",\n        \"task_slug\": \"tasks/...\" | null,\n        \"branch\": \"...\",\n        \"session\": \"...\",\n        \"directive\": \"implement\" | ...,\n        \"worktree_path\": \"/path/...\",\n        \"status\": \"running\" | \"done\" | \"failed\" | \"preview\",\n        \"resolver\": \"task\" | \"template\" | \"prompt\",\n        \"pr_urls\": [...],\n        \"log_file\": \"/path/...\" | null,\n        \"agent_provider\": \"claude\",\n        \"agent_session_id\": \"<uuid>\" | null,\n        \"agent_transcript_cwd\": \"/path/...\" | null,\n        \"resume_of_dispatch_id\": \"<id>\" | null,\n        \"agent_capabilities\": { ... } | null,\n        \"is_dry_run\": false,\n        \"inline_exit_code\": null | <i32>,\n        \"dispatched_at\": \"<rfc3339>\"\n        // error:\n        // \"code\": \"<category>\", \"message\": \"<msg>\", \"task_slug\": \"...\"?\n        // templates (--list):\n        // \"templates\": [\"name\", ...]\n      }\n    }\n\n  Future fields are additive; consumers should ignore unknown keys.\n\nNOTE: pass PR URLs via --param pr=<url> or --pr-url <url>; never as a\npositional argument (it falls through to the prompt resolver).\n"
+            after_help = "EXAMPLES:\n  atc run task tasks/gitkb-42                  # Implement a task\n  atc run review-fix --param pr=<pr-url>       # Address PR review\n  atc run pr-comments --param pr=<pr-url>      # Resolve PR comments\n  atc run task tasks/foo --dry-run             # Preview without launching\n  atc run my-template --inline --no-worktree   # Run a template in cwd\n  atc run --resume tasks/foo 'follow up'       # Continue the latest task session\n  atc run task tasks/foo --json | jq           # Stable v1 envelope on stdout\n\nJSON OUTPUT (--json):\n  Emits a stable v1 envelope on stdout instead of the human-readable\n  confirmation. Errors also emit a structured envelope on stdout and exit\n  non-zero. Schema:\n\n    {\n      \"schema_version\": 1,\n      \"kind\": \"dispatch\" | \"error\" | \"templates\",\n      \"data\": {\n        // dispatch (success):\n        \"dispatch_id\": \"<id>\",\n        \"task_slug\": \"tasks/...\" | null,\n        \"branch\": \"...\",\n        \"session\": \"...\",\n        \"directive\": \"implement\" | ...,\n        \"worktree_path\": \"/path/...\",\n        \"status\": \"running\" | \"done\" | \"failed\" | \"preview\",\n        \"resolver\": \"task\" | \"template\" | \"prompt\",\n        \"pr_urls\": [...],\n        \"log_file\": \"/path/...\" | null,\n        \"agent_provider\": \"claude\",\n        \"agent_session_id\": \"<uuid>\" | null,\n        \"agent_transcript_cwd\": \"/path/...\" | null,\n        \"resume_of_dispatch_id\": \"<id>\" | null,\n        \"agent_capabilities\": { ... } | null,\n        \"is_dry_run\": false,\n        \"inline_exit_code\": null | <i32>,\n        \"dispatched_at\": \"<rfc3339>\"\n        // error:\n        // \"code\": \"<category>\", \"message\": \"<msg>\", \"task_slug\": \"...\"?\n        // templates (--list):\n        // \"templates\": [\"name\", ...]\n      }\n    }\n\n  Future fields are additive; consumers should ignore unknown keys.\n\nRESUME / RETRY / REDIRECT:\n  `atc run --resume <dispatch-id|task-slug> ...` creates a new ATC dispatch that\n  continues the provider-native Claude conversation from the source record.\n  `atc retry` starts a fresh provider conversation for a failed dispatch.\n  `atc redirect` sends text to a currently running tmux-backed ATC session.\n\nNOTE: pass PR URLs via --param pr=<url> or --pr-url <url>; never as a\npositional argument (it falls through to the prompt resolver).\n"
         )]
         Run {
             /// Input: "task <slug>", template name, or raw prompt string
@@ -110,6 +110,9 @@ mod args {
             /// Override max turns for this dispatch
             #[arg(long)]
             max_turns: Option<u32>,
+            /// Resume provider conversation from dispatch ID or latest task slug
+            #[arg(long)]
+            resume: Option<String>,
             /// Ephemeral mode: skip registry, logs, system prompt, providers (requires --inline)
             #[arg(long)]
             ephemeral: bool,
@@ -493,6 +496,7 @@ pub async fn run(
             no_worktree,
             max_budget_usd,
             max_turns,
+            resume,
             ephemeral,
             timeout,
             json,
@@ -563,6 +567,7 @@ pub async fn run(
                     no_worktree: *no_worktree,
                     max_budget_usd: *max_budget_usd,
                     max_turns: *max_turns,
+                    resume: resume.clone(),
                     retries: 0,
                     list: false,
                     ephemeral: *ephemeral,
@@ -846,6 +851,7 @@ pub async fn run(
                 no_worktree: true,
                 max_budget_usd: Some(*max_budget_usd),
                 max_turns: None,
+                resume: None,
                 retries: 0,
                 list: false,
                 ephemeral: true,

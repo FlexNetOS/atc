@@ -21,6 +21,9 @@ atc run branch-review
 # Raw prompt (fallback)
 atc run '<prompt text>' --directive <directive>
 
+# Continue a previous provider conversation
+atc run --resume <dispatch-id-or-task> '<prompt text>'
+
 # Preview without executing
 atc run <args> --dry-run
 
@@ -58,11 +61,13 @@ atc info <id>                        # detailed single dispatch info
 ```bash
 atc redirect <slug-or-id> "<message>"   # send instruction to running agent
 atc stop <id>                           # kill session, mark stopped
-atc retry <id>                          # re-dispatch failed task with adaptive config
+atc retry <id>                          # re-dispatch failed task fresh with adaptive config
 atc close <slug> --pr <url>             # mark done, remove worktree, update KB
 atc cleanup <id>                        # remove worktree and session
 atc cleanup --done                      # batch cleanup all completed dispatches
 ```
+
+`atc run --resume` creates a new dispatch that continues the source Claude conversation. `atc retry` intentionally starts a fresh provider conversation, and `atc redirect` targets a running tmux-backed session without creating a new dispatch.
 
 ## Health Checks
 
@@ -133,6 +138,7 @@ atc daemon stop
 | `--no-worktree` | Skip worktree creation |
 | `--max-budget-usd <N>` | Override budget limit |
 | `--max-turns <N>` | Override turn limit |
+| `--resume <id-or-task>` | Continue the source provider conversation in a new dispatch |
 | `--ephemeral` | No registry/logs/system-prompt (requires `--inline`) |
 | `--timeout <secs>` | Kill after N seconds (inline only) |
 | `--list` | List available templates |

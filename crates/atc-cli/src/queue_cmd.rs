@@ -205,6 +205,7 @@ pub async fn dispatch_queue_item(
         no_worktree: false,
         max_budget_usd: None,
         max_turns: None,
+        resume: None,
         retries: 0,
         list: false,
         ephemeral: false,

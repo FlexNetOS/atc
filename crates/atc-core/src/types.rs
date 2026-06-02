@@ -45,7 +45,7 @@ pub struct DispatchRecord {
     pub agent_session_id: Option<AgentSessionId>,
     /// CWD the provider uses for transcript/session persistence.
     pub agent_transcript_cwd: Option<PathBuf>,
-    /// Dispatch ID this record resumes from. Populated by future resume work.
+    /// Dispatch ID this record resumes from, when created by `atc run --resume`.
     pub resume_of_dispatch_id: Option<String>,
     /// Capability snapshot for the provider at dispatch time.
     pub agent_capabilities: Option<AgentCapabilities>,
@@ -489,6 +489,8 @@ pub struct RunOpts {
     pub max_budget_usd: Option<f64>,
     /// Override max turns.
     pub max_turns: Option<u32>,
+    /// Dispatch ID or task slug whose provider-native session should be resumed.
+    pub resume: Option<String>,
     /// Retry count (propagated on retry).
     pub retries: u32,
     /// List available templates instead of dispatching.
@@ -530,6 +532,7 @@ mod tests {
             no_worktree: false,
             max_budget_usd: None,
             max_turns: None,
+            resume: None,
             retries: 0,
             list: false,
             ephemeral: false,

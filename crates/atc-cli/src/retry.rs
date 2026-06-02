@@ -235,6 +235,7 @@ pub async fn run_retry(
         no_worktree: record.no_worktree,
         max_budget_usd: max_budget_override,
         max_turns: max_turns_override,
+        resume: None,
         retries: record.retries + 1,
         list: false,
         ephemeral: false,

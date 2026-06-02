@@ -194,7 +194,9 @@ mod tests {
 
     #[test]
     fn test_format_info_full_record() {
-        let output = format_info(&full_record());
+        let mut record = full_record();
+        record.resume_of_dispatch_id = Some("source-dispatch-id".to_string());
+        let output = format_info(&record);
         assert!(output.contains("id:"));
         assert!(output.contains("task_slug:"));
         assert!(output.contains("tasks/gitkb-42"));
@@ -210,6 +212,8 @@ mod tests {
         assert!(output.contains("agent_session_id:"));
         assert!(output.contains("00000000-0000-4000-8000-000000000300"));
         assert!(output.contains("agent_transcript_cwd:"));
+        assert!(output.contains("resume_of_dispatch_id:"));
+        assert!(output.contains("source-dispatch-id"));
         assert!(output.contains("pr_urls:"));
         assert!(output.contains("pull/275"));
         assert!(output.contains("cost_usd:"));
