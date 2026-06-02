@@ -39,6 +39,7 @@ serde = { version = "1.0.210", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yml = "0.0.12"
 toml = "0.9"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Templating
 handlebars = "6"

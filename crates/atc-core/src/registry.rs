@@ -1,11 +1,12 @@
 use crate::queue::{
     DispatchQueue, EnqueueItem, EnqueueResult, QueueInputType, QueueItemStatus, QueueRow,
 };
-use crate::types::{DispatchRecord, HealthChecks, Status};
+use crate::types::{AgentCapabilities, AgentSessionId, DispatchRecord, HealthChecks, Status};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
@@ -180,6 +181,11 @@ CREATE TABLE IF NOT EXISTS dispatches (
   duration_ms               INTEGER,
   artifacts                 TEXT,
   work_unit_id              TEXT,
+  agent_provider            TEXT NOT NULL DEFAULT 'claude',
+  agent_session_id          TEXT,
+  agent_transcript_cwd      TEXT,
+  resume_of_dispatch_id     TEXT,
+  agent_capabilities_json   TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );
@@ -393,6 +399,40 @@ impl SqliteRegistry {
                     .execute(pool)
                     .await?;
             }
+
+            let agent_columns = [
+                (
+                    "agent_provider",
+                    "ALTER TABLE dispatches ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'",
+                ),
+                (
+                    "agent_session_id",
+                    "ALTER TABLE dispatches ADD COLUMN agent_session_id TEXT",
+                ),
+                (
+                    "agent_transcript_cwd",
+                    "ALTER TABLE dispatches ADD COLUMN agent_transcript_cwd TEXT",
+                ),
+                (
+                    "resume_of_dispatch_id",
+                    "ALTER TABLE dispatches ADD COLUMN resume_of_dispatch_id TEXT",
+                ),
+                (
+                    "agent_capabilities_json",
+                    "ALTER TABLE dispatches ADD COLUMN agent_capabilities_json TEXT",
+                ),
+            ];
+            for (column, ddl) in agent_columns {
+                let (has_column,): (i32,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = ?1",
+                )
+                .bind(column)
+                .fetch_one(pool)
+                .await?;
+                if has_column == 0 {
+                    sqlx::query(ddl).execute(pool).await?;
+                }
+            }
         }
 
         Ok(())
@@ -452,9 +492,34 @@ impl SqliteRegistry {
         let updated_at_str: String = row.get("updated_at");
         let worktree_str: String = row.get("worktree_path");
         let log_file_str: String = row.get("log_file");
+        let id: String = row.get("id");
+        let agent_session_id = match row
+            .get::<Option<String>, _>("agent_session_id")
+            .as_deref()
+            .map(AgentSessionId::parse_str)
+            .transpose()
+        {
+            Ok(session_id) => session_id,
+            Err(e) => {
+                warn!(dispatch_id = %id, error = %e, "ignoring invalid agent_session_id");
+                None
+            }
+        };
+        let agent_capabilities = match row
+            .get::<Option<String>, _>("agent_capabilities_json")
+            .as_deref()
+            .map(serde_json::from_str::<AgentCapabilities>)
+            .transpose()
+        {
+            Ok(capabilities) => capabilities,
+            Err(e) => {
+                warn!(dispatch_id = %id, error = %e, "ignoring invalid agent_capabilities_json");
+                None
+            }
+        };
 
         Ok(DispatchRecord {
-            id: row.get("id"),
+            id,
             task_slug: row.get("task_slug"),
             branch: row.get("branch"),
             worktree_path: PathBuf::from(worktree_str),
@@ -493,6 +558,13 @@ impl SqliteRegistry {
                 .map_err(|_| anyhow::anyhow!("invalid duration_ms value in database"))?,
             artifacts: row.get("artifacts"),
             work_unit_id: row.get("work_unit_id"),
+            agent_provider: row.get("agent_provider"),
+            agent_session_id,
+            agent_transcript_cwd: row
+                .get::<Option<String>, _>("agent_transcript_cwd")
+                .map(PathBuf::from),
+            resume_of_dispatch_id: row.get("resume_of_dispatch_id"),
+            agent_capabilities,
             dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
@@ -537,16 +609,23 @@ impl Registry for SqliteRegistry {
     async fn insert(&self, record: &DispatchRecord) -> Result<()> {
         let pr_urls_json = serde_json::to_string(&record.pr_urls)?;
         let pr_url_compat = record.pr_urls.first().cloned();
+        let agent_capabilities_json = record
+            .agent_capabilities
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         sqlx::query(
             r#"INSERT INTO dispatches (
                 id, task_slug, branch, worktree_path, session, log_file, status, directive, retries,
                 resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
                 check_agent_exited_clean, check_branch_pushed, check_pr_created,
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
-                cost_usd, num_turns, duration_ms, work_unit_id, dispatched_at, updated_at
+                cost_usd, num_turns, duration_ms, work_unit_id,
+                agent_provider, agent_session_id, agent_transcript_cwd, resume_of_dispatch_id,
+                agent_capabilities_json, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
             )"#,
         )
         .bind(&record.id)
@@ -605,6 +684,20 @@ impl Registry for SqliteRegistry {
                 .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
         )
         .bind(&record.work_unit_id)
+        .bind(&record.agent_provider)
+        .bind(record.agent_session_id.map(|id| id.to_string()))
+        .bind(
+            record
+                .agent_transcript_cwd
+                .as_ref()
+                .map(|p| {
+                    p.to_str()
+                        .ok_or_else(|| anyhow::anyhow!("agent_transcript_cwd must be valid UTF-8"))
+                })
+                .transpose()?,
+        )
+        .bind(&record.resume_of_dispatch_id)
+        .bind(&agent_capabilities_json)
         .bind(record.dispatched_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -1551,7 +1644,10 @@ impl DispatchQueue for SqliteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Directive, DispatchRecord, HealthChecks, Status};
+    use crate::types::{
+        claude_agent_capabilities, AgentSessionId, Directive, DispatchRecord, HealthChecks, Status,
+        CLAUDE_AGENT_PROVIDER,
+    };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1578,6 +1674,13 @@ mod tests {
             duration_ms: None,
             artifacts: None,
             work_unit_id: None,
+            agent_provider: CLAUDE_AGENT_PROVIDER.to_string(),
+            agent_session_id: Some(
+                AgentSessionId::parse_str("00000000-0000-4000-8000-000000000100").unwrap(),
+            ),
+            agent_transcript_cwd: Some(PathBuf::from("/tmp/test-worktree")),
+            resume_of_dispatch_id: None,
+            agent_capabilities: Some(claude_agent_capabilities()),
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1599,6 +1702,29 @@ mod tests {
         assert_eq!(fetched.directive, Directive::Implement);
         assert_eq!(fetched.retries, 0);
         assert_eq!(fetched.resolver, "task");
+    }
+
+    #[tokio::test]
+    async fn test_malformed_optional_agent_metadata_does_not_break_reads() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let record = sample_record("bad-agent-metadata");
+        registry.insert(&record).await.unwrap();
+
+        sqlx::query(
+            "UPDATE dispatches SET agent_session_id = ?1, agent_capabilities_json = ?2 WHERE id = ?3",
+        )
+        .bind("not-a-uuid")
+        .bind("{not-json")
+        .bind("bad-agent-metadata")
+        .execute(&registry.pool)
+        .await
+        .unwrap();
+
+        let fetched = registry.get("bad-agent-metadata").await.unwrap().unwrap();
+
+        assert_eq!(fetched.agent_provider, "claude");
+        assert!(fetched.agent_session_id.is_none());
+        assert!(fetched.agent_capabilities.is_none());
     }
 
     #[tokio::test]
@@ -1760,6 +1886,10 @@ mod tests {
         };
         record.no_worktree = true;
         record.original_input = Some("review".to_string());
+        record.agent_session_id =
+            Some(AgentSessionId::parse_str("00000000-0000-4000-8000-000000000101").unwrap());
+        record.agent_transcript_cwd = Some(PathBuf::from("/tmp/transcripts"));
+        record.resume_of_dispatch_id = Some("previous-dispatch".to_string());
         registry.insert(&record).await.unwrap();
 
         let fetched = registry.get("full-test").await.unwrap().unwrap();
@@ -1770,6 +1900,11 @@ mod tests {
         assert_eq!(fetched.checks, record.checks);
         assert_eq!(fetched.no_worktree, record.no_worktree);
         assert_eq!(fetched.original_input, record.original_input);
+        assert_eq!(fetched.agent_provider, record.agent_provider);
+        assert_eq!(fetched.agent_session_id, record.agent_session_id);
+        assert_eq!(fetched.agent_transcript_cwd, record.agent_transcript_cwd);
+        assert_eq!(fetched.resume_of_dispatch_id, record.resume_of_dispatch_id);
+        assert_eq!(fetched.agent_capabilities, record.agent_capabilities);
     }
 
     // --- Error path tests ---
@@ -2141,6 +2276,102 @@ mod tests {
             vec!["https://github.com/org/repo/pull/42"],
             "migration should backfill pr_urls from pr_url"
         );
+        assert_eq!(record.agent_provider, "claude");
+        assert!(record.agent_session_id.is_none());
+        assert!(record.agent_transcript_cwd.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_metadata_migration_handles_partial_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("partial-agent-columns.db");
+
+        {
+            let url = format!("sqlite:{}?mode=rwc", db_path.display());
+            let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+            sqlx::query(
+                r#"CREATE TABLE dispatches (
+                    id TEXT PRIMARY KEY,
+                    task_slug TEXT,
+                    branch TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    session TEXT NOT NULL,
+                    log_file TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    directive TEXT NOT NULL,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    resolver TEXT NOT NULL,
+                    pr_url TEXT,
+                    pr_urls TEXT NOT NULL DEFAULT '[]',
+                    no_worktree INTEGER NOT NULL DEFAULT 0,
+                    original_input TEXT,
+                    kb_root TEXT,
+                    check_agent_exited_clean INTEGER NOT NULL DEFAULT 0,
+                    check_branch_pushed INTEGER NOT NULL DEFAULT 0,
+                    check_pr_created INTEGER NOT NULL DEFAULT 0,
+                    check_ci_passed INTEGER NOT NULL DEFAULT 0,
+                    check_reviews_approved INTEGER NOT NULL DEFAULT 0,
+                    check_threads_resolved INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL,
+                    num_turns INTEGER,
+                    duration_ms INTEGER,
+                    artifacts TEXT,
+                    work_unit_id TEXT,
+                    agent_provider TEXT NOT NULL DEFAULT 'claude',
+                    agent_session_id TEXT,
+                    dispatched_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                r#"INSERT INTO dispatches (
+                    id, task_slug, branch, worktree_path, session, log_file, status,
+                    directive, retries, resolver, pr_urls, agent_provider,
+                    agent_session_id, dispatched_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"#,
+            )
+            .bind("partial-agent-id")
+            .bind("tasks/partial")
+            .bind("tasks--partial")
+            .bind("/tmp/partial")
+            .bind("partial-session")
+            .bind("/tmp/partial.jsonl")
+            .bind("running")
+            .bind("implement")
+            .bind(0i32)
+            .bind("task")
+            .bind("[]")
+            .bind("claude")
+            .bind("00000000-0000-4000-8000-000000000777")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            pool.close().await;
+        }
+
+        let registry = SqliteRegistry::open(&db_path).await.unwrap();
+        let record = registry.get("partial-agent-id").await.unwrap().unwrap();
+
+        assert_eq!(record.agent_provider, "claude");
+        assert_eq!(
+            record
+                .agent_session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("00000000-0000-4000-8000-000000000777")
+        );
+        assert!(record.agent_transcript_cwd.is_none());
+        assert!(record.resume_of_dispatch_id.is_none());
+        assert!(record.agent_capabilities.is_none());
     }
 
     #[tokio::test]
@@ -2445,6 +2676,9 @@ mod tests {
             fetched.original_input, None,
             "original_input should default to None"
         );
+        assert_eq!(fetched.agent_provider, "claude");
+        assert!(fetched.agent_session_id.is_none());
+        assert!(fetched.agent_transcript_cwd.is_none());
     }
 
     // ========== Queue tests ==========

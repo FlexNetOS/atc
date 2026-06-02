@@ -264,20 +264,8 @@ mod tests {
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status,
             directive: Directive::Implement,
-            retries: 0,
             resolver: "task".to_string(),
-            pr_urls: vec![],
-            no_worktree: false,
-            original_input: None,
-            checks: HealthChecks::default(),
-            kb_root: None,
-            cost_usd: None,
-            num_turns: None,
-            duration_ms: None,
-            artifacts: None,
-            work_unit_id: None,
-            dispatched_at: Utc::now(),
-            updated_at: Utc::now(),
+            ..crate::test_support::dispatch_record_fixture()
         }
     }
 

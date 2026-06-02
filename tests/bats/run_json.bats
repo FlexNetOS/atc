@@ -67,6 +67,10 @@ run_split() {
     echo "$STDOUT" | jq -e '.data.is_dry_run == true' >/dev/null
     echo "$STDOUT" | jq -e '.data.status == "preview"' >/dev/null
     echo "$STDOUT" | jq -e '.data.log_file == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_provider == "claude"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data | has("agent_capabilities_json") | not' >/dev/null
     echo "$STDOUT" | jq -e '.data.dispatched_at | type == "string"' >/dev/null
 }
 
@@ -97,6 +101,40 @@ run_split() {
 
     echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
     echo "$STDOUT" | jq -e '.data.is_dry_run == true' >/dev/null
+}
+
+@test "atc run --json --inline emits durable agent session metadata" {
+    require_jq
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    mkdir -p "$TEST_TMPDIR/workspace" "$TEST_TMPDIR/bin"
+
+    cat > "$TEST_TMPDIR/bin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$ATC_ARG_CAPTURE"
+cat >/dev/null
+printf '%s\n' '{"type":"result","subtype":"success","total_cost_usd":0.01,"num_turns":1,"duration_ms":10}'
+exit 0
+SH
+    chmod +x "$TEST_TMPDIR/bin/claude"
+    export PATH="$TEST_TMPDIR/bin:$PATH"
+    export ATC_ARG_CAPTURE="$TEST_TMPDIR/claude.args"
+
+    cd "$TEST_TMPDIR/workspace"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Fix the auth bug" --directive implement --inline --no-worktree --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.is_dry_run == false' >/dev/null
+    echo "$STDOUT" | jq -e '.data.status == "done"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_provider == "claude"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id != .data.session' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_transcript_cwd | type == "string"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_resume_by_session_id == true' >/dev/null
+    echo "$STDOUT" | jq -e '.data | has("agent_capabilities_json") | not' >/dev/null
+    [ "$(grep -c -- '^--session-id$' "$ATC_ARG_CAPTURE")" -eq 1 ]
+    grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' "$ATC_ARG_CAPTURE"
 }
 
 # ---------------------------------------------------------------------------

@@ -86,7 +86,7 @@ Continuous: atc daemon --source ready -> kb_ready -> enqueue -> drain -> pipelin
    - **KB Context** — fetches related documents and active context from GitKB
    - **Rebase** — detects if branch is behind default branch, exports `default_branch` and `rebase_behind_count` as template variables for use in partials
 
-5. **Agent Execution** — spawns `claude` in a tmux session (detached) or inline (synchronous for CI). Stream-json output is logged to JSONL files.
+5. **Agent Execution** — spawns `claude` in a tmux session (detached) or inline (synchronous for CI). ATC records its own session name separately from Claude's provider session UUID, which is passed with `--session-id` for future resume support. Stream-json output is logged to JSONL files.
 
 6. **Post-Completion** — extracts artifacts from stream-json logs (cost, PR URLs, commits, summary), updates registry, sends notifications (macOS + webhook), and auto-cleans worktrees on PR merge.
 
@@ -484,6 +484,11 @@ CREATE TABLE dispatches (
   branch TEXT NOT NULL,
   worktree_path TEXT NOT NULL,
   session TEXT NOT NULL,
+  agent_provider TEXT NOT NULL DEFAULT 'claude',
+  agent_session_id TEXT,
+  agent_transcript_cwd TEXT,
+  resume_of_dispatch_id TEXT,
+  agent_capabilities_json TEXT,
   log_file TEXT NOT NULL,
   status TEXT NOT NULL,         -- running, done, failed, needs-review, needs-human, stopped, retrying
   directive TEXT NOT NULL,
@@ -491,6 +496,8 @@ CREATE TABLE dispatches (
   ...
 );
 ```
+
+`session` is ATC's tmux/log session name and remains the value used by `atc watch`, `atc logs`, `atc stop`, and `atc redirect`. `agent_session_id` is the provider-native Claude conversation UUID used for resume-capable agent features.
 
 ## Competitive Comparison (as of March 2026)
 

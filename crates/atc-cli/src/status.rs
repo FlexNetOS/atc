@@ -588,7 +588,7 @@ pub async fn run_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atc_core::types::{Directive, HealthChecks};
+    use atc_core::types::Directive;
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
 
@@ -602,22 +602,14 @@ mod tests {
             log_file: PathBuf::from("/tmp/test.jsonl"),
             status,
             directive: Directive::Implement,
-            retries: 0,
             resolver: "task".to_string(),
-            pr_urls: vec![],
-            no_worktree: false,
-            original_input: None,
-            checks: HealthChecks::default(),
-            kb_root: None,
             cost_usd: Some(1.50),
             num_turns: Some(10),
             duration_ms: Some(592_000),
-            artifacts: None,
-            work_unit_id: None,
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            updated_at: Utc::now(),
+            ..crate::test_support::dispatch_record_fixture()
         }
     }
 

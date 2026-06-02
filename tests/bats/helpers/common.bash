@@ -96,11 +96,14 @@ CREATE TABLE IF NOT EXISTS dispatches (
   session                   TEXT NOT NULL,
   log_file                  TEXT NOT NULL,
   status                    TEXT NOT NULL DEFAULT 'running',
-  mode                      TEXT NOT NULL,
+  directive                 TEXT NOT NULL,
   retries                   INTEGER NOT NULL DEFAULT 0,
   resolver                  TEXT NOT NULL,
   pr_url                    TEXT,
+  pr_urls                   TEXT NOT NULL DEFAULT '[]',
   no_worktree               INTEGER NOT NULL DEFAULT 0,
+  original_input            TEXT,
+  kb_root                   TEXT,
   check_agent_exited_clean  INTEGER NOT NULL DEFAULT 0,
   check_branch_pushed       INTEGER NOT NULL DEFAULT 0,
   check_pr_created          INTEGER NOT NULL DEFAULT 0,
@@ -111,6 +114,12 @@ CREATE TABLE IF NOT EXISTS dispatches (
   num_turns                 INTEGER,
   duration_ms               INTEGER,
   artifacts                 TEXT,
+  work_unit_id              TEXT,
+  agent_provider            TEXT NOT NULL DEFAULT 'claude',
+  agent_session_id          TEXT,
+  agent_transcript_cwd      TEXT,
+  resume_of_dispatch_id     TEXT,
+  agent_capabilities_json   TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );
@@ -131,7 +140,7 @@ insert_test_dispatch() {
     local now
     now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
     sqlite3 "$db" <<SQL
-INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, mode, retries, resolver, dispatched_at, updated_at)
+INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, directive, retries, resolver, dispatched_at, updated_at)
 VALUES ('${id//\'/\'\'}', '${task_slug//\'/\'\'}', 'test-branch', '${TEST_TMPDIR//\'/\'\'}/worktree', '${id//\'/\'\'}', '${TEST_TMPDIR//\'/\'\'}/${id//\'/\'\'}.jsonl', '${status//\'/\'\'}', '${mode//\'/\'\'}', ${retries}, 'task', '$now', '$now');
 SQL
 }

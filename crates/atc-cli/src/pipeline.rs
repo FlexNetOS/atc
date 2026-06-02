@@ -4,7 +4,8 @@ use atc_core::executor::{AgentExecutor, AgentOpts};
 use atc_core::registry::Registry;
 use atc_core::resolver::InputResolver;
 use atc_core::types::{
-    Directive, DispatchOutcome, DispatchRecord, HealthChecks, RunOpts, Status, WorktreePolicy,
+    AgentCapabilities, AgentSessionMetadata, Directive, DispatchOutcome, DispatchRecord,
+    HealthChecks, RunOpts, Status, WorktreePolicy,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -50,6 +51,11 @@ pub struct DispatchEnvelope<'a> {
     pub resolver: &'a str,
     pub pr_urls: Vec<&'a str>,
     pub log_file: Option<String>,
+    pub agent_provider: &'a str,
+    pub agent_session_id: Option<String>,
+    pub agent_transcript_cwd: Option<String>,
+    pub resume_of_dispatch_id: Option<&'a str>,
+    pub agent_capabilities: Option<&'a AgentCapabilities>,
     pub is_dry_run: bool,
     pub inline_exit_code: Option<i32>,
     pub dispatched_at: DateTime<Utc>,
@@ -402,6 +408,7 @@ impl<'a> DispatchPipeline<'a> {
                 _ => process_cwd.clone(),
             };
             let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
+            let agent_metadata = AgentSessionMetadata::claude_without_session();
 
             // Security invariants (mirrors step 8 in the normal path):
             // clear CLAUDECODE to prevent recursive agent-spawning,
@@ -422,6 +429,7 @@ impl<'a> DispatchPipeline<'a> {
                 env,
                 session_name: resolved.dispatch_id.clone(),
                 dispatch_id: resolved.dispatch_id.clone(),
+                agent_session_id: agent_metadata.session_id,
                 sandbox: false,
                 inline: true,
                 max_turns: turns,
@@ -465,6 +473,14 @@ impl<'a> DispatchPipeline<'a> {
                         resolver: resolver.name(),
                         pr_urls,
                         log_file: None,
+                        agent_provider: &agent_metadata.provider,
+                        agent_session_id: agent_metadata.session_id.map(|id| id.to_string()),
+                        agent_transcript_cwd: agent_metadata
+                            .transcript_cwd
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.as_deref(),
+                        agent_capabilities: agent_metadata.capabilities.as_ref(),
                         is_dry_run: false,
                         inline_exit_code: handle.inline_exit_code,
                         dispatched_at: Utc::now(),
@@ -1006,6 +1022,7 @@ impl<'a> DispatchPipeline<'a> {
                 resolved.branch
             ))
         };
+        let agent_metadata = AgentSessionMetadata::new_claude(worktree_path.clone());
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
@@ -1015,6 +1032,7 @@ impl<'a> DispatchPipeline<'a> {
             env,
             session_name: session_name.clone(),
             dispatch_id: resolved.dispatch_id.clone(),
+            agent_session_id: agent_metadata.session_id,
             sandbox: dispatch_cfg.sandbox,
             inline: opts.inline,
             max_turns: turns,
@@ -1092,9 +1110,20 @@ impl<'a> DispatchPipeline<'a> {
             duration_ms: None,
             artifacts: None,
             work_unit_id,
+            agent_provider: agent_metadata.provider.clone(),
+            agent_session_id: agent_metadata.session_id,
+            agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
+            resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
+            agent_capabilities: agent_metadata.capabilities.clone(),
             dispatched_at: now,
             updated_at: now,
         };
+        info!(
+            id = %resolved.dispatch_id,
+            agent_provider = %record.agent_provider,
+            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
+            "registered agent session metadata"
+        );
         if let Err(e) = self.registry.insert(&record).await {
             warn!(id = %resolved.dispatch_id, error = %e, "registry insert failed; killing orphan session");
             let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
@@ -1156,6 +1185,14 @@ impl<'a> DispatchPipeline<'a> {
                     resolver: resolver.name(),
                     pr_urls,
                     log_file: Some(log_file.to_string_lossy().into_owned()),
+                    agent_provider: &record.agent_provider,
+                    agent_session_id: record.agent_session_id.map(|id| id.to_string()),
+                    agent_transcript_cwd: record
+                        .agent_transcript_cwd
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    resume_of_dispatch_id: record.resume_of_dispatch_id.as_deref(),
+                    agent_capabilities: record.agent_capabilities.as_ref(),
                     is_dry_run: false,
                     inline_exit_code: handle.inline_exit_code,
                     dispatched_at: now,
@@ -1237,6 +1274,11 @@ impl<'a> DispatchPipeline<'a> {
             duration_ms: None,
             artifacts: None,
             work_unit_id: None,
+            agent_provider: AgentSessionMetadata::claude_without_session().provider,
+            agent_session_id: None,
+            agent_transcript_cwd: None,
+            resume_of_dispatch_id: None,
+            agent_capabilities: None,
             dispatched_at: now,
             updated_at: now,
         }
@@ -1268,6 +1310,7 @@ impl<'a> DispatchPipeline<'a> {
         );
 
         if json {
+            let agent_metadata = AgentSessionMetadata::claude_without_session();
             // Dry-run JSON mirrors the success envelope so consumers parse a
             // single shape: `is_dry_run = true` and `status = "preview"` are
             // the discriminators. `dispatch_id` is still populated (the
@@ -1289,6 +1332,11 @@ impl<'a> DispatchPipeline<'a> {
                     resolver: resolver_name,
                     pr_urls,
                     log_file: None,
+                    agent_provider: &agent_metadata.provider,
+                    agent_session_id: None,
+                    agent_transcript_cwd: None,
+                    resume_of_dispatch_id: None,
+                    agent_capabilities: agent_metadata.capabilities.as_ref(),
                     is_dry_run: true,
                     inline_exit_code: None,
                     dispatched_at: Utc::now(),
@@ -1704,6 +1752,7 @@ mod tests {
     fn test_run_output_v1_dispatch_envelope_shape() {
         // Lock the v1 success envelope so consumers (the GitKB ATC app, scripts)
         // can rely on exact field names. Renaming any of these is a v2 change.
+        let capabilities = atc_core::types::claude_agent_capabilities();
         let envelope = RunOutputV1 {
             schema_version: SCHEMA_VERSION,
             kind: "dispatch",
@@ -1719,6 +1768,11 @@ mod tests {
                 resolver: "task",
                 pr_urls: vec!["https://github.com/o/r/pull/1"],
                 log_file: Some("/tmp/logs/tasks--foo.jsonl".to_string()),
+                agent_provider: "claude",
+                agent_session_id: Some("00000000-0000-4000-8000-000000000200".to_string()),
+                agent_transcript_cwd: Some("/tmp/wt/tasks--foo".to_string()),
+                resume_of_dispatch_id: None,
+                agent_capabilities: Some(&capabilities),
                 is_dry_run: false,
                 inline_exit_code: None,
                 dispatched_at: chrono::DateTime::parse_from_rfc3339("2026-05-04T12:00:00Z")
@@ -1741,6 +1795,18 @@ mod tests {
         assert_eq!(data["resolver"], "task");
         assert_eq!(data["pr_urls"][0], "https://github.com/o/r/pull/1");
         assert_eq!(data["log_file"], "/tmp/logs/tasks--foo.jsonl");
+        assert_eq!(data["agent_provider"], "claude");
+        assert_eq!(
+            data["agent_session_id"],
+            "00000000-0000-4000-8000-000000000200"
+        );
+        assert_eq!(data["agent_transcript_cwd"], "/tmp/wt/tasks--foo");
+        assert!(data["resume_of_dispatch_id"].is_null());
+        assert_eq!(
+            data["agent_capabilities"]["supports_resume_by_session_id"],
+            true
+        );
+        assert!(data.get("agent_capabilities_json").is_none());
         assert_eq!(data["is_dry_run"], false);
         assert!(data["inline_exit_code"].is_null());
         assert_eq!(data["dispatched_at"], "2026-05-04T12:00:00Z");
@@ -1766,6 +1832,11 @@ mod tests {
                 resolver: "task",
                 pr_urls: vec![],
                 log_file: None,
+                agent_provider: "claude",
+                agent_session_id: None,
+                agent_transcript_cwd: None,
+                resume_of_dispatch_id: None,
+                agent_capabilities: None,
                 is_dry_run: true,
                 inline_exit_code: None,
                 dispatched_at: Utc::now(),
