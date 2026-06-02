@@ -9,7 +9,7 @@
 #   JOBS=8             — parallel jobs (default: 4)
 #   DEBUG=1            — show atc commands being executed
 
-.PHONY: all test setup clean
+.PHONY: all test setup clean preflight
 
 SHELL := /bin/bash
 
@@ -40,10 +40,11 @@ export ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS := $(value SETUP_LOCK_TIMEOUT_SECONDS
 
 all: test
 
-setup:
-	@mkdir -p bats
-	@lock="bats/.setup.lock"; \
+preflight:
+	@set -euo pipefail; \
 	timeout="$${ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS:-60}"; \
+	jobs="$${ATC_BATS_JOBS:-4}"; \
+	file_filter="$${ATC_BATS_FILE_FILTER:-}"; \
 	if [[ ! "$$timeout" =~ ^[0-9]+$$ ]]; then \
 		echo "error: SETUP_LOCK_TIMEOUT_SECONDS must be an integer" >&2; \
 		exit 2; \
@@ -52,6 +53,24 @@ setup:
 		echo "error: SETUP_LOCK_TIMEOUT_SECONDS must be <= 3600" >&2; \
 		exit 2; \
 	fi; \
+	if [[ ! "$$jobs" =~ ^[1-9][0-9]*$$ ]]; then \
+		echo "error: JOBS must be a positive integer" >&2; \
+		exit 2; \
+	fi; \
+	if (( $${#jobs} > 3 || 10#$$jobs > 128 )); then \
+		echo "error: JOBS must be <= 128" >&2; \
+		exit 2; \
+	fi; \
+	if [[ ! "$$file_filter" =~ ^[A-Za-z0-9_.-]*$$ ]]; then \
+		echo "error: FILE may contain only letters, numbers, '.', '_', and '-'" >&2; \
+		exit 2; \
+	fi
+
+setup: preflight
+	@set -euo pipefail; \
+	mkdir -p bats; \
+	lock="bats/.setup.lock"; \
+	timeout="$${ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS:-60}"; \
 	deadline=$$((SECONDS + 10#$$timeout)); \
 	while ! mkdir "$$lock" 2>/dev/null; do \
 		if [[ ! -f "$$lock/pid" ]] || ! kill -0 "$$(cat "$$lock/pid" 2>/dev/null)" 2>/dev/null; then \
@@ -70,7 +89,7 @@ setup:
 		if [[ ! -d "$$dir/.git" ]]; then \
 			tmp="$$dir.tmp.$$$$"; \
 			rm -rf "$$tmp"; \
-			git clone --depth 1 "$$repo" "$$tmp"; \
+			git clone --depth 1 -- "$$repo" "$$tmp"; \
 			rm -rf "$$dir"; \
 			mv "$$tmp" "$$dir"; \
 		fi; \
@@ -81,20 +100,9 @@ setup:
 	clone_dep "$$ATC_BATS_FILE_REPO" bats/bats-file
 
 test: setup
-	@jobs="$${ATC_BATS_JOBS:-4}"; \
+	@set -euo pipefail; \
+	jobs="$${ATC_BATS_JOBS:-4}"; \
 	file_filter="$${ATC_BATS_FILE_FILTER:-}"; \
-	if [[ ! "$$jobs" =~ ^[1-9][0-9]*$$ ]]; then \
-		echo "error: JOBS must be a positive integer" >&2; \
-		exit 2; \
-	fi; \
-	if (( $${#jobs} > 3 || 10#$$jobs > 128 )); then \
-		echo "error: JOBS must be <= 128" >&2; \
-		exit 2; \
-	fi; \
-	if [[ ! "$$file_filter" =~ ^[A-Za-z0-9_.-]*$$ ]]; then \
-		echo "error: FILE may contain only letters, numbers, '.', '_', and '-'" >&2; \
-		exit 2; \
-	fi; \
 	test_files=(); \
 	while IFS= read -r test_file; do \
 		test_files+=("$$test_file"); \

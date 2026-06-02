@@ -95,6 +95,9 @@ load helpers/common
     echo "$STDOUT" | jq -e '.records[0].agent_session_id == null'
     echo "$STDOUT" | jq -e '.records[0].agent_capabilities == null'
     echo "$STDOUT" | jq -e '.records[0] | has("agent_capabilities_json") | not'
+    echo "$STDERR" | grep -F "dispatch_id=disp-001"
+    echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
+    echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
     [ "$SPLIT_STATUS" -eq 0 ]
@@ -104,6 +107,9 @@ load helpers/common
     echo "$STDOUT" | jq -e '.record.agent_session_id == null'
     echo "$STDOUT" | jq -e '.record.agent_capabilities == null'
     echo "$STDOUT" | jq -e '.record | has("agent_capabilities_json") | not'
+    echo "$STDERR" | grep -F "dispatch_id=disp-001"
+    echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
+    echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
 }
 
 @test "info: shows correct fields for a dispatch" {
