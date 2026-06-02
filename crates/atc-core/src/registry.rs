@@ -38,12 +38,37 @@ pub trait Registry: Send + Sync {
     /// Insert a resumed dispatch as a pre-spawn reservation.
     ///
     /// Implementations that support concurrent writers should make the
-    /// active-session check and insert atomic when `force` is false. The default
-    /// keeps compatibility for lightweight test/backing registries.
-    async fn insert_resume_reservation(&self, record: &DispatchRecord, _force: bool) -> Result<()> {
+    /// active-session check and insert atomic when `force` is false. This
+    /// default keeps lightweight registries honest, but is not safe for
+    /// concurrent writers.
+    async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()> {
+        if !force && !record.status.is_terminal() {
+            if let Some(session_id) = record.agent_session_id {
+                for existing in self.list(StatusFilter::All).await? {
+                    if existing.id != record.id
+                        && existing.agent_provider == record.agent_provider
+                        && existing.agent_session_id == Some(session_id)
+                        && !existing.status.is_terminal()
+                    {
+                        anyhow::bail!(
+                            "provider session {session_id} is already active in dispatch {} (status {})",
+                            existing.id,
+                            existing.status
+                        );
+                    }
+                }
+            }
+        }
         self.insert(record).await
     }
     async fn update_status(&self, id: &str, status: Status) -> Result<()>;
+    async fn update_dispatch_work_unit(
+        &self,
+        _id: &str,
+        _work_unit_id: Option<&str>,
+    ) -> Result<()> {
+        anyhow::bail!("dispatch work-unit updates are not implemented for this registry backend")
+    }
     async fn update_cost(&self, id: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
     async fn get(&self, id: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
@@ -778,6 +803,22 @@ impl Registry for SqliteRegistry {
         let result =
             sqlx::query("UPDATE dispatches SET status = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for id: {id}"
+        );
+        Ok(())
+    }
+
+    async fn update_dispatch_work_unit(&self, id: &str, work_unit_id: Option<&str>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE dispatches SET work_unit_id = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(work_unit_id)
                 .bind(&now)
                 .bind(id)
                 .execute(&self.pool)
@@ -1827,6 +1868,24 @@ mod tests {
         registry.update_status(id, Status::Done).await.unwrap();
         let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_update_dispatch_work_unit() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "work-unit-link-dispatch";
+        registry.insert(&sample_record(id)).await.unwrap();
+
+        registry
+            .update_dispatch_work_unit(id, Some("wu-linked"))
+            .await
+            .unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(fetched.work_unit_id.as_deref(), Some("wu-linked"));
+
+        registry.update_dispatch_work_unit(id, None).await.unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert!(fetched.work_unit_id.is_none());
     }
 
     #[tokio::test]

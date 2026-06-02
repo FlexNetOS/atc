@@ -200,13 +200,14 @@ SQL
         run "Preview resume" --directive implement --resume tasks/test-1 --dry-run --json
     [ "$SPLIT_STATUS" -eq 0 ]
 
+    expected_cwd="$(cd "$TEST_TMPDIR/workspace" && pwd -P)"
     echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
     echo "$STDOUT" | jq -e '.data.is_dry_run == true' >/dev/null
     echo "$STDOUT" | jq -e '.data.status == "preview"' >/dev/null
     echo "$STDOUT" | jq -e '.data.resume_of_dispatch_id == "disp-resume"' >/dev/null
     echo "$STDOUT" | jq -e '.data.agent_session_id == "00000000-0000-4000-8000-000000000701"' >/dev/null
-    echo "$STDOUT" | jq -e --arg cwd "$TEST_TMPDIR/workspace" '.data.agent_transcript_cwd == $cwd' >/dev/null
-    echo "$STDOUT" | jq -e --arg cwd "$TEST_TMPDIR/workspace" '.data.worktree_path == $cwd' >/dev/null
+    echo "$STDOUT" | jq -e --arg cwd "$expected_cwd" '.data.agent_transcript_cwd == $cwd' >/dev/null
+    echo "$STDOUT" | jq -e --arg cwd "$expected_cwd" '.data.worktree_path == $cwd' >/dev/null
     echo "$STDOUT" | jq -e '.data.log_file == null' >/dev/null
 }
 

@@ -566,10 +566,13 @@ async fn test_dispatch_resume_prompt_uses_source_session_and_transcript_cwd() {
     let source_session_id = source
         .agent_session_id
         .expect("source should persist an agent session id");
-    let source_transcript_cwd = source
-        .agent_transcript_cwd
-        .clone()
-        .expect("source should persist transcript cwd");
+    let source_transcript_cwd = std::fs::canonicalize(
+        source
+            .agent_transcript_cwd
+            .clone()
+            .expect("source should persist transcript cwd"),
+    )
+    .expect("source transcript cwd should canonicalize");
     assert!(
         source_transcript_cwd.is_dir(),
         "source transcript cwd should exist"
@@ -641,7 +644,8 @@ async fn test_dispatch_resume_template_with_params_uses_source_session() {
     )
     .await;
     let source_session_id = source.agent_session_id.unwrap();
-    let source_transcript_cwd = source.agent_transcript_cwd.clone().unwrap();
+    let source_transcript_cwd =
+        std::fs::canonicalize(source.agent_transcript_cwd.clone().unwrap()).unwrap();
 
     let tmpl_dir = fix.tmp.path().join("templates");
     std::fs::create_dir_all(&tmpl_dir).unwrap();
@@ -724,7 +728,8 @@ async fn test_dispatch_resume_review_fix_with_pr_url_uses_source_session() {
     )
     .await;
     let source_session_id = source.agent_session_id.unwrap();
-    let source_transcript_cwd = source.agent_transcript_cwd.clone().unwrap();
+    let source_transcript_cwd =
+        std::fs::canonicalize(source.agent_transcript_cwd.clone().unwrap()).unwrap();
 
     let mut prompt_config = fix.config.clone();
     prompt_config.resolvers.task.enabled = false;
@@ -854,6 +859,12 @@ async fn test_dispatch_resume_rejects_malformed_source_metadata() {
     let mismatch_worktree = fix.worktree_base().join("mismatch-worktree");
     std::fs::create_dir_all(&mismatch_cwd).unwrap();
     std::fs::create_dir_all(&mismatch_worktree).unwrap();
+    let unrelated_dot_worktrees_root = tempfile::tempdir().unwrap();
+    let unrelated_dot_worktree_cwd = unrelated_dot_worktrees_root
+        .path()
+        .join(".worktrees")
+        .join("source-cwd");
+    std::fs::create_dir_all(&unrelated_dot_worktree_cwd).unwrap();
     let mut unsupported = claude_agent_capabilities();
     unsupported.supports_resume_by_session_id = false;
 
@@ -916,6 +927,13 @@ async fn test_dispatch_resume_rejects_malformed_source_metadata() {
             Some(claude_agent_capabilities()),
         ),
         dispatch_record_fixture(
+            "unrelated-dot-worktrees",
+            Status::Done,
+            unrelated_dot_worktree_cwd,
+            Some(session_id("00000000-0000-4000-8000-000000000508")),
+            Some(claude_agent_capabilities()),
+        ),
+        dispatch_record_fixture(
             "unsafe-root",
             Status::Done,
             PathBuf::from("/"),
@@ -938,6 +956,7 @@ async fn test_dispatch_resume_rejects_malformed_source_metadata() {
         ("missing-transcript-cwd", "is not accessible"),
         ("missing-transcript-field", "missing agent_transcript_cwd"),
         ("transcript-file", "is not a directory"),
+        ("unrelated-dot-worktrees", "is not under an ATC workspace"),
         ("unsafe-root", "unsafe transcript cwd"),
         ("mismatched-worktree", "does not match source worktree_path"),
     ] {
@@ -961,6 +980,108 @@ async fn test_dispatch_resume_rejects_malformed_source_metadata() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_dispatch_resume_uses_canonical_transcript_cwd_for_symlink_source() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(RecordingOptsExecutor::new(0));
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+    prompt_config.resolvers.template.enabled = false;
+
+    let real_cwd = fix.worktree_base().join("real-symlink-source");
+    let link_cwd = fix.worktree_base().join("link-symlink-source");
+    std::fs::create_dir_all(&real_cwd).unwrap();
+    std::os::unix::fs::symlink(&real_cwd, &link_cwd).unwrap();
+    let canonical_cwd = std::fs::canonicalize(&real_cwd).unwrap();
+
+    let source = dispatch_record_fixture(
+        "symlink-source",
+        Status::Done,
+        link_cwd.clone(),
+        Some(session_id("00000000-0000-4000-8000-000000000509")),
+        Some(claude_agent_capabilities()),
+    );
+    registry.insert(&source).await.unwrap();
+
+    let mut opts = default_run_opts("Continue from symlinked source", Directive::Implement);
+    opts.resume = Some(source.id.clone());
+    let outcome = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Continue from symlinked source",
+        &opts,
+    )
+    .await
+    .expect("resume should canonicalize and dispatch");
+
+    let resumed = registry.get(&outcome.id).await.unwrap().unwrap();
+    assert_eq!(resumed.worktree_path, canonical_cwd);
+    assert_eq!(
+        resumed.agent_transcript_cwd.as_deref(),
+        Some(canonical_cwd.as_path())
+    );
+
+    let captures = executor.captures.lock().await.clone();
+    let resume_capture = captures.last().expect("resume dispatch should spawn");
+    assert_eq!(resume_capture.worktree_path, canonical_cwd);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_dispatch_resume_rejects_symlink_transcript_cwd_outside_workspace_roots() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+    let mut prompt_config = fix.config.clone();
+    prompt_config.resolvers.task.enabled = false;
+    prompt_config.resolvers.template.enabled = false;
+
+    let outside = tempfile::tempdir().unwrap();
+    let outside_cwd = outside.path().join("source-cwd");
+    std::fs::create_dir_all(&outside_cwd).unwrap();
+    let link_cwd = fix.worktree_base().join("outside-symlink-source");
+    std::os::unix::fs::symlink(&outside_cwd, &link_cwd).unwrap();
+
+    let source = dispatch_record_fixture(
+        "outside-symlink-source",
+        Status::Done,
+        link_cwd,
+        Some(session_id("00000000-0000-4000-8000-000000000510")),
+        Some(claude_agent_capabilities()),
+    );
+    registry.insert(&source).await.unwrap();
+
+    let mut opts = default_run_opts("Reject outside symlink", Directive::Implement);
+    opts.dry_run = true;
+    opts.resume = Some(source.id.clone());
+    let err = dispatch_via_pipeline(
+        &prompt_config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "Reject outside symlink",
+        &opts,
+    )
+    .await
+    .expect_err("resume symlink target outside configured roots should fail");
+    assert!(
+        err.to_string().contains("is not under an ATC workspace"),
+        "unexpected symlink safety error: {err}"
+    );
+}
+
 #[tokio::test]
 async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes() {
     let _guard = PATH_MUTEX.lock().await;
@@ -979,6 +1100,15 @@ async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes()
         "tasks/gitkb-concurrent-resume",
     )
     .await;
+    let source_transcript_cwd = source.agent_transcript_cwd.clone().unwrap();
+    let mut active_units_before: Vec<String> = registry
+        .list_active_work_units()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|unit| unit.id)
+        .collect();
+    active_units_before.sort();
 
     let mut prompt_config = fix.config.clone();
     prompt_config.resolvers.task.enabled = false;
@@ -1004,6 +1134,7 @@ async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes()
 
     let mut second_opts = default_run_opts("Concurrent resume two", Directive::Implement);
     second_opts.resume = Some(source.id.clone());
+    second_opts.pr_url = Some("https://github.com/org/repo/pull/77".to_string());
     let err = dispatch_via_pipeline(
         &prompt_config,
         registry.as_ref(),
@@ -1023,6 +1154,22 @@ async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes()
         captures.len(),
         1,
         "rejected concurrent resume must not reach executor"
+    );
+    assert!(
+        !source_transcript_cwd.join(".dispatch-prefetch").exists(),
+        "rejected concurrent resume must not write provider output"
+    );
+    let mut active_units_after: Vec<String> = registry
+        .list_active_work_units()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|unit| unit.id)
+        .collect();
+    active_units_after.sort();
+    assert_eq!(
+        active_units_after, active_units_before,
+        "rejected concurrent resume must not create a work unit"
     );
 
     executor.release_resume.notify_waiters();

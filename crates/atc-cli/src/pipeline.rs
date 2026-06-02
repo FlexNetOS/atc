@@ -183,13 +183,6 @@ fn canonicalize_existing_dir(path: &Path, source_id: &str, label: &str) -> Resul
     Ok(canonical)
 }
 
-fn path_has_component(path: &Path, component: &str) -> bool {
-    path.components().any(|c| match c {
-        std::path::Component::Normal(name) => name == component,
-        _ => false,
-    })
-}
-
 fn canonical_if_exists(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
@@ -851,6 +844,65 @@ impl<'a> DispatchPipeline<'a> {
         } else {
             resolved.system_prompt.clone()
         };
+
+        let agent_metadata = resume_agent_metadata.clone().unwrap_or_else(|| {
+            claude_agent_provider().durable_session_metadata(worktree_path.clone())
+        });
+        let reserved_before_spawn = agent_metadata.resume_of_dispatch_id.is_some();
+        let now = Utc::now();
+        let mut record = DispatchRecord {
+            id: resolved.dispatch_id.clone(),
+            task_slug: resolved.task_slug.clone(),
+            branch: resolved.branch.clone(),
+            worktree_path: worktree_path.clone(),
+            session: session_name.clone(),
+            log_file: log_file.clone(),
+            status: Status::Running,
+            directive: resolved.directive.clone(),
+            retries: opts.retries,
+            resolver: resolver.name().to_string(),
+            pr_urls: effective_pr_url.iter().cloned().collect(),
+            no_worktree: opts.no_worktree,
+            original_input: Some(input.to_string()),
+            checks: HealthChecks::default(),
+            kb_root: resolved.kb_root.clone(),
+            cost_usd: None,
+            num_turns: None,
+            duration_ms: None,
+            artifacts: None,
+            work_unit_id: None,
+            agent_provider: agent_metadata.provider.clone(),
+            agent_session_id: agent_metadata.session_id,
+            agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
+            resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
+            agent_capabilities: agent_metadata.capabilities,
+            dispatched_at: now,
+            updated_at: now,
+        };
+        info!(
+            id = %resolved.dispatch_id,
+            agent_provider = %record.agent_provider,
+            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
+            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref(),
+            agent_resume = record.resume_of_dispatch_id.is_some(),
+            "registered agent session metadata"
+        );
+
+        if reserved_before_spawn {
+            if let Err(e) = self
+                .registry
+                .insert_resume_reservation(&record, opts.force)
+                .await
+            {
+                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                if wt_created {
+                    rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                }
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
+                return Err(e);
+            }
+        }
+
         if !providers.is_empty() {
             // Compute the KB workspace for providers. Document policy sets it in
             // env_overrides during step 5; for None/Current we must derive it here
@@ -1078,9 +1130,6 @@ impl<'a> DispatchPipeline<'a> {
                 resolved.branch
             ))
         };
-        let agent_metadata = resume_agent_metadata.clone().unwrap_or_else(|| {
-            claude_agent_provider().durable_session_metadata(worktree_path.clone())
-        });
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
@@ -1099,78 +1148,6 @@ impl<'a> DispatchPipeline<'a> {
             ephemeral: opts.ephemeral,
             timeout: opts.timeout,
         };
-
-        // Resume dispatches reserve the provider-native session before spawn
-        // so concurrent ATC processes cannot both start against the same
-        // Claude session. Non-resume dispatches keep the existing post-spawn
-        // insert behavior so short inline runs are recorded with their final
-        // status immediately.
-        let reserved_before_spawn = agent_metadata.resume_of_dispatch_id.is_some();
-        let work_unit_id = if reserved_before_spawn {
-            resolve_dispatch_work_unit(
-                self.registry,
-                resolved.task_slug.as_deref(),
-                &resolved.branch,
-                &effective_params,
-                &repos_for_context,
-            )
-            .await
-        } else {
-            None
-        };
-        let now = Utc::now();
-        let mut record = DispatchRecord {
-            id: resolved.dispatch_id.clone(),
-            task_slug: resolved.task_slug.clone(),
-            branch: resolved.branch.clone(),
-            worktree_path: worktree_path.clone(),
-            session: session_name.clone(),
-            log_file: log_file.clone(),
-            status: Status::Running,
-            directive: resolved.directive.clone(),
-            retries: opts.retries,
-            resolver: resolver.name().to_string(),
-            pr_urls: effective_pr_url.iter().cloned().collect(),
-            no_worktree: opts.no_worktree,
-            original_input: Some(input.to_string()),
-            checks: HealthChecks::default(),
-            kb_root: resolved.kb_root.clone(),
-            cost_usd: None,
-            num_turns: None,
-            duration_ms: None,
-            artifacts: None,
-            work_unit_id,
-            agent_provider: agent_metadata.provider.clone(),
-            agent_session_id: agent_metadata.session_id,
-            agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
-            resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
-            agent_capabilities: agent_metadata.capabilities,
-            dispatched_at: now,
-            updated_at: now,
-        };
-        info!(
-            id = %resolved.dispatch_id,
-            agent_provider = %record.agent_provider,
-            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
-            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref(),
-            agent_resume = record.resume_of_dispatch_id.is_some(),
-            "registered agent session metadata"
-        );
-
-        if reserved_before_spawn {
-            if let Err(e) = self
-                .registry
-                .insert_resume_reservation(&record, opts.force)
-                .await
-            {
-                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                if wt_created {
-                    rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
-                }
-                resolver.on_cleanup(&tmp_record, self.config, None).await;
-                return Err(e);
-            }
-        }
 
         let handle = match self.executor.spawn(&agent_opts).await {
             Ok(h) => h,
@@ -1211,6 +1188,29 @@ impl<'a> DispatchPipeline<'a> {
         record.updated_at = Utc::now();
 
         if reserved_before_spawn {
+            record.work_unit_id = resolve_dispatch_work_unit(
+                self.registry,
+                resolved.task_slug.as_deref(),
+                &resolved.branch,
+                &effective_params,
+                &repos_for_context,
+            )
+            .await;
+            if let Some(ref work_unit_id) = record.work_unit_id {
+                if let Err(e) = self
+                    .registry
+                    .update_dispatch_work_unit(&record.id, Some(work_unit_id))
+                    .await
+                {
+                    warn!(
+                        id = %record.id,
+                        work_unit_id,
+                        error = %e,
+                        "failed to attach work unit to resume dispatch (non-fatal)"
+                    );
+                    record.work_unit_id = None;
+                }
+            }
             if let Err(e) = self.registry.update_status(&record.id, status).await {
                 warn!(id = %resolved.dispatch_id, error = %e, "resume reservation status update failed");
                 return Err(e);
@@ -1456,7 +1456,6 @@ impl<'a> DispatchPipeline<'a> {
             .ok()
             .and_then(|path| canonical_if_exists(&path));
         let worktree_base = canonical_if_exists(&dispatch_cfg.resolved_worktree_base());
-        let tmp_worktrees = canonical_if_exists(Path::new("/tmp/worktrees"));
 
         let under_meta_workspace = meta_workspace_root
             .as_ref()
@@ -1464,26 +1463,15 @@ impl<'a> DispatchPipeline<'a> {
         let under_worktree_base = worktree_base
             .as_ref()
             .is_some_and(|base| transcript_cwd.starts_with(base) && transcript_cwd != *base);
-        let under_tmp_worktrees = tmp_worktrees
-            .as_ref()
-            .is_some_and(|base| transcript_cwd.starts_with(base) && transcript_cwd != *base);
-        let nested_meta_worktree = path_has_component(&transcript_cwd, ".worktrees");
 
         anyhow::ensure!(
-            under_meta_workspace
-                || under_worktree_base
-                || under_tmp_worktrees
-                || nested_meta_worktree,
+            under_meta_workspace || under_worktree_base,
             "cannot resume dispatch {}: transcript cwd '{}' is not under an ATC workspace or worktree root",
             source.id,
             transcript_cwd.display()
         );
 
-        if stored_transcript_cwd.is_absolute() {
-            Ok(stored_transcript_cwd.clone())
-        } else {
-            Ok(transcript_cwd)
-        }
+        Ok(transcript_cwd)
     }
 
     /// Build a temporary DispatchRecord for resolver cleanup before registry insertion.
