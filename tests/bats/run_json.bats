@@ -265,6 +265,55 @@ SQL
     echo "$STDOUT" | jq -e '.data.message | test("missing agent_session_id")' >/dev/null
 }
 
+@test "atc run --json --resume with unsupported provider emits error envelope" {
+    require_jq
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    init_test_db "$TEST_TMPDIR/atc.db"
+    mkdir -p "$TEST_TMPDIR/workspace"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-unsupported-provider" "tasks/test-1" "done"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET agent_provider = 'codex',
+    worktree_path = '$TEST_TMPDIR/workspace',
+    agent_session_id = '00000000-0000-4000-8000-000000000703',
+    agent_transcript_cwd = '$TEST_TMPDIR/workspace',
+    agent_capabilities_json = '{"supports_resume_by_session_id":true}'
+WHERE id = 'disp-unsupported-provider';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Resume unsupported provider" --directive implement \
+        --resume disp-unsupported-provider --dry-run --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+
+    echo "$STDOUT" | jq -e '.kind == "error"' >/dev/null
+    echo "$STDOUT" | jq -e ".data.message | test(\"provider 'codex' is not supported\")" >/dev/null
+}
+
+@test "atc run --json --resume without resume capability emits error envelope" {
+    require_jq
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    init_test_db "$TEST_TMPDIR/atc.db"
+    mkdir -p "$TEST_TMPDIR/workspace"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-unsupported-capability" "tasks/test-1" "done"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET worktree_path = '$TEST_TMPDIR/workspace',
+    agent_session_id = '00000000-0000-4000-8000-000000000704',
+    agent_transcript_cwd = '$TEST_TMPDIR/workspace',
+    agent_capabilities_json = '{"supports_resume_by_session_id":false}'
+WHERE id = 'disp-unsupported-capability';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Resume unsupported capability" --directive implement \
+        --resume disp-unsupported-capability --dry-run --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+
+    echo "$STDOUT" | jq -e '.kind == "error"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.message | test("does not support resume by session id")' >/dev/null
+}
+
 @test "atc run --json --resume rejects unsafe transcript cwd" {
     require_jq
     write_test_config "$TEST_TMPDIR/atc.toml"

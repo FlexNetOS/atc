@@ -104,6 +104,13 @@ mod tests {
             self.records.lock().unwrap().push(record.clone());
             Ok(())
         }
+        async fn insert_resume_reservation(
+            &self,
+            record: &DispatchRecord,
+            _force: bool,
+        ) -> Result<()> {
+            self.insert(record).await
+        }
         async fn update_status(&self, _id: &str, _status: Status) -> Result<()> {
             Ok(())
         }

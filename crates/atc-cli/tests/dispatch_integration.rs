@@ -7,7 +7,7 @@ use atc_core::types::{
     HealthChecks, RunOpts, Status, CLAUDE_AGENT_PROVIDER,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
@@ -74,6 +74,8 @@ struct CapturedSpawn {
     agent_invocation: AgentInvocation,
     directive: Directive,
     stdin_content: Option<String>,
+    max_turns: u32,
+    max_budget_usd: f64,
 }
 
 /// A stub executor that records execution options and returns success.
@@ -99,6 +101,8 @@ impl AgentExecutor for RecordingOptsExecutor {
             agent_invocation: opts.agent_invocation,
             directive: opts.directive.clone(),
             stdin_content: opts.stdin_content.clone(),
+            max_turns: opts.max_turns,
+            max_budget_usd: opts.max_budget_usd,
         });
 
         if let Some(ref log_file) = opts.log_file {
@@ -141,6 +145,8 @@ impl AgentExecutor for BlockingResumeExecutor {
             agent_invocation: opts.agent_invocation,
             directive: opts.directive.clone(),
             stdin_content: opts.stdin_content.clone(),
+            max_turns: opts.max_turns,
+            max_budget_usd: opts.max_budget_usd,
         });
 
         if matches!(opts.agent_invocation, AgentInvocation::Resume(_)) {
@@ -405,6 +411,15 @@ fn session_id(value: &str) -> AgentSessionId {
     AgentSessionId::parse_str(value).unwrap()
 }
 
+fn count_diag_files(log_dir: &Path) -> usize {
+    std::fs::read_dir(log_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "diag"))
+        .count()
+}
+
 fn dispatch_record_fixture(
     id: &str,
     status: Status,
@@ -583,6 +598,9 @@ async fn test_dispatch_resume_prompt_uses_source_session_and_transcript_cwd() {
 
     let mut resume_opts = default_run_opts("Follow up on the previous work", Directive::Implement);
     resume_opts.resume = Some(source.id.clone());
+    resume_opts.max_turns = Some(77);
+    resume_opts.max_budget_usd = Some(4.25);
+    resume_opts.repos = vec!["custom-repo".to_string()];
     let resumed_outcome = dispatch_via_pipeline(
         &prompt_config,
         registry.as_ref(),
@@ -610,6 +628,20 @@ async fn test_dispatch_resume_prompt_uses_source_session_and_transcript_cwd() {
         Some(source_transcript_cwd.as_path())
     );
     assert_eq!(resumed.worktree_path, source_transcript_cwd);
+    let work_unit_id = resumed
+        .work_unit_id
+        .as_deref()
+        .expect("resume dispatch should attach to a work unit");
+    let work_unit = registry
+        .get_work_unit(work_unit_id)
+        .await
+        .unwrap()
+        .expect("resume work unit should exist");
+    assert!(
+        work_unit.repos.iter().any(|repo| repo == "custom-repo"),
+        "explicit --repo context should be stored on the resume work unit: {:?}",
+        work_unit.repos
+    );
 
     let captures = executor.captures.lock().await.clone();
     assert_eq!(captures.len(), 2);
@@ -622,6 +654,8 @@ async fn test_dispatch_resume_prompt_uses_source_session_and_transcript_cwd() {
         AgentInvocation::Resume(source_session_id)
     );
     assert_eq!(captures[1].worktree_path, resumed.worktree_path);
+    assert_eq!(captures[1].max_turns, 77);
+    assert_eq!(captures[1].max_budget_usd, 4.25);
 }
 
 #[tokio::test]
@@ -1131,6 +1165,8 @@ async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes()
     });
 
     executor.resume_started.notified().await;
+    let diag_count_before_rejected_resume =
+        count_diag_files(&prompt_config.dispatch.resolved_log_dir());
 
     let mut second_opts = default_run_opts("Concurrent resume two", Directive::Implement);
     second_opts.resume = Some(source.id.clone());
@@ -1170,6 +1206,11 @@ async fn test_dispatch_resume_reserves_provider_session_before_spawn_completes()
     assert_eq!(
         active_units_after, active_units_before,
         "rejected concurrent resume must not create a work unit"
+    );
+    assert_eq!(
+        count_diag_files(&prompt_config.dispatch.resolved_log_dir()),
+        diag_count_before_rejected_resume,
+        "rejected concurrent resume must not write a diagnostic file"
     );
 
     executor.release_resume.notify_waiters();

@@ -37,30 +37,9 @@ pub trait Registry: Send + Sync {
     async fn insert(&self, record: &DispatchRecord) -> Result<()>;
     /// Insert a resumed dispatch as a pre-spawn reservation.
     ///
-    /// Implementations that support concurrent writers should make the
-    /// active-session check and insert atomic when `force` is false. This
-    /// default keeps lightweight registries honest, but is not safe for
-    /// concurrent writers.
-    async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()> {
-        if !force && !record.status.is_terminal() {
-            if let Some(session_id) = record.agent_session_id {
-                for existing in self.list(StatusFilter::All).await? {
-                    if existing.id != record.id
-                        && existing.agent_provider == record.agent_provider
-                        && existing.agent_session_id == Some(session_id)
-                        && !existing.status.is_terminal()
-                    {
-                        anyhow::bail!(
-                            "provider session {session_id} is already active in dispatch {} (status {})",
-                            existing.id,
-                            existing.status
-                        );
-                    }
-                }
-            }
-        }
-        self.insert(record).await
-    }
+    /// Implementations with concurrent writers must make the active-session
+    /// check and insert atomic when `force` is false.
+    async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()>;
     async fn update_status(&self, id: &str, status: Status) -> Result<()>;
     async fn update_dispatch_work_unit(
         &self,

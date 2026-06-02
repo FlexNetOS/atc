@@ -780,33 +780,9 @@ impl<'a> DispatchPipeline<'a> {
         let mut env = project_env;
         env.extend(resolved.env_overrides.clone());
 
-        // GH_TOKEN resolution (default only if not already set by resolver/project)
-        if !env.contains_key("GH_TOKEN") {
-            match resolve_gh_token().await {
-                Ok(token) => {
-                    env.insert("GH_TOKEN".to_string(), token);
-                }
-                Err(e) => {
-                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
-                }
-            }
-        }
-
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
-        if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
-            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-            if wt_created {
-                rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
-            }
-            resolver.on_cleanup(&tmp_record, self.config, None).await;
-            return Err(e.into());
-        }
         let log_file = log_dir.join(format!("{}.jsonl", resolved.dispatch_id));
-
-        // Write diagnostic file
-        let gh_token_present = env.contains_key("GH_TOKEN") && !env["GH_TOKEN"].is_empty();
-        write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
 
         // 7b. Run context providers (non-fatal errors logged, dispatch continues)
         let mut providers =
@@ -902,6 +878,50 @@ impl<'a> DispatchPipeline<'a> {
                 return Err(e);
             }
         }
+
+        // GH_TOKEN resolution and diagnostics happen after resume reservation
+        // so a rejected concurrent resume does not shell out or leave orphan
+        // per-dispatch files for a dispatch that never starts.
+        if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
+            if reserved_before_spawn {
+                if let Err(update_err) = self
+                    .registry
+                    .update_status(&record.id, Status::Failed)
+                    .await
+                {
+                    warn!(
+                        id = %record.id,
+                        error = %update_err,
+                        "failed to mark resume reservation failed after log directory error"
+                    );
+                }
+                record.status = Status::Failed;
+                record.updated_at = Utc::now();
+                resolver
+                    .on_cleanup(&record, self.config, Some(self.registry))
+                    .await;
+            } else {
+                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
+            }
+            if wt_created {
+                rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+            }
+            return Err(e.into());
+        }
+
+        if !env.contains_key("GH_TOKEN") {
+            match resolve_gh_token().await {
+                Ok(token) => {
+                    env.insert("GH_TOKEN".to_string(), token);
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+                }
+            }
+        }
+        let gh_token_present = env.contains_key("GH_TOKEN") && !env["GH_TOKEN"].is_empty();
+        write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
 
         if !providers.is_empty() {
             // Compute the KB workspace for providers. Document policy sets it in
@@ -1164,6 +1184,8 @@ impl<'a> DispatchPipeline<'a> {
                             "failed to mark resume reservation failed after spawn error"
                         );
                     }
+                    record.status = Status::Failed;
+                    record.updated_at = Utc::now();
                     resolver
                         .on_cleanup(&record, self.config, Some(self.registry))
                         .await;

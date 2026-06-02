@@ -246,6 +246,14 @@ mod tests {
             Ok(())
         }
 
+        async fn insert_resume_reservation(
+            &self,
+            record: &DispatchRecord,
+            _force: bool,
+        ) -> Result<()> {
+            self.insert(record).await
+        }
+
         async fn update_status(&self, id: &str, status: Status) -> Result<()> {
             let mut records = self.records.lock().unwrap();
             for r in records.iter_mut() {
