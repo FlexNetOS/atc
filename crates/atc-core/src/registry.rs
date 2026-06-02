@@ -8,6 +8,36 @@ use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+const ACTIVE_DISPATCH_STATUSES: &[Status] = &[Status::Running, Status::Retrying];
+const ACTIVE_DISPATCH_STATUS_SQL: &str = "status IN ('running', 'retrying')";
+
+fn is_active_dispatch_status(status: Status) -> bool {
+    ACTIVE_DISPATCH_STATUSES.contains(&status)
+}
+
+fn active_agent_session_index_sql() -> String {
+    format!(
+        "CREATE INDEX IF NOT EXISTS idx_dispatches_active_agent_session \
+         ON dispatches(agent_provider, agent_session_id, dispatched_at DESC, id DESC) \
+         WHERE {ACTIVE_DISPATCH_STATUS_SQL} AND agent_session_id IS NOT NULL;"
+    )
+}
+
+fn active_agent_session_query_sql(select: &str) -> String {
+    format!(
+        "{select}
+         WHERE agent_provider = ?1
+           AND agent_session_id = ?2
+           AND {ACTIVE_DISPATCH_STATUS_SQL}
+         ORDER BY dispatched_at DESC, id DESC
+         LIMIT 1"
+    )
+}
+
+fn active_task_count_query_sql() -> String {
+    format!("SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND {ACTIVE_DISPATCH_STATUS_SQL}")
+}
+
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
 pub enum StatusFilter {
@@ -53,7 +83,7 @@ pub trait Registry: Send + Sync {
             .find(|record| {
                 record.agent_provider == provider
                     && record.agent_session_id == Some(session_id)
-                    && !record.status.is_terminal()
+                    && is_active_dispatch_status(record.status)
             }))
     }
     async fn update_status(&self, id: &str, status: Status) -> Result<()>;
@@ -225,7 +255,6 @@ const CREATE_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
-    "CREATE INDEX IF NOT EXISTS idx_dispatches_active_agent_session ON dispatches(agent_provider, agent_session_id, dispatched_at DESC, id DESC) WHERE status IN ('running', 'retrying') AND agent_session_id IS NOT NULL;",
 ];
 
 const CREATE_WORK_UNITS_TABLE_SQL: &str = r#"
@@ -283,6 +312,8 @@ impl SqliteRegistry {
         for idx_sql in CREATE_INDEXES_SQL {
             sqlx::query(idx_sql).execute(pool).await?;
         }
+        let active_session_index_sql = active_agent_session_index_sql();
+        sqlx::query(&active_session_index_sql).execute(pool).await?;
         // Work units table
         sqlx::query(CREATE_WORK_UNITS_TABLE_SQL)
             .execute(pool)
@@ -763,18 +794,13 @@ impl Registry for SqliteRegistry {
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
         let result: Result<()> = async {
-            let conflict: Option<(String, String)> = sqlx::query_as(
-                "SELECT id, status FROM dispatches
-                 WHERE agent_provider = ?1
-                   AND agent_session_id = ?2
-                   AND status IN ('running', 'retrying')
-                 ORDER BY dispatched_at DESC, id DESC
-                 LIMIT 1",
-            )
-            .bind(&record.agent_provider)
-            .bind(&session_id)
-            .fetch_optional(&mut *conn)
-            .await?;
+            let active_session_query =
+                active_agent_session_query_sql("SELECT id, status FROM dispatches");
+            let conflict: Option<(String, String)> = sqlx::query_as(&active_session_query)
+                .bind(&record.agent_provider)
+                .bind(&session_id)
+                .fetch_optional(&mut *conn)
+                .await?;
 
             if let Some((id, status)) = conflict {
                 anyhow::bail!(
@@ -803,18 +829,12 @@ impl Registry for SqliteRegistry {
         provider: &str,
         session_id: AgentSessionId,
     ) -> Result<Option<DispatchRecord>> {
-        let row = sqlx::query(
-            "SELECT * FROM dispatches
-             WHERE agent_provider = ?1
-               AND agent_session_id = ?2
-               AND status IN ('running', 'retrying')
-             ORDER BY dispatched_at DESC, id DESC
-             LIMIT 1",
-        )
-        .bind(provider)
-        .bind(session_id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        let active_session_query = active_agent_session_query_sql("SELECT * FROM dispatches");
+        let row = sqlx::query(&active_session_query)
+            .bind(provider)
+            .bind(session_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
 
         match row {
             Some(ref r) => Ok(Some(Self::row_to_record(r)?)),
@@ -1522,12 +1542,11 @@ impl DispatchQueue for SqliteRegistry {
 
             // Dedup: already running in registry?
             if item.input_type == QueueInputType::Task {
-                let active_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
-                )
-                .bind(&item.input_value)
-                .fetch_one(&mut *conn)
-                .await?;
+                let active_task_count_query = active_task_count_query_sql();
+                let active_count: i64 = sqlx::query_scalar(&active_task_count_query)
+                    .bind(&item.input_value)
+                    .fetch_one(&mut *conn)
+                    .await?;
 
                 if active_count > 0 {
                     return Ok(EnqueueResult::Skipped(
@@ -2174,10 +2193,40 @@ mod tests {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let session_id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000099").unwrap();
 
-        let mut done = sample_record("active-session-done");
-        done.status = Status::Done;
-        done.agent_session_id = Some(session_id);
-        registry.insert(&done).await.unwrap();
+        for status in [
+            Status::Done,
+            Status::Failed,
+            Status::NeedsReview,
+            Status::NeedsHuman,
+            Status::Stopped,
+        ] {
+            let mut terminal = sample_record(&format!("active-session-terminal-{status}"));
+            terminal.status = status;
+            terminal.agent_session_id = Some(session_id);
+            registry.insert(&terminal).await.unwrap();
+        }
+
+        let mut retrying = sample_record("active-session-retrying");
+        retrying.status = Status::Retrying;
+        retrying.agent_session_id = Some(session_id);
+        registry.insert(&retrying).await.unwrap();
+
+        let found = registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .expect("retrying dispatch should be returned");
+        assert_eq!(found.id, "active-session-retrying");
+
+        registry
+            .update_status("active-session-retrying", Status::Done)
+            .await
+            .unwrap();
+        assert!(registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .is_none());
 
         let mut running = sample_record("active-session-running");
         running.status = Status::Running;
@@ -2200,6 +2249,25 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn test_active_dispatch_statuses_match_terminal_semantics() {
+        for status in [
+            Status::Running,
+            Status::Retrying,
+            Status::Done,
+            Status::Failed,
+            Status::NeedsReview,
+            Status::NeedsHuman,
+            Status::Stopped,
+        ] {
+            assert_eq!(
+                is_active_dispatch_status(status),
+                !status.is_terminal(),
+                "active status drift for {status}"
+            );
+        }
     }
 
     #[tokio::test]

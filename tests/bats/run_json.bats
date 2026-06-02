@@ -295,6 +295,45 @@ SQL
     [ ! -e "$TEST_TMPDIR/logs" ]
 }
 
+@test "atc run --json --resume active source emits conflict unless forced" {
+    require_jq
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    init_test_db "$TEST_TMPDIR/atc.db"
+    mkdir -p "$TEST_TMPDIR/workspace"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-active-resume" "tasks/test-1" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET agent_session_id = '00000000-0000-4000-8000-000000000707',
+    worktree_path = '$TEST_TMPDIR/workspace',
+    agent_transcript_cwd = '$TEST_TMPDIR/workspace',
+    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true}'
+WHERE id = 'disp-active-resume';
+SQL
+
+    before_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Preview active resume" --directive implement \
+        --resume disp-active-resume --dry-run --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    after_reject_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+
+    echo "$STDOUT" | jq -e '.kind == "error"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.message | test("already active")' >/dev/null
+    [ "$after_reject_count" = "$before_count" ]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Preview active resume" --directive implement \
+        --resume disp-active-resume --force --dry-run --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    after_force_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+
+    echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.is_dry_run == true' >/dev/null
+    echo "$STDOUT" | jq -e '.data.resume_of_dispatch_id == "disp-active-resume"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id == "00000000-0000-4000-8000-000000000707"' >/dev/null
+    [ "$after_force_count" = "$before_count" ]
+}
+
 # ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------
