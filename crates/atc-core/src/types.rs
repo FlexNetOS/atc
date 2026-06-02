@@ -59,6 +59,7 @@ pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
 pub struct AgentProviderDescriptor {
     pub name: &'static str,
     pub supports_durable_session_on_start: bool,
+    pub capabilities: AgentCapabilities,
 }
 
 impl AgentProviderDescriptor {
@@ -70,6 +71,21 @@ impl AgentProviderDescriptor {
                 .then(AgentSessionId::new),
             transcript_cwd: Some(transcript_cwd),
             resume_of_dispatch_id: None,
+            capabilities: Some(self.capabilities()),
+        }
+    }
+
+    pub fn resume_session_metadata(
+        &self,
+        transcript_cwd: PathBuf,
+        session_id: AgentSessionId,
+        resume_of_dispatch_id: impl Into<String>,
+    ) -> AgentSessionMetadata {
+        AgentSessionMetadata {
+            provider: self.name.to_string(),
+            session_id: Some(session_id),
+            transcript_cwd: Some(transcript_cwd),
+            resume_of_dispatch_id: Some(resume_of_dispatch_id.into()),
             capabilities: Some(self.capabilities()),
         }
     }
@@ -87,20 +103,31 @@ impl AgentProviderDescriptor {
     }
 
     pub fn capabilities(&self) -> AgentCapabilities {
-        match self.name {
-            CLAUDE_AGENT_PROVIDER => claude_agent_capabilities(),
-            _ => AgentCapabilities::default(),
-        }
+        self.capabilities
     }
 }
 
 pub const CLAUDE_AGENT_DESCRIPTOR: AgentProviderDescriptor = AgentProviderDescriptor {
     name: CLAUDE_AGENT_PROVIDER,
     supports_durable_session_on_start: true,
+    capabilities: CLAUDE_AGENT_CAPABILITIES,
 };
 
+pub static AGENT_PROVIDER_DESCRIPTORS: &[AgentProviderDescriptor] = &[CLAUDE_AGENT_DESCRIPTOR];
+
+pub fn agent_provider_descriptor(name: &str) -> Option<AgentProviderDescriptor> {
+    AGENT_PROVIDER_DESCRIPTORS
+        .iter()
+        .copied()
+        .find(|provider| provider.name == name)
+}
+
+pub fn agent_provider_descriptors() -> &'static [AgentProviderDescriptor] {
+    AGENT_PROVIDER_DESCRIPTORS
+}
+
 pub fn claude_agent_provider() -> AgentProviderDescriptor {
-    CLAUDE_AGENT_DESCRIPTOR
+    agent_provider_descriptor(CLAUDE_AGENT_PROVIDER).expect("Claude provider must be registered")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,7 +184,7 @@ impl<'de> Deserialize<'de> for AgentSessionId {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentCapabilities {
     pub supports_resume_by_session_id: bool,
@@ -168,15 +195,17 @@ pub struct AgentCapabilities {
     pub supports_cost_and_turn_reporting: bool,
 }
 
+pub const CLAUDE_AGENT_CAPABILITIES: AgentCapabilities = AgentCapabilities {
+    supports_resume_by_session_id: true,
+    supports_explicit_session_id_on_start: true,
+    supports_tmux_attach: true,
+    supports_tmux_redirect: true,
+    supports_stream_json_output: true,
+    supports_cost_and_turn_reporting: true,
+};
+
 pub fn claude_agent_capabilities() -> AgentCapabilities {
-    AgentCapabilities {
-        supports_resume_by_session_id: true,
-        supports_explicit_session_id_on_start: true,
-        supports_tmux_attach: true,
-        supports_tmux_redirect: true,
-        supports_stream_json_output: true,
-        supports_cost_and_turn_reporting: true,
-    }
+    CLAUDE_AGENT_CAPABILITIES
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,6 +569,7 @@ mod tests {
         let provider = claude_agent_provider();
         assert_eq!(provider.name, CLAUDE_AGENT_PROVIDER);
         assert!(provider.supports_durable_session_on_start);
+        assert_eq!(provider.capabilities(), claude_agent_capabilities());
 
         let metadata = provider.durable_session_metadata(PathBuf::from("/tmp/worktree"));
         assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
@@ -555,6 +585,41 @@ mod tests {
         assert!(ephemeral.session_id.is_none());
         assert!(ephemeral.transcript_cwd.is_none());
         assert!(ephemeral.capabilities.is_none());
+    }
+
+    #[test]
+    fn test_agent_provider_registry_contains_claude() {
+        let providers = agent_provider_descriptors();
+        assert_eq!(providers, &[CLAUDE_AGENT_DESCRIPTOR]);
+        assert_eq!(
+            agent_provider_descriptor(CLAUDE_AGENT_PROVIDER),
+            Some(CLAUDE_AGENT_DESCRIPTOR)
+        );
+        assert_eq!(agent_provider_descriptor("unknown"), None);
+    }
+
+    #[test]
+    fn test_agent_provider_descriptor_creates_resume_metadata() {
+        let provider = claude_agent_provider();
+        let session_id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000011").unwrap();
+
+        let metadata = provider.resume_session_metadata(
+            PathBuf::from("/tmp/worktree"),
+            session_id,
+            "dispatch-1",
+        );
+
+        assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
+        assert_eq!(metadata.session_id, Some(session_id));
+        assert_eq!(
+            metadata.transcript_cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert_eq!(
+            metadata.resume_of_dispatch_id.as_deref(),
+            Some("dispatch-1")
+        );
+        assert_eq!(metadata.capabilities, Some(claude_agent_capabilities()));
     }
 
     #[test]

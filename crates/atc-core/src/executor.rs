@@ -1164,6 +1164,29 @@ exit 0
         );
     }
 
+    #[test]
+    fn test_build_tmux_bash_body_omits_agent_session_id_when_none() {
+        let executor = ClaudeExecutor::default();
+        let opts = AgentOpts {
+            stdin_content: Some("content".to_string()),
+            agent_session_id: None,
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+
+        assert!(
+            !body.contains("--session-id"),
+            "bash body should omit Claude session id when absent, got: {}",
+            body
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_build_tmux_bash_body_escapes_session_id_and_hostile_values() {

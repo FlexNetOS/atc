@@ -1097,7 +1097,7 @@ impl<'a> DispatchPipeline<'a> {
             agent_session_id: agent_metadata.session_id,
             agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
             resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
-            agent_capabilities: agent_metadata.capabilities.clone(),
+            agent_capabilities: agent_metadata.capabilities,
             dispatched_at: now,
             updated_at: now,
         };

@@ -21,6 +21,7 @@ BATS_FILE_REPO    := https://github.com/bats-core/bats-file.git
 BATS := ./bats/bats-core/bin/bats
 JOBS ?= 4
 FILE ?=
+SETUP_LOCK_TIMEOUT_SECONDS ?= 60
 
 # Find test files, optionally filtered by FILE pattern
 TEST_FILES := $(shell find . -maxdepth 1 -name '*$(FILE)*.bats' | sort)
@@ -34,9 +35,13 @@ all: test
 setup:
 	@mkdir -p bats
 	@lock="bats/.setup.lock"; \
+	deadline=$$((SECONDS + $(SETUP_LOCK_TIMEOUT_SECONDS))); \
 	while ! mkdir "$$lock" 2>/dev/null; do \
 		if [[ ! -f "$$lock/pid" ]] || ! kill -0 "$$(cat "$$lock/pid" 2>/dev/null)" 2>/dev/null; then \
 			rm -rf "$$lock"; \
+		elif (( SECONDS >= deadline )); then \
+			echo "error: timed out waiting for BATS setup lock at $$lock" >&2; \
+			exit 1; \
 		else \
 			sleep 0.1; \
 		fi; \
