@@ -72,9 +72,13 @@ setup: preflight
 	lock="bats/.setup.lock"; \
 	timeout="$${ATC_BATS_SETUP_LOCK_TIMEOUT_SECONDS:-60}"; \
 	deadline=$$((SECONDS + 10#$$timeout)); \
-	while ! mkdir "$$lock" 2>/dev/null; do \
-		if [[ ! -f "$$lock/pid" ]] || ! kill -0 "$$(cat "$$lock/pid" 2>/dev/null)" 2>/dev/null; then \
-			rm -rf "$$lock"; \
+	while true; do \
+		if ( set -o noclobber; printf '%s\n' "$$$$" > "$$lock" ) 2>/dev/null; then \
+			break; \
+		fi; \
+		owner="$$(cat "$$lock" 2>/dev/null || true)"; \
+		if [[ "$$owner" =~ ^[0-9]+$$ ]] && ! kill -0 "$$owner" 2>/dev/null; then \
+			rm -f "$$lock"; \
 		elif (( SECONDS >= deadline )); then \
 			echo "error: timed out waiting for BATS setup lock at $$lock" >&2; \
 			exit 1; \
@@ -82,16 +86,21 @@ setup: preflight
 			sleep 0.1; \
 		fi; \
 	done; \
-	echo "$$$$" > "$$lock/pid"; \
-	trap 'rm -rf "$$lock"' EXIT; \
+	trap 'rm -f "$$lock"' EXIT; \
 	clone_dep() { \
 		local repo="$$1" dir="$$2" tmp; \
 		if [[ ! -d "$$dir/.git" ]]; then \
 			tmp="$$dir.tmp.$$$$"; \
 			rm -rf "$$tmp"; \
-			git clone --depth 1 -- "$$repo" "$$tmp"; \
+			if ! git clone --depth 1 -- "$$repo" "$$tmp"; then \
+				rm -rf "$$tmp"; \
+				return 1; \
+			fi; \
 			rm -rf "$$dir"; \
-			mv "$$tmp" "$$dir"; \
+			if ! mv "$$tmp" "$$dir"; then \
+				rm -rf "$$tmp"; \
+				return 1; \
+			fi; \
 		fi; \
 	}; \
 	clone_dep "$$ATC_BATS_CORE_REPO" bats/bats-core; \

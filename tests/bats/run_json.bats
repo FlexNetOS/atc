@@ -48,7 +48,8 @@ load helpers/common
     echo "$STDOUT" | jq -e '.data.log_file == null' >/dev/null
     echo "$STDOUT" | jq -e '.data.agent_provider == "claude"' >/dev/null
     echo "$STDOUT" | jq -e '.data.agent_session_id == null' >/dev/null
-    echo "$STDOUT" | jq -e '.data.agent_capabilities == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_resume_by_session_id == true' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_explicit_session_id_on_start == true' >/dev/null
     echo "$STDOUT" | jq -e '.data | has("agent_capabilities_json") | not' >/dev/null
     echo "$STDOUT" | jq -e '.data.dispatched_at | type == "string"' >/dev/null
 }

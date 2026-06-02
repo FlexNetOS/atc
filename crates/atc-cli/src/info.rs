@@ -237,6 +237,7 @@ mod tests {
         assert!(!output.contains("cost_usd:"));
         assert!(!output.contains("agent_session_id:"));
         assert!(!output.contains("agent_transcript_cwd:"));
+        assert!(!output.contains("resume_of_dispatch_id:"));
         assert!(output.contains("id:"));
         assert!(output.contains("checks:"));
     }

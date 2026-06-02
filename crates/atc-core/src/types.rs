@@ -98,7 +98,7 @@ impl AgentProviderDescriptor {
             session_id: None,
             transcript_cwd: None,
             resume_of_dispatch_id: None,
-            capabilities: None,
+            capabilities: Some(self.capabilities),
         }
     }
 
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(ephemeral.provider, CLAUDE_AGENT_PROVIDER);
         assert!(ephemeral.session_id.is_none());
         assert!(ephemeral.transcript_cwd.is_none());
-        assert!(ephemeral.capabilities.is_none());
+        assert_eq!(ephemeral.capabilities, Some(claude_agent_capabilities()));
     }
 
     #[test]
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(metadata.provider, CLAUDE_AGENT_PROVIDER);
         assert!(metadata.session_id.is_none());
         assert!(metadata.transcript_cwd.is_none());
-        assert!(metadata.capabilities.is_none());
+        assert_eq!(metadata.capabilities, Some(claude_agent_capabilities()));
     }
 
     #[test]

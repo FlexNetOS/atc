@@ -37,6 +37,18 @@ teardown() {
     assert_file_not_exists "$sentinel"
 }
 
+@test "make setup does not reap an initializing lockfile" {
+    local sandbox="$TEST_TMPDIR/make-sandbox-lock"
+    mkdir -p "$sandbox/bats"
+    : > "$sandbox/bats/.setup.lock"
+
+    run make -f "$BATS_TEST_DIRNAME/Makefile" -C "$sandbox" setup \
+        SETUP_LOCK_TIMEOUT_SECONDS=0
+
+    assert_failure
+    assert_file_exists "$sandbox/bats/.setup.lock"
+}
+
 @test "make test treats make functions in JOBS as data" {
     local sentinel="$TEST_TMPDIR/jobs-make-pwned"
     local payload="\$(shell touch $sentinel)"
@@ -124,4 +136,7 @@ teardown() {
 
     assert_failure
     assert_file_not_exists "$sentinel"
+    if compgen -G "$sandbox/bats/bats-core.tmp.*" >/dev/null; then
+        fail "failed clone left a temporary dependency directory"
+    fi
 }

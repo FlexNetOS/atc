@@ -111,7 +111,8 @@ SH
     echo "$STDOUT" | jq -e '.data.agent_provider == "claude"' >/dev/null
     echo "$STDOUT" | jq -e '.data.agent_session_id == null' >/dev/null
     echo "$STDOUT" | jq -e '.data.agent_transcript_cwd == null' >/dev/null
-    echo "$STDOUT" | jq -e '.data.agent_capabilities == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_resume_by_session_id == true' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_capabilities.supports_stream_json_output == true' >/dev/null
     [[ "$STDOUT" != *"--session-id"* ]]
     if grep -q -- "--session-id" "$ATC_ARG_CAPTURE"; then
         fail "ephemeral dispatch passed --session-id to claude"

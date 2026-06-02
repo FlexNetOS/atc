@@ -300,33 +300,20 @@ impl<'a> DispatchPipeline<'a> {
 
             // Resolve document workspace so the preview path matches dispatch.
             let effective_workspace_root = if worktree_policy == WorktreePolicy::Document {
-                let slug = resolved
-                    .task_slug
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        effective_params
-                            .get("task")
-                            .map(|s| s.as_str())
-                            .filter(|s| !s.is_empty())
-                    })
-                    .or_else(|| {
-                        effective_params
-                            .get("slug")
-                            .map(|s| s.as_str())
-                            .filter(|s| !s.is_empty())
-                    });
-                if let Some(slug) = slug {
-                    let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
-                    let worktree_base = dispatch_cfg.resolved_worktree_base();
-                    match resolve_document_workspace(slug, kb_root, &worktree_base, &workspace_root)
-                        .await
-                    {
-                        Ok(Some(doc_ws)) => doc_ws.cwd,
-                        _ => workspace_root.clone(),
-                    }
-                } else {
-                    workspace_root.clone()
+                let slug = document_policy_slug(&resolved, &effective_params).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "worktree: document requires a task or slug parameter to resolve \
+                         the document workspace (set --param task=<slug> or use a task dispatch)"
+                    )
+                })?;
+                validate_document_policy_slug(slug)?;
+                let kb_root = resolved.kb_root.as_deref().unwrap_or(&workspace_root);
+                let worktree_base = dispatch_cfg.resolved_worktree_base();
+                match resolve_document_workspace(slug, kb_root, &worktree_base, &workspace_root)
+                    .await?
+                {
+                    Some(doc_ws) => doc_ws.cwd,
+                    None => workspace_root.clone(),
                 }
             } else {
                 workspace_root.clone()
@@ -1862,6 +1849,7 @@ mod tests {
         // Dry-run envelopes are the same shape as the success envelope but
         // discriminate via `is_dry_run = true` and `status = "preview"` so
         // consumers don't insert citations for previews.
+        let capabilities = atc_core::types::claude_agent_capabilities();
         let envelope = RunOutputV1 {
             schema_version: SCHEMA_VERSION,
             kind: "dispatch",
@@ -1881,7 +1869,7 @@ mod tests {
                 agent_session_id: None,
                 agent_transcript_cwd: None,
                 resume_of_dispatch_id: None,
-                agent_capabilities: None,
+                agent_capabilities: Some(&capabilities),
                 is_dry_run: true,
                 inline_exit_code: None,
                 dispatched_at: Utc::now(),
@@ -1891,6 +1879,10 @@ mod tests {
         assert_eq!(json["data"]["is_dry_run"], true);
         assert_eq!(json["data"]["status"], "preview");
         assert!(json["data"]["log_file"].is_null());
+        assert_eq!(
+            json["data"]["agent_capabilities"]["supports_resume_by_session_id"],
+            true
+        );
     }
 
     #[test]
