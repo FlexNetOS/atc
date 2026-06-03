@@ -25,7 +25,7 @@ help:
 	@echo "Installation:"
 	@echo "  make install       - Install atc to ~/.cargo/bin"
 	@echo "  make uninstall     - Remove atc from ~/.cargo/bin"
-	@echo "  make install-hooks - Install pre-commit and pre-push hooks"
+	@echo "  make install-hooks - Install commit-msg, pre-commit, and pre-push hooks"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  make doc        - Generate documentation"
@@ -117,16 +117,18 @@ uninstall:
 	cargo uninstall atc-cli 2>/dev/null || true
 	@echo "atc uninstalled."
 
-# Install git hooks (pre-push runs CI checks locally)
+# Install git hooks (commit-msg validates release-safe subjects; pre-push runs CI checks locally)
 # Uses git rev-parse to handle worktrees and submodules correctly
 install-hooks:
 	@echo "Installing git hooks..."
+	@chmod +x .githooks/commit-msg
 	@chmod +x scripts/hooks/pre-push
 	@chmod +x .githooks/pre-commit
 	@mkdir -p "$$(git rev-parse --git-path hooks)"
+	@ln -sf "$$(pwd)/.githooks/commit-msg" "$$(git rev-parse --git-path hooks)/commit-msg"
 	@ln -sf "$$(pwd)/scripts/hooks/pre-push" "$$(git rev-parse --git-path hooks)/pre-push"
 	@ln -sf "$$(pwd)/.githooks/pre-commit" "$$(git rev-parse --git-path hooks)/pre-commit"
-	@echo "Hooks installed. CI checks will run before each push."
+	@echo "Commit-msg, pre-commit, and pre-push hooks installed. Commit subjects and CI checks will run locally."
 
 # =============================================================================
 # Cleanup
