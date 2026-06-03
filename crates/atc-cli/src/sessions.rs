@@ -31,6 +31,7 @@ use crate::status::{format_pr_list, DEFAULT_STATUSES};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_RECENT_TERMINAL_HOURS: i64 = 24;
 
 #[derive(Debug, Clone)]
 pub struct SessionsOpts {
@@ -337,6 +338,16 @@ pub fn build_snapshot(
     filter: &SessionFilter,
     group: SessionGroupBy,
 ) -> SessionSnapshot {
+    build_snapshot_at(records, work_units, filter, group, Utc::now())
+}
+
+fn build_snapshot_at(
+    records: Vec<DispatchRecord>,
+    work_units: Vec<WorkUnit>,
+    filter: &SessionFilter,
+    group: SessionGroupBy,
+    now: DateTime<Utc>,
+) -> SessionSnapshot {
     let work_unit_ids: HashSet<String> = records
         .iter()
         .filter_map(|record| record.work_unit_id.clone())
@@ -353,7 +364,7 @@ pub fn build_snapshot(
 
     let mut rows: Vec<SessionRow> = records
         .into_iter()
-        .filter(|record| record_matches_filter(record, &work_units_by_id, filter))
+        .filter(|record| record_matches_filter(record, &work_units_by_id, filter, now))
         .map(|record| row_from_record(record, &work_units_by_id, group))
         .collect();
     rows.sort_by(|a, b| {
@@ -455,6 +466,7 @@ fn record_matches_filter(
     record: &DispatchRecord,
     work_units_by_id: &HashMap<String, WorkUnit>,
     filter: &SessionFilter,
+    now: DateTime<Utc>,
 ) -> bool {
     if let Some(task) = filter.task.as_deref() {
         if task_slug_for_record(record, work_units_by_id) != Some(task) {
@@ -480,8 +492,13 @@ fn record_matches_filter(
         if record.status != status {
             return false;
         }
-    } else if !filter.all && !DEFAULT_STATUSES.contains(&record.status) {
-        return false;
+    } else if !filter.all {
+        let recent_terminal_cutoff = now - ChronoDuration::hours(DEFAULT_RECENT_TERMINAL_HOURS);
+        let recent_terminal =
+            record.status.is_terminal() && record.updated_at >= recent_terminal_cutoff;
+        if !DEFAULT_STATUSES.contains(&record.status) && !recent_terminal {
+            return false;
+        }
     }
     if let Some(search) = filter.search.as_deref() {
         let needle = search.to_ascii_lowercase();
@@ -623,19 +640,40 @@ pub fn render_once(snapshot: &SessionSnapshot, now: DateTime<Utc>) -> String {
 
     for row in &snapshot.rows {
         table.add_row(vec![
-            row.group_key.clone(),
-            row.display_task().to_string(),
-            row.provider.clone(),
+            display_text(&row.group_key),
+            display_text(row.display_task()),
+            display_text(&row.provider),
             row.status.as_str().to_string(),
             format_age(now, row.updated_at),
             format_cost(row.cost_usd),
-            truncate_middle(&row.session, 40),
+            truncate_middle(&display_text(&row.session), 40),
             enabled_action_labels(&row.actions).join(","),
         ]);
     }
 
     out.push_str(&table.to_string());
     out.push('\n');
+    out
+}
+
+fn display_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {
+                let code = ch as u32;
+                if code <= 0xff {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else {
+                    out.push_str(&format!("\\u{{{code:x}}}"));
+                }
+            }
+            ch => out.push(ch),
+        }
+    }
     out
 }
 
@@ -1247,8 +1285,9 @@ where
         Ok(message) => message,
         Err(e) => format!("action failed: {e}"),
     };
+    let display_message = display_text(&message);
     eprintln!();
-    eprintln!("{message}");
+    eprintln!("{display_message}");
     eprint!("Press Enter to return to atc sessions...");
     let _ = io::stderr().flush();
     let mut line = String::new();
@@ -1445,7 +1484,13 @@ fn render_header(frame: &mut Frame<'_>, app: &SessionsApp, area: Rect) {
     let filter = app
         .filter_input
         .as_ref()
-        .map(|edit| format!("editing {}: {}", edit.field.label(), edit.value))
+        .map(|edit| {
+            format!(
+                "editing {}: {}",
+                edit.field.label(),
+                display_text(&edit.value)
+            )
+        })
         .unwrap_or_else(|| {
             "filters: / search  t task  w work-unit  b branch  p provider  S status  A all  g group"
                 .to_string()
@@ -1485,13 +1530,17 @@ fn render_rows(frame: &mut Frame<'_>, app: &SessionsApp, area: Rect) {
     );
 
     let rows = app.snapshot.rows.iter().map(|row| {
-        let task = format!("{}  {}", row.display_task(), row.display_work_unit());
+        let task = format!(
+            "{}  {}",
+            display_text(row.display_task()),
+            display_text(row.display_work_unit())
+        );
         Row::new(vec![
             Cell::from(task),
-            Cell::from(row.provider.clone()),
+            Cell::from(display_text(&row.provider)),
             Cell::from(row.status.as_str().to_string()),
             Cell::from(format_cost(row.cost_usd)),
-            Cell::from(truncate_middle(&row.session, 42)),
+            Cell::from(truncate_middle(&display_text(&row.session), 42)),
         ])
     });
 
@@ -1531,7 +1580,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &SessionsApp, area: Rect) {
             "Enter details  l logs  f follow  a attach  R resume  d redirect  s stop  c cleanup  / search  t/w/b/p/S filters  A all  g group  r refresh  q quit".to_string(),
         ];
         if let Some(message) = &app.message {
-            lines.push(message.clone());
+            lines.push(display_text(message));
         }
         lines.join("\n")
     };
@@ -1568,19 +1617,19 @@ fn detail_text(row: &SessionRow) -> String {
         .join(", ");
     format!(
         "id: {}\ntask: {}\nwork_unit: {}\nprovider: {}  provider_session: {}\nstatus: {}  directive: {}  resolver: {}\nbranch: {}\nworktree: {}\nlog: {}\nprs: {}\nresume_of: {}\nactions: {}",
-        row.id,
-        row.display_task(),
-        row.display_work_unit(),
-        row.provider,
-        row.display_provider_session(),
+        display_text(&row.id),
+        display_text(row.display_task()),
+        display_text(row.display_work_unit()),
+        display_text(&row.provider),
+        display_text(row.display_provider_session()),
         row.status,
-        row.directive,
-        row.resolver,
-        row.branch,
-        row.worktree_path,
-        row.log_file.as_deref().unwrap_or("-"),
+        display_text(&row.directive),
+        display_text(&row.resolver),
+        display_text(&row.branch),
+        display_text(&row.worktree_path),
+        display_text(row.log_file.as_deref().unwrap_or("-")),
         format_pr_list(&row.pr_urls),
-        row.resume_of_dispatch_id.as_deref().unwrap_or("-"),
+        display_text(row.resume_of_dispatch_id.as_deref().unwrap_or("-")),
         action_text
     )
 }
@@ -1682,20 +1731,25 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_filters_default_to_interesting_statuses() {
+    fn snapshot_defaults_to_active_and_recent_terminal_statuses() {
         let filter = SessionFilter::default();
-        let snapshot = build_snapshot(
-            vec![
-                record("running", Status::Running),
-                record("done", Status::Done),
-            ],
+        let now = Utc.with_ymd_and_hms(2026, 6, 3, 13, 0, 0).unwrap();
+        let running = record("running", Status::Running);
+        let recent_done = record("recent-done", Status::Done);
+        let mut old_done = record("old-done", Status::Done);
+        old_done.updated_at = now - ChronoDuration::hours(DEFAULT_RECENT_TERMINAL_HOURS + 1);
+
+        let snapshot = build_snapshot_at(
+            vec![running, recent_done, old_done],
             vec![work_unit()],
             &filter,
             SessionGroupBy::Task,
+            now,
         );
-        assert_eq!(snapshot.rows.len(), 1);
-        assert_eq!(snapshot.rows[0].id, "running");
+        let ids: Vec<&str> = snapshot.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, vec!["recent-done", "running"]);
         assert_eq!(snapshot.summary.running, 1);
+        assert_eq!(snapshot.summary.done, 1);
     }
 
     #[test]
@@ -1902,6 +1956,16 @@ mod tests {
     }
 
     #[test]
+    fn display_text_escapes_terminal_control_sequences() {
+        let value = "task\x1b[31mred\x1b[0m\r\n\t\x07\u{9b}done";
+        let escaped = display_text(value);
+        assert_eq!(escaped, "task\\x1b[31mred\\x1b[0m\\r\\n\\t\\x07\\x9bdone");
+        assert!(!escaped.contains('\x1b'));
+        assert!(!escaped.contains('\x07'));
+        assert!(!escaped.contains('\u{9b}'));
+    }
+
+    #[test]
     fn tui_setup_cleanup_runs_registered_cleanup_in_reverse_order() {
         let calls = RefCell::new(Vec::new());
         let mut cleanup = TuiSetupCleanup::active();
@@ -2010,6 +2074,30 @@ mod tests {
         assert!(output.contains("tasks/harmony-794"));
         assert!(output.contains("tmux; touch pwned"));
         assert!(!PathBuf::from("pwned").exists());
+    }
+
+    #[test]
+    fn once_render_escapes_terminal_control_sequences() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let mut hostile = record("disp-\x1b]52;c;payload\x07", Status::Running);
+        hostile.session = "tmux-\x1b[31mred\x1b[0m".to_string();
+        hostile.agent_provider = "claude-\x1b[2J".to_string();
+        let snapshot = build_snapshot(
+            vec![hostile],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Provider,
+        );
+        let output = render_once(
+            &snapshot,
+            Utc.with_ymd_and_hms(2026, 6, 3, 13, 0, 0).unwrap(),
+        );
+        assert!(output.contains("\\x1b"));
+        assert!(!output.contains('\x1b'));
+        assert!(!output.contains('\x07'));
     }
 
     #[test]

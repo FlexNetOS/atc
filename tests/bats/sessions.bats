@@ -120,6 +120,29 @@ SQL
     echo "$STDOUT" | jq -e '.rows[0].id == "disp-001"' >/dev/null
 }
 
+@test "sessions default includes active and recent terminal records only" {
+    require_jq
+    setup_sessions_data
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-recent-done" "tasks/test-recent" "done"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-old-done" "tasks/test-old" "done"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET updated_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '-25 hours')
+WHERE id = 'disp-old-done';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows | map(.id) | index("disp-001") != null' >/dev/null
+    echo "$STDOUT" | jq -e '.rows | map(.id) | index("disp-recent-done") != null' >/dev/null
+    echo "$STDOUT" | jq -e '.rows | map(.id) | index("disp-old-done") == null' >/dev/null
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.rows | map(.id) | index("disp-old-done") != null' >/dev/null
+}
+
 @test "sessions rejects zero poll interval before entering tui" {
     setup_sessions_data
 
@@ -178,4 +201,29 @@ SQL
     echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].pr_urls[0] | contains($payload)' >/dev/null
     echo "$STDOUT" | jq -e --arg payload "$semicolon_payload" '.rows[0].pr_urls[1] | contains($payload)' >/dev/null
     assert_file_not_exists "$sentinel"
+}
+
+@test "sessions --once escapes terminal control sequences in human output" {
+    setup_sessions_data
+    local esc=$'\033'
+    local bel=$'\a'
+    local osc_payload="${esc}]52;c;SGVsbG8=${bel}"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET id = 'disp-control',
+    task_slug = 'tasks/control-${esc}[2J',
+    branch = 'branch-${esc}[31mred${esc}[0m',
+    session = 'tmux-${esc}[31mred${esc}[0m-${osc_payload}',
+    agent_provider = 'claude-${esc}[2J',
+    resume_of_dispatch_id = 'source-${osc_payload}'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --once --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
 }

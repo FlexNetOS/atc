@@ -311,7 +311,9 @@ atc sessions --once
 atc sessions --json
 ```
 
-Use `--once` for a non-interactive table and `--json` for the stable v1 session envelope used by automation and UI dogfooding. Interactive mode polls the registry on a bounded interval, supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata and capability-gated actions, and hands off log/terminal actions through the existing ATC command logic.
+Use `--once` for a non-interactive table and `--json` for the stable v1 session envelope used by automation and UI dogfooding. Interactive mode polls the embedded SQLite registry on a bounded interval, defaulting to 2 seconds, so dispatches updated by other shells or ATC commands appear while the switchboard is open. `--once` and `--json` are point-in-time snapshots.
+
+By default, the switchboard shows active/actionable sessions plus terminal records updated in the last 24 hours. Use `--all` to include every stored status. Interactive mode supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata and capability-gated actions, and hands off log/terminal actions through the existing ATC command logic.
 
 ## Configuration
 

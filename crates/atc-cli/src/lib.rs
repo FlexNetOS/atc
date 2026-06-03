@@ -244,7 +244,7 @@ mod args {
             /// Group rows by task, work-unit, branch, provider, status, or none
             #[arg(long, value_enum, default_value = "none")]
             group: SessionGroupBy,
-            /// Include terminal records beyond the default active/needs-* set
+            /// Include all statuses beyond the default active + recent terminal set
             #[arg(long)]
             all: bool,
             /// Interactive refresh interval, e.g. 1s, 2s, 500ms (minimum 250ms)
