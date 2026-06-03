@@ -13,12 +13,10 @@ if ! command -v npx >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! output=$(npx --yes \
-  --package @commitlint/cli \
-  --package @commitlint/config-conventional \
-  commitlint --edit "$1" 2>&1); then
-  if printf '%s\n' "$output" | grep -qE '^npm (ERR!|error) (network|code (ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT)|could not determine executable)'; then
-    echo "Warning: commitlint unavailable; skipping local check." >&2
+if ! output=$(npx --no-install commitlint --edit "$1" 2>&1); then
+  if printf '%s\n' "$output" | grep -qE '^npm (ERR!|error) (could not determine executable|code ENOENT)|not found|command not found'; then
+    echo "Warning: local commitlint is not installed; skipping local check." >&2
+    echo "Run 'make install-hooks' to install pinned hook dependencies." >&2
     echo "CI still requires a semantic PR title before merge." >&2
     exit 0
   fi

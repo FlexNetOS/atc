@@ -16,6 +16,10 @@ Or use the Makefile:
 make install-hooks
 ```
 
+`make install-hooks` installs pinned npm development dependencies from
+`package-lock.json` so the commit message hook can run without fetching packages
+at commit time.
+
 ## Available Hooks
 
 ### pre-commit

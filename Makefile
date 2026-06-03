@@ -121,6 +121,12 @@ uninstall:
 # Uses git rev-parse to handle worktrees and submodules correctly
 install-hooks:
 	@echo "Installing git hooks..."
+	@if command -v npm >/dev/null 2>&1; then \
+		echo "Installing pinned hook dependencies..."; \
+		npm ci --ignore-scripts; \
+	else \
+		echo "Warning: npm not found; commit-msg hook will skip local commitlint until dependencies are installed."; \
+	fi
 	@chmod +x .githooks/commit-msg
 	@chmod +x scripts/hooks/pre-push
 	@chmod +x .githooks/pre-commit
