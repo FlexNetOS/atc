@@ -11,6 +11,36 @@ pub trait AgentExecutor: Send + Sync {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentInvocation {
+    None,
+    Fresh(AgentSessionId),
+    Resume(AgentSessionId),
+}
+
+impl AgentInvocation {
+    pub fn session_id(self) -> Option<AgentSessionId> {
+        match self {
+            AgentInvocation::None => None,
+            AgentInvocation::Fresh(session_id) | AgentInvocation::Resume(session_id) => {
+                Some(session_id)
+            }
+        }
+    }
+
+    fn claude_arg(self) -> Option<(&'static str, AgentSessionId)> {
+        match self {
+            AgentInvocation::None => None,
+            AgentInvocation::Fresh(session_id) => Some(("--session-id", session_id)),
+            AgentInvocation::Resume(session_id) => Some(("--resume", session_id)),
+        }
+    }
+
+    fn is_none(self) -> bool {
+        matches!(self, AgentInvocation::None)
+    }
+}
+
 pub struct AgentOpts {
     pub slug: String,
     pub worktree_path: PathBuf,
@@ -20,7 +50,7 @@ pub struct AgentOpts {
     pub env: HashMap<String, String>, // GITKB_WORKSPACE, GITKB_ROOT, etc.
     pub session_name: String,      // tmux session name (derived from slug)
     pub dispatch_id: String,       // stable registry ID (used for post-complete --id)
-    pub agent_session_id: Option<AgentSessionId>, // provider-native session ID for Claude resume
+    pub agent_invocation: AgentInvocation, // fresh session, resume session, or no provider session
     pub sandbox: bool,             // false = pass --settings with sandbox.enabled=false to claude
     pub inline: bool,              // true = CI mode, no tmux, run synchronously
     pub max_turns: u32,
@@ -199,8 +229,8 @@ impl ClaudeExecutor {
             .arg(opts.max_turns.to_string())
             .arg("--max-budget-usd")
             .arg(opts.max_budget_usd.to_string());
-        if let Some(session_id) = opts.agent_session_id {
-            cmd.arg("--session-id").arg(session_id.to_string());
+        if let Some((flag, session_id)) = opts.agent_invocation.claude_arg() {
+            cmd.arg(flag).arg(session_id.to_string());
         }
 
         if let Some(ref sf) = sandbox_file {
@@ -227,7 +257,8 @@ impl ClaudeExecutor {
 
         info!(
             slug = %opts.slug,
-            agent_session_id = opts.agent_session_id.map(|id| id.to_string()),
+            agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
+            agent_resume = matches!(opts.agent_invocation, AgentInvocation::Resume(_)),
             "spawning claude (inline)"
         );
         let mut child = cmd.spawn()?;
@@ -290,8 +321,8 @@ impl ClaudeExecutor {
         use tokio::process::Command;
 
         anyhow::ensure!(
-            opts.agent_session_id.is_none(),
-            "ephemeral inline dispatch must not set agent_session_id"
+            opts.agent_invocation.is_none(),
+            "ephemeral inline dispatch must not set agent invocation"
         );
 
         // The -p argument is the rendered template body directly (no build_user_prompt wrapper)
@@ -342,7 +373,7 @@ impl ClaudeExecutor {
 
         info!(
             slug = %opts.slug,
-            agent_session_id = opts.agent_session_id.map(|id| id.to_string()),
+            agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             "spawning claude (ephemeral inline)"
         );
         let mut child = cmd.spawn()?;
@@ -484,9 +515,10 @@ impl ClaudeExecutor {
                 shell_escape(&sp.to_string_lossy())?
             ));
         }
-        if let Some(session_id) = opts.agent_session_id {
+        if let Some((flag, session_id)) = opts.agent_invocation.claude_arg() {
             claude_cmd.push_str(&format!(
-                " --session-id '{}'",
+                " {} '{}'",
+                flag,
                 shell_escape(&session_id.to_string())?
             ));
         }
@@ -574,7 +606,8 @@ impl ClaudeExecutor {
         // 5. Create tmux session
         info!(
             session = %opts.session_name,
-            agent_session_id = opts.agent_session_id.map(|id| id.to_string()),
+            agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
+            agent_resume = matches!(opts.agent_invocation, AgentInvocation::Resume(_)),
             "creating tmux session"
         );
         let output = match Command::new("tmux")
@@ -712,7 +745,9 @@ mod tests {
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
-            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000001")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "00000000-0000-4000-8000-000000000001",
+            )),
             sandbox: false,
             inline: true,
             max_turns: 10_000,
@@ -739,7 +774,9 @@ mod tests {
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
-            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000002")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "00000000-0000-4000-8000-000000000002",
+            )),
             sandbox: false,
             inline: true,
             max_turns: 10_000,
@@ -823,7 +860,9 @@ mod tests {
             env,
             session_name: "test-session".to_string(),
             dispatch_id: "test-dispatch".to_string(),
-            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000003")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "00000000-0000-4000-8000-000000000003",
+            )),
             sandbox: false,
             inline: true,
             max_turns: 100,
@@ -885,7 +924,9 @@ exit 0
         let opts = AgentOpts {
             log_file: Some(tmp.path().join("test.jsonl")),
             worktree_path: tmp.path().to_path_buf(),
-            agent_session_id: Some(session_id("22222222-2222-4222-8222-222222222222")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "22222222-2222-4222-8222-222222222222",
+            )),
             ..make_test_opts(Some("Hello from stdin content".to_string()), env)
         };
 
@@ -895,6 +936,51 @@ exit 0
         let args = std::fs::read_to_string(capture).unwrap();
         assert!(args.contains("--session-id"));
         assert!(args.contains("22222222-2222-4222-8222-222222222222"));
+        assert!(!args.contains("--resume"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_spawn_inline_includes_resume_session_id() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let capture = tmp.path().join("args.txt");
+        let script = tmp.path().join("claude-capture");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s
+' "$@" > "$ATC_ARG_CAPTURE"
+cat >/dev/null
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut env = HashMap::new();
+        env.insert(
+            "ATC_ARG_CAPTURE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        );
+        let executor = ClaudeExecutor { claude_bin: script };
+        let opts = AgentOpts {
+            log_file: Some(tmp.path().join("test.jsonl")),
+            worktree_path: tmp.path().to_path_buf(),
+            agent_invocation: AgentInvocation::Resume(session_id(
+                "44444444-4444-4444-8444-444444444444",
+            )),
+            ..make_test_opts(Some("Hello from stdin content".to_string()), env)
+        };
+
+        let result = executor.spawn_inline(&opts).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+
+        let args = std::fs::read_to_string(capture).unwrap();
+        assert!(args.contains("--resume"));
+        assert!(args.contains("44444444-4444-4444-8444-444444444444"));
+        assert!(!args.contains("--session-id"));
     }
 
     #[tokio::test]
@@ -1096,7 +1182,7 @@ exit 0
             env: HashMap::new(),
             session_name: "test".to_string(),
             dispatch_id: "test".to_string(),
-            agent_session_id: None,
+            agent_invocation: AgentInvocation::None,
             sandbox: false,
             inline: true,
             max_turns: 1,
@@ -1125,7 +1211,9 @@ exit 0
         let tmp = tempfile::tempdir().unwrap();
         let opts = AgentOpts {
             worktree_path: tmp.path().to_path_buf(),
-            agent_session_id: Some(session_id("00000000-0000-4000-8000-000000000004")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "00000000-0000-4000-8000-000000000004",
+            )),
             ephemeral: true,
             log_file: None,
             stdin_content: Some("Generate a commit message".to_string()),
@@ -1138,7 +1226,7 @@ exit 0
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("ephemeral inline dispatch must not set agent_session_id"));
+            .contains("ephemeral inline dispatch must not set agent invocation"));
     }
 
     #[test]
@@ -1146,7 +1234,9 @@ exit 0
         let executor = ClaudeExecutor::default();
         let opts = AgentOpts {
             stdin_content: Some("content".to_string()),
-            agent_session_id: Some(session_id("11111111-1111-4111-8111-111111111111")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "11111111-1111-4111-8111-111111111111",
+            )),
             ..make_test_opts(None, HashMap::new())
         };
 
@@ -1165,11 +1255,41 @@ exit 0
     }
 
     #[test]
+    fn test_build_tmux_bash_body_includes_resume_session_id() {
+        let executor = ClaudeExecutor::default();
+        let opts = AgentOpts {
+            stdin_content: Some("content".to_string()),
+            agent_invocation: AgentInvocation::Resume(session_id(
+                "22222222-2222-4222-8222-222222222222",
+            )),
+            ..make_test_opts(None, HashMap::new())
+        };
+
+        let prompt_path = PathBuf::from("/tmp/test.prompt.md");
+        let task_doc_path = PathBuf::from("/tmp/test.taskdoc");
+
+        let body = executor
+            .build_tmux_bash_body(&opts, &prompt_path, &task_doc_path, None)
+            .unwrap();
+
+        assert!(
+            body.contains("--resume '22222222-2222-4222-8222-222222222222'"),
+            "bash body should pass Claude resume id, got: {}",
+            body
+        );
+        assert!(
+            !body.contains("--session-id"),
+            "resume mode must not also pass --session-id, got: {}",
+            body
+        );
+    }
+
+    #[test]
     fn test_build_tmux_bash_body_omits_agent_session_id_when_none() {
         let executor = ClaudeExecutor::default();
         let opts = AgentOpts {
             stdin_content: Some("content".to_string()),
-            agent_session_id: None,
+            agent_invocation: AgentInvocation::None,
             ..make_test_opts(None, HashMap::new())
         };
 
@@ -1242,7 +1362,9 @@ exit 0
             log_file: Some(log_file),
             stdin_content: Some("content".to_string()),
             env,
-            agent_session_id: Some(session_id("33333333-3333-4333-8333-333333333333")),
+            agent_invocation: AgentInvocation::Fresh(session_id(
+                "33333333-3333-4333-8333-333333333333",
+            )),
             ..make_test_opts(None, HashMap::new())
         };
 

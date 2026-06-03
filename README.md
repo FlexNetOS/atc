@@ -31,6 +31,7 @@ cargo install --path crates/atc-cli
 atc run task tasks/my-task
 atc run pr-review --param pr=https://github.com/org/repo/pull/123
 atc run 'Fix the auth timeout bug in src/auth.rs'
+atc run --resume tasks/my-task 'continue from the previous session'
 
 # === Queue-based dispatch (continuous) ===
 
@@ -86,7 +87,7 @@ Continuous: atc daemon --source ready -> kb_ready -> enqueue -> drain -> pipelin
    - **KB Context** — fetches related documents and active context from GitKB
    - **Rebase** — detects if branch is behind default branch, exports `default_branch` and `rebase_behind_count` as template variables for use in partials
 
-5. **Agent Execution** — spawns `claude` in a tmux session (detached) or inline (synchronous for CI). ATC records its own session name separately from Claude's provider session UUID, which is passed with `--session-id` for future resume support. Stream-json output is logged to JSONL files.
+5. **Agent Execution** — spawns `claude` in a tmux session (detached) or inline (synchronous for CI). ATC records its own session name separately from Claude's provider session UUID. Fresh durable dispatches pass `--session-id`; resumed dispatches pass `--resume <agent_session_id>` and run from the source dispatch transcript cwd. Stream-json output is logged to JSONL files.
 
 6. **Post-Completion** — extracts artifacts from stream-json logs (cost, PR URLs, commits, summary), updates registry, sends notifications (macOS + webhook), and auto-cleans worktrees on PR merge.
 
@@ -127,6 +128,7 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | Command | Description |
 |---------|-------------|
 | `atc run <input>` | Direct dispatch (task, template, or prompt) |
+| `atc run --resume <id-or-task> <input>` | Create a new dispatch that continues the source provider conversation |
 | `atc enqueue <input>` | Add work to the dispatch queue |
 | `atc enqueue --ready` | Enqueue top-scored tasks via kb_ready |
 | `atc enqueue --board` | Enqueue from a board query |
@@ -273,6 +275,23 @@ atc run task tasks/cross-repo-fix --repo open-source/atc --repo open-source/kb
 ```
 
 Each `--repo` gets its own worktree, agent session, and PR. The dispatch ID links them together.
+
+## Session Continuation
+
+ATC tracks two session identifiers:
+
+- `session` is ATC's tmux/log session name. Use it indirectly through `atc watch`, `atc logs`, `atc stop`, and `atc redirect`.
+- `agent_session_id` is the provider-native Claude conversation UUID.
+
+Use `atc run --resume <dispatch-id|task-slug> <input>` when you want a new ATC dispatch to continue the same Claude conversation. The resume target can be a dispatch ID or a task slug; task slugs resolve to the latest dispatch for that task. Resumed runs keep the source `agent_session_id`, set `resume_of_dispatch_id` on the new record, and use the source `agent_transcript_cwd` instead of creating a different worktree.
+
+```bash
+atc run --resume tasks/my-task 'continue implementation with the failing test output'
+atc run --resume tasks/my-task pr-review --param pr=https://github.com/org/repo/pull/123
+atc run --resume <dispatch-id> 'summarize what changed and finish cleanup'
+```
+
+`atc retry <id>` is intentionally different: it starts a fresh provider conversation for a failed dispatch and adjusts budget/turns when applicable. `atc redirect <id> '<msg>'` is also different: it sends text to a currently running tmux-backed session instead of creating a new dispatch record.
 
 ## Configuration
 
@@ -497,7 +516,7 @@ CREATE TABLE dispatches (
 );
 ```
 
-`session` is ATC's tmux/log session name and remains the value used by `atc watch`, `atc logs`, `atc stop`, and `atc redirect`. `agent_session_id` is the provider-native Claude conversation UUID used for resume-capable agent features.
+`session` is ATC's tmux/log session name and remains the value used by `atc watch`, `atc logs`, `atc stop`, and `atc redirect`. `agent_session_id` is the provider-native Claude conversation UUID used by `atc run --resume`, while `resume_of_dispatch_id` links a resumed dispatch back to its source record.
 
 ## Competitive Comparison (as of March 2026)
 

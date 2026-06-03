@@ -79,102 +79,10 @@ pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use atc_core::registry::StatusFilter;
-    use atc_core::types::{Directive, DispatchRecord, HealthChecks};
-    use chrono::Utc;
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use atc_core::types::{Directive, DispatchRecord};
+    use std::path::PathBuf;
 
-    struct MockRegistry {
-        records: Mutex<Vec<DispatchRecord>>,
-    }
-
-    impl MockRegistry {
-        fn new(records: Vec<DispatchRecord>) -> Self {
-            Self {
-                records: Mutex::new(records),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Registry for MockRegistry {
-        async fn insert(&self, record: &DispatchRecord) -> Result<()> {
-            self.records.lock().unwrap().push(record.clone());
-            Ok(())
-        }
-        async fn update_status(&self, _id: &str, _status: Status) -> Result<()> {
-            Ok(())
-        }
-        async fn update_cost(&self, _: &str, _: f64, _: u32, _: u64) -> Result<()> {
-            Ok(())
-        }
-        async fn get(&self, id: &str) -> Result<Option<DispatchRecord>> {
-            Ok(self
-                .records
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|r| r.id == id)
-                .cloned())
-        }
-        async fn list(&self, _filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
-            Ok(self.records.lock().unwrap().clone())
-        }
-        async fn update_health(
-            &self,
-            _: &str,
-            _: &HealthChecks,
-            _: Status,
-            _: chrono::DateTime<Utc>,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn set_pr_url(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn add_pr_url(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn set_artifacts(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn increment_retries(
-            &self,
-            _: &str,
-            _: &str,
-            _: &Path,
-            _: chrono::DateTime<Utc>,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn find_by_branch(&self, _: &str) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
-        }
-        async fn find_by_task_slug(&self, _: &str) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
-        }
-        async fn find_by_pr_url(&self, _: &str) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
-        }
-        async fn find_by_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
-        }
-        async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
-            Ok(self
-                .records
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|r| r.task_slug.as_deref() == Some(task_slug))
-                .max_by_key(|r| r.dispatched_at)
-                .cloned())
-        }
-        async fn find_running_on_worktree(&self, _: &Path) -> Result<Vec<DispatchRecord>> {
-            Ok(vec![])
-        }
-    }
+    use crate::test_support::MockRegistry;
 
     fn sample_record(id: &str, status: Status) -> DispatchRecord {
         DispatchRecord {

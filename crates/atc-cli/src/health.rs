@@ -373,6 +373,7 @@ pub async fn run_health(
                 no_worktree: false,
                 max_budget_usd: None,
                 max_turns: None,
+                resume: None,
                 retries: 0,
                 list: false,
                 ephemeral: false,

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
-use atc_core::executor::{AgentExecutor, AgentOpts};
+use atc_core::executor::{AgentExecutor, AgentInvocation, AgentOpts};
 use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{
-    claude_agent_provider, AgentCapabilities, Directive, DispatchOutcome, DispatchRecord,
-    HealthChecks, RunOpts, Status, WorktreePolicy,
+    claude_agent_provider, AgentCapabilities, AgentSessionMetadata, Directive, DispatchOutcome,
+    DispatchRecord, HealthChecks, RunOpts, Status, WorktreePolicy, CLAUDE_AGENT_PROVIDER,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -22,6 +22,16 @@ use crate::dispatch::{
     WorktreeOpts,
 };
 use crate::output_schema::SCHEMA_VERSION;
+
+fn agent_invocation_from_metadata(metadata: &AgentSessionMetadata) -> AgentInvocation {
+    match metadata.session_id {
+        Some(session_id) if metadata.resume_of_dispatch_id.is_some() => {
+            AgentInvocation::Resume(session_id)
+        }
+        Some(session_id) => AgentInvocation::Fresh(session_id),
+        None => AgentInvocation::None,
+    }
+}
 
 /// JSON envelope shared by `atc run --json`. v1 schema; future fields are additive.
 ///
@@ -154,6 +164,80 @@ fn validate_document_policy_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
+fn canonicalize_existing_dir(path: &Path, source_id: &str, label: &str) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path).with_context(|| {
+        format!(
+            "cannot resume dispatch {}: {} '{}' is not accessible",
+            source_id,
+            label,
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        canonical.is_dir(),
+        "cannot resume dispatch {}: {} '{}' is not a directory",
+        source_id,
+        label,
+        path.display()
+    );
+    Ok(canonical)
+}
+
+fn canonical_if_exists(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok()
+}
+
+fn is_home_dir(path: &Path) -> bool {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| canonical_if_exists(&home))
+        .is_some_and(|home| path == home)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dispatch_record(
+    resolved: &ResolvedInput,
+    opts: &RunOpts,
+    original_input: &str,
+    resolver_name: &str,
+    pr_url: Option<&str>,
+    worktree_path: &Path,
+    session_name: &str,
+    log_file: &Path,
+    agent_metadata: &AgentSessionMetadata,
+    now: DateTime<Utc>,
+) -> DispatchRecord {
+    DispatchRecord {
+        id: resolved.dispatch_id.clone(),
+        task_slug: resolved.task_slug.clone(),
+        branch: resolved.branch.clone(),
+        worktree_path: worktree_path.to_path_buf(),
+        session: session_name.to_string(),
+        log_file: log_file.to_path_buf(),
+        status: Status::Running,
+        directive: resolved.directive.clone(),
+        retries: opts.retries,
+        resolver: resolver_name.to_string(),
+        pr_urls: pr_url.into_iter().map(str::to_string).collect(),
+        no_worktree: opts.no_worktree,
+        original_input: Some(original_input.to_string()),
+        checks: HealthChecks::default(),
+        kb_root: resolved.kb_root.clone(),
+        cost_usd: None,
+        num_turns: None,
+        duration_ms: None,
+        artifacts: None,
+        work_unit_id: None,
+        agent_provider: agent_metadata.provider.clone(),
+        agent_session_id: agent_metadata.session_id,
+        agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
+        resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
+        agent_capabilities: agent_metadata.capabilities,
+        dispatched_at: now,
+        updated_at: now,
+    }
+}
+
 /// The unified dispatch pipeline. All resolvers feed into this to dispatch agents.
 pub struct DispatchPipeline<'a> {
     pub resolvers: Vec<Box<dyn InputResolver>>,
@@ -168,6 +252,9 @@ impl<'a> DispatchPipeline<'a> {
         // 0. Ephemeral guard
         if opts.ephemeral && !opts.inline {
             anyhow::bail!("--ephemeral requires --inline");
+        }
+        if opts.ephemeral && opts.resume.is_some() {
+            anyhow::bail!("--resume is not supported with --ephemeral");
         }
 
         // 1. Find first resolver that can handle input
@@ -278,6 +365,18 @@ impl<'a> DispatchPipeline<'a> {
             resolved.worktree_policy.unwrap_or(WorktreePolicy::Branch)
         };
 
+        let resume_agent_metadata = match self
+            .resolve_resume_metadata(opts.resume.as_deref(), opts.force)
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
+                return Err(e);
+            }
+        };
+
         // 4. Dry run — no resolver state was mutated (resolve() skips CAS claim
         //    when dry_run is set), so we can return immediately. Resolve repo
         //    context up-front so the preview matches what dispatch will use.
@@ -299,7 +398,12 @@ impl<'a> DispatchPipeline<'a> {
             .await;
 
             // Resolve document workspace so the preview path matches dispatch.
-            let effective_workspace_root = if worktree_policy == WorktreePolicy::Document {
+            let effective_workspace_root = if let Some(resume_metadata) = &resume_agent_metadata {
+                resume_metadata
+                    .transcript_cwd
+                    .clone()
+                    .unwrap_or_else(|| workspace_root.clone())
+            } else if worktree_policy == WorktreePolicy::Document {
                 let slug = document_policy_slug(&resolved, &effective_params).ok_or_else(|| {
                     anyhow::anyhow!(
                         "worktree: document requires a task or slug parameter to resolve \
@@ -342,6 +446,7 @@ impl<'a> DispatchPipeline<'a> {
                 &dry_repos,
                 &effective_workspace_root,
                 opts.json,
+                resume_agent_metadata.as_ref(),
             );
         }
 
@@ -432,7 +537,7 @@ impl<'a> DispatchPipeline<'a> {
                 env,
                 session_name: resolved.dispatch_id.clone(),
                 dispatch_id: resolved.dispatch_id.clone(),
-                agent_session_id: agent_metadata.session_id,
+                agent_invocation: agent_invocation_from_metadata(&agent_metadata),
                 sandbox: false,
                 inline: true,
                 max_turns: turns,
@@ -526,104 +631,132 @@ impl<'a> DispatchPipeline<'a> {
         .await;
         let is_meta = meta.is_some();
 
-        let (worktree_path, wt_created, wt_is_meta, repos_for_context) = match worktree_policy {
-            WorktreePolicy::Current => {
-                // Run in CWD. No worktree creation, no document resolution.
-                (cwd.clone(), false, is_meta, base_repos.clone())
+        let (worktree_path, wt_created, wt_is_meta, repos_for_context) = match resume_agent_metadata
+            .as_ref()
+        {
+            Some(resume_metadata) => {
+                let transcript_cwd = resume_metadata
+                    .transcript_cwd
+                    .clone()
+                    .expect("validated resume metadata must include transcript cwd");
+                let resume_meta = discover_meta(&transcript_cwd).await;
+                // Ensure GITKB_WORKSPACE is populated so providers and the
+                // final env block use the correct workspace identity for the
+                // resumed session.  The task resolver already sets this for
+                // task dispatches; this covers template/prompt resumes where
+                // the resolver does not populate env_overrides.
+                resolved
+                    .env_overrides
+                    .entry("GITKB_WORKSPACE".to_string())
+                    .or_insert_with(|| crate::dispatch::sanitize_slashes(&resolved.branch));
+                (
+                    transcript_cwd,
+                    false,
+                    resume_meta.is_some(),
+                    base_repos.clone(),
+                )
             }
-            WorktreePolicy::None => {
-                // Run in canonical repo root. No worktree creation.
-                (workspace_root.clone(), false, is_meta, base_repos.clone())
-            }
-            WorktreePolicy::Document => {
-                // Resolve CWD from document location.
-                let slug = document_policy_slug(&resolved, &effective_params).map(str::to_string);
-                match slug.as_deref() {
-                    Some(slug) => {
-                        if let Err(e) = validate_document_policy_slug(slug) {
-                            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                            resolver.on_cleanup(&tmp_record, self.config, None).await;
-                            return Err(e);
-                        }
-                        let worktree_base = dispatch_cfg.resolved_worktree_base();
-                        match resolve_document_workspace(
-                            slug,
-                            kb_root,
-                            &worktree_base,
-                            &workspace_root,
-                        )
-                        .await
-                        {
-                            Ok(Some(doc_ws)) => {
-                                // Set GITKB_WORKSPACE for the document's branch
-                                resolved.env_overrides.insert(
-                                    "GITKB_WORKSPACE".to_string(),
-                                    doc_ws.workspace_branch.clone(),
-                                );
-                                info!(
-                                    slug,
-                                    cwd = %doc_ws.cwd.display(),
-                                    workspace_branch = %doc_ws.workspace_branch,
-                                    "document policy: resolved workspace"
-                                );
-                                (doc_ws.cwd, false, is_meta, base_repos.clone())
-                            }
-                            Ok(None) => {
-                                // Auto-checkout to main, use workspace_root
-                                if let Err(e) = auto_checkout_to_main(slug, kb_root).await {
-                                    warn!(slug, error = %e, "auto-checkout failed (non-fatal)");
-                                }
-                                resolved
-                                    .env_overrides
-                                    .insert("GITKB_WORKSPACE".to_string(), "main".to_string());
-                                (workspace_root.clone(), false, is_meta, base_repos.clone())
-                            }
-                            Err(e) => {
+            None => match worktree_policy {
+                WorktreePolicy::Current => {
+                    // Run in CWD. No worktree creation, no document resolution.
+                    (cwd.clone(), false, is_meta, base_repos.clone())
+                }
+                WorktreePolicy::None => {
+                    // Run in canonical repo root. No worktree creation.
+                    (workspace_root.clone(), false, is_meta, base_repos.clone())
+                }
+                WorktreePolicy::Document => {
+                    // Resolve CWD from document location.
+                    let slug =
+                        document_policy_slug(&resolved, &effective_params).map(str::to_string);
+                    match slug.as_deref() {
+                        Some(slug) => {
+                            if let Err(e) = validate_document_policy_slug(slug) {
                                 let tmp_record =
                                     self.make_tmp_record(&resolved, opts, resolver.name());
                                 resolver.on_cleanup(&tmp_record, self.config, None).await;
                                 return Err(e);
                             }
+                            let worktree_base = dispatch_cfg.resolved_worktree_base();
+                            match resolve_document_workspace(
+                                slug,
+                                kb_root,
+                                &worktree_base,
+                                &workspace_root,
+                            )
+                            .await
+                            {
+                                Ok(Some(doc_ws)) => {
+                                    // Set GITKB_WORKSPACE for the document's branch
+                                    resolved.env_overrides.insert(
+                                        "GITKB_WORKSPACE".to_string(),
+                                        doc_ws.workspace_branch.clone(),
+                                    );
+                                    info!(
+                                        slug,
+                                        cwd = %doc_ws.cwd.display(),
+                                        workspace_branch = %doc_ws.workspace_branch,
+                                        "document policy: resolved workspace"
+                                    );
+                                    (doc_ws.cwd, false, is_meta, base_repos.clone())
+                                }
+                                Ok(None) => {
+                                    // Auto-checkout to main, use workspace_root
+                                    if let Err(e) = auto_checkout_to_main(slug, kb_root).await {
+                                        warn!(slug, error = %e, "auto-checkout failed (non-fatal)");
+                                    }
+                                    resolved
+                                        .env_overrides
+                                        .insert("GITKB_WORKSPACE".to_string(), "main".to_string());
+                                    (workspace_root.clone(), false, is_meta, base_repos.clone())
+                                }
+                                Err(e) => {
+                                    let tmp_record =
+                                        self.make_tmp_record(&resolved, opts, resolver.name());
+                                    resolver.on_cleanup(&tmp_record, self.config, None).await;
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        None => {
+                            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                            resolver.on_cleanup(&tmp_record, self.config, None).await;
+                            anyhow::bail!(
+                                "worktree: document requires a task or slug parameter to resolve \
+                                 the document workspace (set --param task=<slug> or use a task dispatch)"
+                            );
                         }
                     }
-                    None => {
-                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                        resolver.on_cleanup(&tmp_record, self.config, None).await;
-                        anyhow::bail!(
-                            "worktree: document requires a task or slug parameter to resolve \
-                             the document workspace (set --param task=<slug> or use a task dispatch)"
-                        );
-                    }
                 }
-            }
-            WorktreePolicy::Branch => {
-                // Current behavior: create/reuse worktree by branch name.
-                // Repo selection was already computed in base_repos above.
-                let worktree_base = dispatch_cfg.resolved_worktree_base();
-                let repo_refs: Vec<&str> = base_repos.iter().map(|s| s.as_str()).collect();
-                let wt_opts = WorktreeOpts {
-                    worktree_base: &worktree_base,
-                    repos: repo_refs,
-                    branch: &resolved.branch,
-                    meta_workspace_root: &workspace_root,
-                    kb_root,
-                    force: opts.force,
-                };
-                let wt_result = match ensure_worktree(&wt_opts, self.registry).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-                        resolver.on_cleanup(&tmp_record, self.config, None).await;
-                        return Err(e);
-                    }
-                };
-                (
-                    wt_result.path,
-                    wt_result.created,
-                    wt_result.is_meta,
-                    base_repos,
-                )
-            }
+                WorktreePolicy::Branch => {
+                    // Current behavior: create/reuse worktree by branch name.
+                    // Repo selection was already computed in base_repos above.
+                    let worktree_base = dispatch_cfg.resolved_worktree_base();
+                    let repo_refs: Vec<&str> = base_repos.iter().map(|s| s.as_str()).collect();
+                    let wt_opts = WorktreeOpts {
+                        worktree_base: &worktree_base,
+                        repos: repo_refs,
+                        branch: &resolved.branch,
+                        meta_workspace_root: &workspace_root,
+                        kb_root,
+                        force: opts.force,
+                    };
+                    let wt_result = match ensure_worktree(&wt_opts, self.registry).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                            resolver.on_cleanup(&tmp_record, self.config, None).await;
+                            return Err(e);
+                        }
+                    };
+                    (
+                        wt_result.path,
+                        wt_result.created,
+                        wt_result.is_meta,
+                        base_repos,
+                    )
+                }
+            },
         };
 
         // 5b. Load per-project .dispatch/env (after worktree exists, before env setup)
@@ -700,33 +833,9 @@ impl<'a> DispatchPipeline<'a> {
         let mut env = project_env;
         env.extend(resolved.env_overrides.clone());
 
-        // GH_TOKEN resolution (default only if not already set by resolver/project)
-        if !env.contains_key("GH_TOKEN") {
-            match resolve_gh_token().await {
-                Ok(token) => {
-                    env.insert("GH_TOKEN".to_string(), token);
-                }
-                Err(e) => {
-                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
-                }
-            }
-        }
-
         // 7. Setup log file
         let log_dir = dispatch_cfg.resolved_log_dir();
-        if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
-            let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
-            if wt_created {
-                rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
-            }
-            resolver.on_cleanup(&tmp_record, self.config, None).await;
-            return Err(e.into());
-        }
         let log_file = log_dir.join(format!("{}.jsonl", resolved.dispatch_id));
-
-        // Write diagnostic file
-        let gh_token_present = env.contains_key("GH_TOKEN") && !env["GH_TOKEN"].is_empty();
-        write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
 
         // 7b. Run context providers (non-fatal errors logged, dispatch continues)
         let mut providers =
@@ -764,6 +873,81 @@ impl<'a> DispatchPipeline<'a> {
         } else {
             resolved.system_prompt.clone()
         };
+
+        let agent_metadata = resume_agent_metadata.clone().unwrap_or_else(|| {
+            claude_agent_provider().durable_session_metadata(worktree_path.clone())
+        });
+        let reserved_before_spawn = agent_metadata.resume_of_dispatch_id.is_some();
+        let now = Utc::now();
+        let mut record = build_dispatch_record(
+            &resolved,
+            opts,
+            input,
+            resolver.name(),
+            effective_pr_url.as_deref(),
+            &worktree_path,
+            &session_name,
+            &log_file,
+            &agent_metadata,
+            now,
+        );
+        info!(
+            id = %resolved.dispatch_id,
+            agent_provider = %record.agent_provider,
+            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
+            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref(),
+            agent_resume = record.resume_of_dispatch_id.is_some(),
+            "registered agent session metadata"
+        );
+
+        if reserved_before_spawn {
+            if let Err(e) = self
+                .registry
+                .insert_resume_reservation(&record, opts.force)
+                .await
+            {
+                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                if wt_created {
+                    rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+                }
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
+                return Err(e);
+            }
+        }
+
+        // GH_TOKEN resolution and diagnostics happen after resume reservation
+        // so a rejected concurrent resume does not shell out or leave orphan
+        // per-dispatch files for a dispatch that never starts.
+        if let Err(e) = tokio::fs::create_dir_all(&log_dir).await {
+            if reserved_before_spawn {
+                self.mark_resume_reservation_failed(&mut record, "log directory error")
+                    .await;
+                resolver
+                    .on_cleanup(&record, self.config, Some(self.registry))
+                    .await;
+            } else {
+                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                resolver.on_cleanup(&tmp_record, self.config, None).await;
+            }
+            if wt_created {
+                rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
+            }
+            return Err(e.into());
+        }
+
+        if !env.contains_key("GH_TOKEN") {
+            match resolve_gh_token().await {
+                Ok(token) => {
+                    env.insert("GH_TOKEN".to_string(), token);
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+                }
+            }
+        }
+        let gh_token_present = env.contains_key("GH_TOKEN") && !env["GH_TOKEN"].is_empty();
+        write_diag_file(&log_dir, &resolved.dispatch_id, gh_token_present).await;
+
         if !providers.is_empty() {
             // Compute the KB workspace for providers. Document policy sets it in
             // env_overrides during step 5; for None/Current we must derive it here
@@ -975,7 +1159,7 @@ impl<'a> DispatchPipeline<'a> {
         // CLAUDECODE: always clear to prevent recursive agent-spawning.
         env.insert("CLAUDECODE".to_string(), String::new());
 
-        // 9. Build agent opts and spawn
+        // 9. Build agent opts and registry record
         let slug_for_agent = resolved.task_slug.as_deref().unwrap_or(&resolved.branch);
         // For non-task dispatches (prompt/template), provide the resolved system
         // prompt as stdin content so the executor doesn't call `git kb show`.
@@ -991,8 +1175,6 @@ impl<'a> DispatchPipeline<'a> {
                 resolved.branch
             ))
         };
-        let agent_metadata =
-            claude_agent_provider().durable_session_metadata(worktree_path.clone());
         let agent_opts = AgentOpts {
             slug: slug_for_agent.to_string(),
             worktree_path: worktree_path.clone(),
@@ -1002,7 +1184,7 @@ impl<'a> DispatchPipeline<'a> {
             env,
             session_name: session_name.clone(),
             dispatch_id: resolved.dispatch_id.clone(),
-            agent_session_id: agent_metadata.session_id,
+            agent_invocation: agent_invocation_from_metadata(&agent_metadata),
             sandbox: dispatch_cfg.sandbox,
             inline: opts.inline,
             max_turns: turns,
@@ -1015,100 +1197,85 @@ impl<'a> DispatchPipeline<'a> {
         let handle = match self.executor.spawn(&agent_opts).await {
             Ok(h) => h,
             Err(e) => {
-                let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                if reserved_before_spawn {
+                    self.mark_resume_reservation_failed(&mut record, "spawn error")
+                        .await;
+                    resolver
+                        .on_cleanup(&record, self.config, Some(self.registry))
+                        .await;
+                } else {
+                    let tmp_record = self.make_tmp_record(&resolved, opts, resolver.name());
+                    resolver.on_cleanup(&tmp_record, self.config, None).await;
+                }
                 if wt_created {
                     rollback_worktree(wt_is_meta, &worktree_path, &workspace_root).await;
                 }
-                resolver.on_cleanup(&tmp_record, self.config, None).await;
                 return Err(e);
             }
         };
 
-        // 9b. Resolve work unit
-        let work_unit = resolve_work_unit(
-            self.registry,
-            resolved.task_slug.as_deref(),
-            &resolved.branch,
-            &effective_params,
-            &repos_for_context,
-        )
-        .await;
-        let work_unit_id = match &work_unit {
-            Ok(wu) => Some(wu.id.clone()),
-            Err(e) => {
-                warn!(error = %e, "work unit resolution failed (non-fatal)");
-                None
-            }
-        };
-
-        // Add repos to the work unit if not already present
-        if let Ok(ref wu) = work_unit {
-            for repo in &repos_for_context {
-                if !wu.repos.contains(repo) {
-                    if let Err(e) = self.registry.add_work_unit_repo(&wu.id, repo).await {
-                        warn!(error = %e, "failed to add repo to work unit (non-fatal)");
-                    }
-                }
-            }
-        }
-
-        // 10. Insert registry record
         let status = match handle.inline_exit_code {
             Some(0) => Status::Done,
             Some(_) => Status::Failed,
             None => Status::Running,
         };
-        let now = Utc::now();
-        let record = DispatchRecord {
-            id: resolved.dispatch_id.clone(),
-            task_slug: resolved.task_slug.clone(),
-            branch: resolved.branch.clone(),
-            worktree_path: worktree_path.clone(),
-            session: handle.session.clone(),
-            log_file: log_file.clone(),
-            status,
-            directive: resolved.directive.clone(),
-            retries: opts.retries,
-            resolver: resolver.name().to_string(),
-            pr_urls: effective_pr_url.iter().cloned().collect(),
-            no_worktree: opts.no_worktree,
-            original_input: Some(input.to_string()),
-            checks: HealthChecks::default(),
-            kb_root: resolved.kb_root.clone(),
-            cost_usd: None,
-            num_turns: None,
-            duration_ms: None,
-            artifacts: None,
-            work_unit_id,
-            agent_provider: agent_metadata.provider.clone(),
-            agent_session_id: agent_metadata.session_id,
-            agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
-            resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
-            agent_capabilities: agent_metadata.capabilities,
-            dispatched_at: now,
-            updated_at: now,
-        };
-        info!(
-            id = %resolved.dispatch_id,
-            agent_provider = %record.agent_provider,
-            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
-            "registered agent session metadata"
-        );
-        if let Err(e) = self.registry.insert(&record).await {
-            warn!(id = %resolved.dispatch_id, error = %e, "registry insert failed; killing orphan session");
-            let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
-            if session_killed {
-                resolver
-                    .on_cleanup(&record, self.config, Some(self.registry))
-                    .await;
-            } else {
-                warn!(
-                    id = %resolved.dispatch_id,
-                    session = %handle.session,
-                    "tmux kill inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
-                );
+        record.session = handle.session.clone();
+        record.status = status;
+        record.updated_at = Utc::now();
+
+        if reserved_before_spawn {
+            record.work_unit_id = resolve_dispatch_work_unit(
+                self.registry,
+                resolved.task_slug.as_deref(),
+                &resolved.branch,
+                &effective_params,
+                &repos_for_context,
+            )
+            .await;
+            if let Some(ref work_unit_id) = record.work_unit_id {
+                if let Err(e) = self
+                    .registry
+                    .update_dispatch_work_unit(&record.id, Some(work_unit_id))
+                    .await
+                {
+                    warn!(
+                        id = %record.id,
+                        work_unit_id,
+                        error = %e,
+                        "failed to attach work unit to resume dispatch (non-fatal)"
+                    );
+                    record.work_unit_id = None;
+                }
             }
-            return Err(e);
+            if let Err(e) = self.registry.update_status(&record.id, status).await {
+                warn!(id = %resolved.dispatch_id, error = %e, "resume reservation status update failed");
+                return Err(e);
+            }
+        } else {
+            record.work_unit_id = resolve_dispatch_work_unit(
+                self.registry,
+                resolved.task_slug.as_deref(),
+                &resolved.branch,
+                &effective_params,
+                &repos_for_context,
+            )
+            .await;
+            if let Err(e) = self.registry.insert(&record).await {
+                warn!(id = %resolved.dispatch_id, error = %e, "registry insert failed; killing orphan session");
+                let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
+                if session_killed {
+                    resolver
+                        .on_cleanup(&record, self.config, Some(self.registry))
+                        .await;
+                } else {
+                    warn!(
+                        id = %resolved.dispatch_id,
+                        session = %handle.session,
+                        "tmux kill inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
+                    );
+                }
+                return Err(e);
+            }
         }
 
         // "Agent starting" PR comment — actionable context for humans
@@ -1215,6 +1382,145 @@ impl<'a> DispatchPipeline<'a> {
         );
     }
 
+    async fn resolve_resume_metadata(
+        &self,
+        resume_target: Option<&str>,
+        force: bool,
+    ) -> Result<Option<AgentSessionMetadata>> {
+        let Some(resume_target) = resume_target else {
+            return Ok(None);
+        };
+
+        let source = crate::resolve::resolve_record(self.registry, resume_target)
+            .await
+            .with_context(|| format!("failed to resolve resume target '{resume_target}'"))?;
+
+        anyhow::ensure!(
+            source.agent_provider == CLAUDE_AGENT_PROVIDER,
+            "cannot resume dispatch {}: provider '{}' is not supported by this slice",
+            source.id,
+            source.agent_provider
+        );
+
+        let capabilities = source.agent_capabilities.ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resume dispatch {}: provider '{}' did not record capabilities",
+                source.id,
+                source.agent_provider
+            )
+        })?;
+        anyhow::ensure!(
+            capabilities.supports_resume_by_session_id,
+            "cannot resume dispatch {}: provider '{}' does not support resume by session id",
+            source.id,
+            source.agent_provider
+        );
+
+        let session_id = source.agent_session_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resume dispatch {}: missing agent_session_id",
+                source.id
+            )
+        })?;
+
+        let transcript_cwd = self.validate_resume_transcript_cwd(&source)?;
+
+        if !force {
+            if let Some(conflict) = self
+                .registry
+                .find_active_by_agent_session(&source.agent_provider, session_id)
+                .await?
+            {
+                anyhow::bail!(
+                    "cannot resume dispatch {}: provider session {} is already active in dispatch {} (status {}). Use --force to override.",
+                    source.id,
+                    session_id,
+                    conflict.id,
+                    conflict.status
+                );
+            }
+        }
+
+        Ok(Some(claude_agent_provider().resume_session_metadata(
+            transcript_cwd,
+            session_id,
+            source.id,
+        )))
+    }
+
+    async fn mark_resume_reservation_failed(&self, record: &mut DispatchRecord, reason: &str) {
+        if let Err(update_err) = self
+            .registry
+            .update_status(&record.id, Status::Failed)
+            .await
+        {
+            warn!(
+                id = %record.id,
+                reason,
+                error = %update_err,
+                "failed to mark resume reservation failed"
+            );
+        }
+        record.status = Status::Failed;
+        record.updated_at = Utc::now();
+    }
+
+    fn validate_resume_transcript_cwd(&self, source: &DispatchRecord) -> Result<PathBuf> {
+        let stored_transcript_cwd = source.agent_transcript_cwd.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resume dispatch {}: missing agent_transcript_cwd",
+                source.id
+            )
+        })?;
+        let transcript_cwd =
+            canonicalize_existing_dir(stored_transcript_cwd, &source.id, "transcript cwd")?;
+        let source_worktree =
+            canonicalize_existing_dir(&source.worktree_path, &source.id, "source worktree_path")?;
+
+        anyhow::ensure!(
+            transcript_cwd == source_worktree,
+            "cannot resume dispatch {}: transcript cwd '{}' does not match source worktree_path '{}'",
+            source.id,
+            transcript_cwd.display(),
+            source_worktree.display()
+        );
+
+        anyhow::ensure!(
+            !transcript_cwd.as_os_str().is_empty()
+                && transcript_cwd.parent().is_some()
+                && !is_home_dir(&transcript_cwd)
+                && transcript_cwd
+                    .file_name()
+                    .is_some_and(|name| name != ".worktrees"),
+            "cannot resume dispatch {}: unsafe transcript cwd '{}'",
+            source.id,
+            transcript_cwd.display()
+        );
+
+        let dispatch_cfg = &self.config.dispatch;
+        let meta_workspace_root = dispatch_cfg
+            .resolved_meta_workspace_root(self.config.config_dir.as_deref())
+            .ok()
+            .and_then(|path| canonical_if_exists(&path));
+        let worktree_base = canonical_if_exists(&dispatch_cfg.resolved_worktree_base());
+
+        let under_meta_workspace = meta_workspace_root
+            .as_ref()
+            .is_some_and(|root| transcript_cwd.starts_with(root));
+        let under_worktree_base = worktree_base
+            .as_ref()
+            .is_some_and(|base| transcript_cwd.starts_with(base) && transcript_cwd != *base);
+
+        anyhow::ensure!(
+            under_meta_workspace || under_worktree_base,
+            "cannot resume dispatch {}: transcript cwd '{}' is not under an ATC workspace or worktree root",
+            source.id,
+            transcript_cwd.display()
+        );
+
+        Ok(transcript_cwd)
+    }
+
     /// Build a temporary DispatchRecord for resolver cleanup before registry insertion.
     fn make_tmp_record(
         &self,
@@ -1271,18 +1577,30 @@ impl<'a> DispatchPipeline<'a> {
         repos: &[String],
         workspace_root: &Path,
         json: bool,
+        resume_metadata: Option<&AgentSessionMetadata>,
     ) -> Result<DispatchOutcome> {
         let primary_repo = repos.first().map(String::as_str);
-        let (policy_label, resolved_path, hint) = describe_worktree(
+        let (policy_label, mut resolved_path, mut hint) = describe_worktree(
             self.config,
             &resolved.branch,
             primary_repo,
             worktree_policy,
             workspace_root,
         );
+        if let Some(metadata) = resume_metadata {
+            if let Some(transcript_cwd) = &metadata.transcript_cwd {
+                resolved_path = transcript_cwd.clone();
+                hint = Some(
+                    "resume uses the source dispatch transcript cwd instead of creating a new worktree"
+                        .to_string(),
+                );
+            }
+        }
 
         if json {
-            let agent_metadata = claude_agent_provider().ephemeral_session_metadata();
+            let agent_metadata = resume_metadata
+                .cloned()
+                .unwrap_or_else(|| claude_agent_provider().ephemeral_session_metadata());
             // Dry-run JSON mirrors the success envelope so consumers parse a
             // single shape: `is_dry_run = true` and `status = "preview"` are
             // the discriminators. `dispatch_id` is still populated (the
@@ -1305,9 +1623,12 @@ impl<'a> DispatchPipeline<'a> {
                     pr_urls,
                     log_file: None,
                     agent_provider: &agent_metadata.provider,
-                    agent_session_id: None,
-                    agent_transcript_cwd: None,
-                    resume_of_dispatch_id: None,
+                    agent_session_id: agent_metadata.session_id.map(|id| id.to_string()),
+                    agent_transcript_cwd: agent_metadata
+                        .transcript_cwd
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.as_deref(),
                     agent_capabilities: agent_metadata.capabilities.as_ref(),
                     is_dry_run: true,
                     inline_exit_code: None,
@@ -1341,6 +1662,14 @@ impl<'a> DispatchPipeline<'a> {
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
         println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
+        if let Some(metadata) = resume_metadata {
+            if let Some(resume_of) = metadata.resume_of_dispatch_id.as_deref() {
+                println!("Resume:     {}", resume_of);
+            }
+            if let Some(session_id) = metadata.session_id {
+                println!("Agent ID:   {}", session_id);
+            }
+        }
 
         println!(
             "Worktree:    {} ({})",
@@ -1655,6 +1984,35 @@ async fn resolve_work_unit(
     // Shouldn't happen, but fall back to the unit we tried to insert
     info!(id = %unit.id, task = ?effective_task, branch = %branch, "created new work unit");
     Ok(unit)
+}
+
+async fn resolve_dispatch_work_unit(
+    registry: &dyn Registry,
+    task_slug: Option<&str>,
+    branch: &str,
+    params: &std::collections::HashMap<String, String>,
+    repos: &[String],
+) -> Option<String> {
+    let work_unit = resolve_work_unit(registry, task_slug, branch, params, repos).await;
+    let work_unit_id = match &work_unit {
+        Ok(wu) => Some(wu.id.clone()),
+        Err(e) => {
+            warn!(error = %e, "work unit resolution failed (non-fatal)");
+            None
+        }
+    };
+
+    if let Ok(ref wu) = work_unit {
+        for repo in repos {
+            if !wu.repos.contains(repo) {
+                if let Err(e) = registry.add_work_unit_repo(&wu.id, repo).await {
+                    warn!(error = %e, "failed to add repo to work unit (non-fatal)");
+                }
+            }
+        }
+    }
+
+    work_unit_id
 }
 
 /// Generate a ULID-like ID for work units.

@@ -8,6 +8,36 @@ use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+const ACTIVE_DISPATCH_STATUSES: &[Status] = &[Status::Running, Status::Retrying];
+const ACTIVE_DISPATCH_STATUS_SQL: &str = "status IN ('running', 'retrying')";
+
+fn is_active_dispatch_status(status: Status) -> bool {
+    ACTIVE_DISPATCH_STATUSES.contains(&status)
+}
+
+fn active_agent_session_index_sql() -> String {
+    format!(
+        "CREATE INDEX IF NOT EXISTS idx_dispatches_active_agent_session \
+         ON dispatches(agent_provider, agent_session_id, dispatched_at DESC, id DESC) \
+         WHERE {ACTIVE_DISPATCH_STATUS_SQL} AND agent_session_id IS NOT NULL;"
+    )
+}
+
+fn active_agent_session_query_sql(select: &str) -> String {
+    format!(
+        "{select}
+         WHERE agent_provider = ?1
+           AND agent_session_id = ?2
+           AND {ACTIVE_DISPATCH_STATUS_SQL}
+         ORDER BY dispatched_at DESC, id DESC
+         LIMIT 1"
+    )
+}
+
+fn active_task_count_query_sql() -> String {
+    format!("SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND {ACTIVE_DISPATCH_STATUS_SQL}")
+}
+
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
 pub enum StatusFilter {
@@ -35,7 +65,35 @@ impl StatusFilter {
 #[async_trait]
 pub trait Registry: Send + Sync {
     async fn insert(&self, record: &DispatchRecord) -> Result<()>;
+    /// Insert a resumed dispatch as a pre-spawn reservation.
+    ///
+    /// Implementations with concurrent writers must make the active-session
+    /// check and insert atomic when `force` is false.
+    async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()>;
+    /// Find a non-terminal dispatch using the provider-native session.
+    async fn find_active_by_agent_session(
+        &self,
+        provider: &str,
+        session_id: AgentSessionId,
+    ) -> Result<Option<DispatchRecord>> {
+        Ok(self
+            .list(StatusFilter::All)
+            .await?
+            .into_iter()
+            .find(|record| {
+                record.agent_provider == provider
+                    && record.agent_session_id == Some(session_id)
+                    && is_active_dispatch_status(record.status)
+            }))
+    }
     async fn update_status(&self, id: &str, status: Status) -> Result<()>;
+    async fn update_dispatch_work_unit(
+        &self,
+        _id: &str,
+        _work_unit_id: Option<&str>,
+    ) -> Result<()> {
+        anyhow::bail!("dispatch work-unit updates are not implemented for this registry backend")
+    }
     async fn update_cost(&self, id: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()>;
     async fn get(&self, id: &str) -> Result<Option<DispatchRecord>>;
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>>;
@@ -254,6 +312,8 @@ impl SqliteRegistry {
         for idx_sql in CREATE_INDEXES_SQL {
             sqlx::query(idx_sql).execute(pool).await?;
         }
+        let active_session_index_sql = active_agent_session_index_sql();
+        sqlx::query(&active_session_index_sql).execute(pool).await?;
         // Work units table
         sqlx::query(CREATE_WORK_UNITS_TABLE_SQL)
             .execute(pool)
@@ -483,6 +543,111 @@ impl SqliteRegistry {
         Ok(Self { pool })
     }
 
+    async fn insert_dispatch<'e, E>(
+        executor: E,
+        record: &DispatchRecord,
+    ) -> Result<sqlx::sqlite::SqliteQueryResult>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let pr_urls_json = serde_json::to_string(&record.pr_urls)?;
+        let pr_url_compat = record.pr_urls.first().cloned();
+        let agent_capabilities_json = record
+            .agent_capabilities
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let worktree_path = record
+            .worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
+        let log_file = record
+            .log_file
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("log_file must be valid UTF-8"))?;
+        let kb_root = record
+            .kb_root
+            .as_ref()
+            .map(|p| {
+                p.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("kb_root must be valid UTF-8"))
+            })
+            .transpose()?;
+        let agent_session_id = record.agent_session_id.map(|id| id.to_string());
+        let agent_transcript_cwd = record
+            .agent_transcript_cwd
+            .as_ref()
+            .map(|p| {
+                p.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("agent_transcript_cwd must be valid UTF-8"))
+            })
+            .transpose()?;
+
+        let result = sqlx::query(
+            r#"INSERT INTO dispatches (
+                id, task_slug, branch, worktree_path, session, log_file, status, directive, retries,
+                resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
+                check_agent_exited_clean, check_branch_pushed, check_pr_created,
+                check_ci_passed, check_reviews_approved, check_threads_resolved,
+                cost_usd, num_turns, duration_ms, work_unit_id,
+                agent_provider, agent_session_id, agent_transcript_cwd, resume_of_dispatch_id,
+                agent_capabilities_json, artifacts, dispatched_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
+            )"#,
+        )
+        .bind(&record.id)
+        .bind(&record.task_slug)
+        .bind(&record.branch)
+        .bind(worktree_path)
+        .bind(&record.session)
+        .bind(log_file)
+        .bind(record.status.as_str())
+        .bind(record.directive.as_str())
+        .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
+        .bind(&record.resolver)
+        .bind(&pr_url_compat)
+        .bind(&pr_urls_json)
+        .bind(record.no_worktree as i32)
+        .bind(&record.original_input)
+        .bind(kb_root)
+        .bind(record.checks.agent_exited_clean as i32)
+        .bind(record.checks.branch_pushed as i32)
+        .bind(record.checks.pr_created as i32)
+        .bind(record.checks.ci_passed as i32)
+        .bind(record.checks.reviews_approved as i32)
+        .bind(record.checks.threads_resolved as i32)
+        .bind(record.cost_usd)
+        .bind(
+            record
+                .num_turns
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("num_turns overflows i32"))?,
+        )
+        .bind(
+            record
+                .duration_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
+        )
+        .bind(&record.work_unit_id)
+        .bind(&record.agent_provider)
+        .bind(agent_session_id)
+        .bind(agent_transcript_cwd)
+        .bind(&record.resume_of_dispatch_id)
+        .bind(&agent_capabilities_json)
+        .bind(&record.artifacts)
+        .bind(record.dispatched_at.to_rfc3339())
+        .bind(record.updated_at.to_rfc3339())
+        .execute(executor)
+        .await?;
+
+        Ok(result)
+    }
+
     fn row_to_record(row: &sqlx::sqlite::SqliteRow) -> Result<DispatchRecord> {
         use sqlx::Row;
 
@@ -607,102 +772,81 @@ impl SqliteRegistry {
 #[async_trait]
 impl Registry for SqliteRegistry {
     async fn insert(&self, record: &DispatchRecord) -> Result<()> {
-        let pr_urls_json = serde_json::to_string(&record.pr_urls)?;
-        let pr_url_compat = record.pr_urls.first().cloned();
-        let agent_capabilities_json = record
-            .agent_capabilities
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        sqlx::query(
-            r#"INSERT INTO dispatches (
-                id, task_slug, branch, worktree_path, session, log_file, status, directive, retries,
-                resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
-                check_agent_exited_clean, check_branch_pushed, check_pr_created,
-                check_ci_passed, check_reviews_approved, check_threads_resolved,
-                cost_usd, num_turns, duration_ms, work_unit_id,
-                agent_provider, agent_session_id, agent_transcript_cwd, resume_of_dispatch_id,
-                agent_capabilities_json, dispatched_at, updated_at
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
-            )"#,
-        )
-        .bind(&record.id)
-        .bind(&record.task_slug)
-        .bind(&record.branch)
-        .bind(
-            record
-                .worktree_path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?,
-        )
-        .bind(&record.session)
-        .bind(
-            record
-                .log_file
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("log_file must be valid UTF-8"))?,
-        )
-        .bind(record.status.as_str())
-        .bind(record.directive.as_str())
-        .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
-        .bind(&record.resolver)
-        .bind(&pr_url_compat)
-        .bind(&pr_urls_json)
-        .bind(record.no_worktree as i32)
-        .bind(&record.original_input)
-        .bind(
-            record
-                .kb_root
-                .as_ref()
-                .map(|p| {
-                    p.to_str()
-                        .ok_or_else(|| anyhow::anyhow!("kb_root must be valid UTF-8"))
-                })
-                .transpose()?,
-        )
-        .bind(record.checks.agent_exited_clean as i32)
-        .bind(record.checks.branch_pushed as i32)
-        .bind(record.checks.pr_created as i32)
-        .bind(record.checks.ci_passed as i32)
-        .bind(record.checks.reviews_approved as i32)
-        .bind(record.checks.threads_resolved as i32)
-        .bind(record.cost_usd)
-        .bind(
-            record
-                .num_turns
-                .map(i32::try_from)
-                .transpose()
-                .map_err(|_| anyhow::anyhow!("num_turns overflows i32"))?,
-        )
-        .bind(
-            record
-                .duration_ms
-                .map(i64::try_from)
-                .transpose()
-                .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
-        )
-        .bind(&record.work_unit_id)
-        .bind(&record.agent_provider)
-        .bind(record.agent_session_id.map(|id| id.to_string()))
-        .bind(
-            record
-                .agent_transcript_cwd
-                .as_ref()
-                .map(|p| {
-                    p.to_str()
-                        .ok_or_else(|| anyhow::anyhow!("agent_transcript_cwd must be valid UTF-8"))
-                })
-                .transpose()?,
-        )
-        .bind(&record.resume_of_dispatch_id)
-        .bind(&agent_capabilities_json)
-        .bind(record.dispatched_at.to_rfc3339())
-        .bind(record.updated_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
+        Self::insert_dispatch(&self.pool, record).await?;
         Ok(())
+    }
+
+    async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()> {
+        anyhow::ensure!(
+            record.resume_of_dispatch_id.is_some(),
+            "resume reservations require resume_of_dispatch_id"
+        );
+
+        let Some(session_id) = record.agent_session_id else {
+            anyhow::bail!("resume reservations require agent_session_id");
+        };
+
+        anyhow::ensure!(
+            record.status == Status::Running,
+            "resume reservations must be inserted with running status, got {}",
+            record.status
+        );
+
+        if force {
+            return self.insert(record).await;
+        }
+
+        let session_id = session_id.to_string();
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+        let result: Result<()> = async {
+            let active_session_query =
+                active_agent_session_query_sql("SELECT id, status FROM dispatches");
+            let conflict: Option<(String, String)> = sqlx::query_as(&active_session_query)
+                .bind(&record.agent_provider)
+                .bind(&session_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+
+            if let Some((id, status)) = conflict {
+                anyhow::bail!(
+                    "provider session {session_id} is already active in dispatch {id} (status {status})"
+                );
+            }
+
+            Self::insert_dispatch(&mut *conn, record).await?;
+            Ok(())
+        }
+        .await;
+
+        let finalize = if result.is_ok() { "COMMIT" } else { "ROLLBACK" };
+        if let Err(e) = sqlx::query(finalize).execute(&mut *conn).await {
+            if result.is_ok() {
+                return Err(e.into());
+            }
+            warn!(error = %e, "failed to roll back resume reservation transaction");
+        }
+
+        result
+    }
+
+    async fn find_active_by_agent_session(
+        &self,
+        provider: &str,
+        session_id: AgentSessionId,
+    ) -> Result<Option<DispatchRecord>> {
+        let active_session_query = active_agent_session_query_sql("SELECT * FROM dispatches");
+        let row = sqlx::query(&active_session_query)
+            .bind(provider)
+            .bind(session_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_record(r)?)),
+            None => Ok(None),
+        }
     }
 
     async fn update_status(&self, id: &str, status: Status) -> Result<()> {
@@ -710,6 +854,22 @@ impl Registry for SqliteRegistry {
         let result =
             sqlx::query("UPDATE dispatches SET status = ?1, updated_at = ?2 WHERE id = ?3")
                 .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "no dispatch record found for id: {id}"
+        );
+        Ok(())
+    }
+
+    async fn update_dispatch_work_unit(&self, id: &str, work_unit_id: Option<&str>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE dispatches SET work_unit_id = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(work_unit_id)
                 .bind(&now)
                 .bind(id)
                 .execute(&self.pool)
@@ -1389,12 +1549,11 @@ impl DispatchQueue for SqliteRegistry {
 
             // Dedup: already running in registry?
             if item.input_type == QueueInputType::Task {
-                let active_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND status IN ('running', 'retrying')",
-                )
-                .bind(&item.input_value)
-                .fetch_one(&mut *conn)
-                .await?;
+                let active_task_count_query = active_task_count_query_sql();
+                let active_count: i64 = sqlx::query_scalar(&active_task_count_query)
+                    .bind(&item.input_value)
+                    .fetch_one(&mut *conn)
+                    .await?;
 
                 if active_count > 0 {
                     return Ok(EnqueueResult::Skipped(
@@ -1762,6 +1921,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_dispatch_work_unit() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "work-unit-link-dispatch";
+        registry.insert(&sample_record(id)).await.unwrap();
+
+        registry
+            .update_dispatch_work_unit(id, Some("wu-linked"))
+            .await
+            .unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(fetched.work_unit_id.as_deref(), Some("wu-linked"));
+
+        registry.update_dispatch_work_unit(id, None).await.unwrap();
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert!(fetched.work_unit_id.is_none());
+    }
+
+    #[tokio::test]
     async fn test_wal_mode_pragma() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -1982,6 +2159,168 @@ mod tests {
         assert!(
             err.to_string().contains("UNIQUE constraint failed"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_reservation_rejects_active_session_unless_forced() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut source = sample_record("source-session");
+        source.status = Status::Done;
+        registry.insert(&source).await.unwrap();
+
+        let mut first_resume = sample_record("resume-1");
+        first_resume.resume_of_dispatch_id = Some(source.id.clone());
+        registry
+            .insert_resume_reservation(&first_resume, false)
+            .await
+            .unwrap();
+
+        let mut second_resume = sample_record("resume-2");
+        second_resume.resume_of_dispatch_id = Some(source.id.clone());
+        let err = registry
+            .insert_resume_reservation(&second_resume, false)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already active"),
+            "unexpected reservation conflict error: {err}"
+        );
+
+        let mut forced_resume = sample_record("resume-3");
+        forced_resume.resume_of_dispatch_id = Some(source.id);
+        registry
+            .insert_resume_reservation(&forced_resume, true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resume_reservation_requires_running_status_even_when_forced() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        for force in [false, true] {
+            let mut record = sample_record(&format!("terminal-reservation-{force}"));
+            record.status = Status::Done;
+            record.resume_of_dispatch_id = Some("source-session".to_string());
+
+            let err = registry
+                .insert_resume_reservation(&record, force)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("running status"),
+                "unexpected terminal reservation error: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_active_by_agent_session_returns_only_non_terminal_dispatch() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let session_id = AgentSessionId::parse_str("00000000-0000-4000-8000-000000000099").unwrap();
+
+        for status in [
+            Status::Done,
+            Status::Failed,
+            Status::NeedsReview,
+            Status::NeedsHuman,
+            Status::Stopped,
+        ] {
+            let mut terminal = sample_record(&format!("active-session-terminal-{status}"));
+            terminal.status = status;
+            terminal.agent_session_id = Some(session_id);
+            registry.insert(&terminal).await.unwrap();
+        }
+
+        let mut retrying = sample_record("active-session-retrying");
+        retrying.status = Status::Retrying;
+        retrying.agent_session_id = Some(session_id);
+        registry.insert(&retrying).await.unwrap();
+
+        let found = registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .expect("retrying dispatch should be returned");
+        assert_eq!(found.id, "active-session-retrying");
+
+        registry
+            .update_status("active-session-retrying", Status::Done)
+            .await
+            .unwrap();
+        assert!(registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut running = sample_record("active-session-running");
+        running.status = Status::Running;
+        running.agent_session_id = Some(session_id);
+        registry.insert(&running).await.unwrap();
+
+        let found = registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .expect("running dispatch should be returned");
+        assert_eq!(found.id, "active-session-running");
+
+        registry
+            .update_status("active-session-running", Status::Stopped)
+            .await
+            .unwrap();
+        assert!(registry
+            .find_active_by_agent_session("claude", session_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_active_dispatch_statuses_match_terminal_semantics() {
+        for status in [
+            Status::Running,
+            Status::Retrying,
+            Status::Done,
+            Status::Failed,
+            Status::NeedsReview,
+            Status::NeedsHuman,
+            Status::Stopped,
+        ] {
+            assert_eq!(
+                is_active_dispatch_status(status),
+                !status.is_terminal(),
+                "active status drift for {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_reservation_requires_resume_metadata_even_when_forced() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        let missing_resume_link = sample_record("forced-missing-resume-link");
+        let err = registry
+            .insert_resume_reservation(&missing_resume_link, true)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("resume_of_dispatch_id"),
+            "unexpected missing resume link error: {err}"
+        );
+
+        let mut missing_session = sample_record("forced-missing-session");
+        missing_session.resume_of_dispatch_id = Some("source".to_string());
+        missing_session.agent_session_id = None;
+        let err = registry
+            .insert_resume_reservation(&missing_session, true)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("agent_session_id"),
+            "unexpected missing session error: {err}"
         );
     }
 
