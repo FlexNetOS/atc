@@ -13,13 +13,14 @@ if ! command -v npx >/dev/null 2>&1; then
   exit 0
 fi
 
+if [ ! -x node_modules/.bin/commitlint ]; then
+  echo "Warning: local commitlint is not installed; skipping local check." >&2
+  echo "Run 'make install-hooks' to install pinned hook dependencies." >&2
+  echo "CI still requires a semantic PR title before merge." >&2
+  exit 0
+fi
+
 if ! output=$(npx --no-install commitlint --edit "$1" 2>&1); then
-  if printf '%s\n' "$output" | grep -qE '^npm (ERR!|error) (could not determine executable|code ENOENT)|not found|command not found'; then
-    echo "Warning: local commitlint is not installed; skipping local check." >&2
-    echo "Run 'make install-hooks' to install pinned hook dependencies." >&2
-    echo "CI still requires a semantic PR title before merge." >&2
-    exit 0
-  fi
   printf '%s\n' "$output" >&2
   exit 1
 fi
