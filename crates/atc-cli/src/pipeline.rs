@@ -640,6 +640,15 @@ impl<'a> DispatchPipeline<'a> {
                     .clone()
                     .expect("validated resume metadata must include transcript cwd");
                 let resume_meta = discover_meta(&transcript_cwd).await;
+                // Ensure GITKB_WORKSPACE is populated so providers and the
+                // final env block use the correct workspace identity for the
+                // resumed session.  The task resolver already sets this for
+                // task dispatches; this covers template/prompt resumes where
+                // the resolver does not populate env_overrides.
+                resolved
+                    .env_overrides
+                    .entry("GITKB_WORKSPACE".to_string())
+                    .or_insert_with(|| crate::dispatch::sanitize_slashes(&resolved.branch));
                 (
                     transcript_cwd,
                     false,

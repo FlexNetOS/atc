@@ -591,10 +591,10 @@ impl SqliteRegistry {
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
                 cost_usd, num_turns, duration_ms, work_unit_id,
                 agent_provider, agent_session_id, agent_transcript_cwd, resume_of_dispatch_id,
-                agent_capabilities_json, dispatched_at, updated_at
+                agent_capabilities_json, artifacts, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
             )"#,
         )
         .bind(&record.id)
@@ -639,6 +639,7 @@ impl SqliteRegistry {
         .bind(agent_transcript_cwd)
         .bind(&record.resume_of_dispatch_id)
         .bind(&agent_capabilities_json)
+        .bind(&record.artifacts)
         .bind(record.dispatched_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
         .execute(executor)
