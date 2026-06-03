@@ -785,7 +785,13 @@ impl Registry for SqliteRegistry {
             anyhow::bail!("resume reservations require agent_session_id");
         };
 
-        if force || record.status.is_terminal() {
+        anyhow::ensure!(
+            record.status == Status::Running,
+            "resume reservations must be inserted with running status, got {}",
+            record.status
+        );
+
+        if force {
             return self.insert(record).await;
         }
 
@@ -2186,6 +2192,26 @@ mod tests {
             .insert_resume_reservation(&forced_resume, true)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resume_reservation_requires_running_status_even_when_forced() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+
+        for force in [false, true] {
+            let mut record = sample_record(&format!("terminal-reservation-{force}"));
+            record.status = Status::Done;
+            record.resume_of_dispatch_id = Some("source-session".to_string());
+
+            let err = registry
+                .insert_resume_reservation(&record, force)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("running status"),
+                "unexpected terminal reservation error: {err}"
+            );
+        }
     }
 
     #[tokio::test]

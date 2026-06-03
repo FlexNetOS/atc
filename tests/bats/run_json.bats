@@ -334,6 +334,56 @@ SQL
     [ "$after_force_count" = "$before_count" ]
 }
 
+@test "atc run --json --resume active source --force launches provider session" {
+    require_jq
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    init_test_db "$TEST_TMPDIR/atc.db"
+    mkdir -p "$TEST_TMPDIR/workspace" "$TEST_TMPDIR/bin"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-active-force" "tasks/test-1" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET agent_session_id = '00000000-0000-4000-8000-000000000708',
+    worktree_path = '$TEST_TMPDIR/workspace',
+    agent_transcript_cwd = '$TEST_TMPDIR/workspace',
+    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true}'
+WHERE id = 'disp-active-force';
+SQL
+
+    cat > "$TEST_TMPDIR/bin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$ATC_ARG_CAPTURE"
+pwd > "$ATC_CWD_CAPTURE"
+cat >/dev/null
+printf '%s\n' '{"type":"result","subtype":"success","total_cost_usd":0.01,"num_turns":1,"duration_ms":10}'
+exit 0
+SH
+    chmod +x "$TEST_TMPDIR/bin/claude"
+    export PATH="$TEST_TMPDIR/bin:$PATH"
+    export ATC_ARG_CAPTURE="$TEST_TMPDIR/claude.args"
+    export ATC_CWD_CAPTURE="$TEST_TMPDIR/claude.cwd"
+
+    before_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" \
+        run "Force active resume" --directive implement \
+        --resume disp-active-force --force --inline --no-worktree --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    after_count="$(sqlite3 "$TEST_TMPDIR/atc.db" 'SELECT COUNT(*) FROM dispatches;')"
+
+    expected_cwd="$(cd "$TEST_TMPDIR/workspace" && pwd -P)"
+    echo "$STDOUT" | jq -e '.kind == "dispatch"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.status == "done"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.resume_of_dispatch_id == "disp-active-force"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.agent_session_id == "00000000-0000-4000-8000-000000000708"' >/dev/null
+    echo "$STDOUT" | jq -e --arg cwd "$expected_cwd" '.data.worktree_path == $cwd' >/dev/null
+    [ "$after_count" -eq "$((before_count + 1))" ]
+    [ "$(grep -c -- '^--resume$' "$ATC_ARG_CAPTURE")" -eq 1 ]
+    grep -Fx "00000000-0000-4000-8000-000000000708" "$ATC_ARG_CAPTURE" >/dev/null
+    if grep -q -- '^--session-id$' "$ATC_ARG_CAPTURE"; then
+        fail "forced active resume dispatch also passed --session-id"
+    fi
+    [ "$(cat "$ATC_CWD_CAPTURE")" = "$expected_cwd" ]
+}
+
 # ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------
