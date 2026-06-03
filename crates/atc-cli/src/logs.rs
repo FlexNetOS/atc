@@ -3,11 +3,12 @@
 use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::stream_json::{parse_stream_events, StreamEvent};
+use atc_core::stream_json::{format_event, parse_stream_events, StreamEvent};
+use atc_core::terminal_text::display_text;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::terminal_text::display_text;
+use crate::shell_text::shell_display_arg;
 
 /// Resolve the log file path from an id-or-session argument.
 ///
@@ -55,55 +56,9 @@ async fn resolve_log_path(
     );
 }
 
-/// Format a single stream event for human terminal output.
-fn render_event_lines(event: &StreamEvent) -> Vec<String> {
-    match event {
-        StreamEvent::AssistantText(text) => text
-            .lines()
-            .map(|line| format!(">>> {}", display_text(line)))
-            .collect(),
-        StreamEvent::ToolUse { name, input } => {
-            let name = display_text(name);
-            let input = display_text(input);
-            let display_input = if input.chars().count() > 120 {
-                let truncated: String = input.chars().take(120).collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                input
-            };
-            vec![format!("  [tool] {name}: {display_input}")]
-        }
-        StreamEvent::Result(r) => {
-            let cost = r
-                .total_cost_usd
-                .map(|c| format!("${c}"))
-                .unwrap_or_else(|| "-".to_string());
-            let turns = r
-                .num_turns
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let duration = r
-                .duration_ms
-                .map(|ms| format!("{}s", ms / 1000))
-                .unwrap_or_else(|| "-".to_string());
-            vec![
-                String::new(),
-                format!(
-                    "=== RESULT: {} | cost={} | turns={} | duration={} ===",
-                    display_text(&r.subtype),
-                    cost,
-                    turns,
-                    duration
-                ),
-            ]
-        }
-        StreamEvent::Skip => Vec::new(),
-    }
-}
-
 /// Render a single stream event to stdout.
 fn render_event(event: &StreamEvent) {
-    for line in render_event_lines(event) {
+    for line in format_event(event) {
         println!("{line}");
     }
 }
@@ -147,8 +102,9 @@ pub async fn run_logs(
 
     if !log_path.exists() {
         anyhow::bail!(
-            "No log file: {}\nhint: try `atc info {arg}` to verify the dispatch exists.",
-            log_path.display()
+            "No log file: {}\nhint: try `atc info {}` to verify the dispatch exists.",
+            display_text(&log_path.display().to_string()),
+            shell_display_arg(arg)
         );
     }
 
@@ -286,22 +242,6 @@ mod tests {
     fn test_render_assistant_text() {
         // Just verify the render function doesn't panic
         render_event(&StreamEvent::AssistantText("Hello world".to_string()));
-    }
-
-    #[test]
-    fn test_render_event_lines_escape_terminal_and_bidi_controls() {
-        let lines = render_event_lines(&StreamEvent::AssistantText(
-            "Hello\x1b[2J\u{202e}gpj.exe".to_string(),
-        ));
-        assert_eq!(lines, vec![">>> Hello\\x1b[2J\\u{202e}gpj.exe"]);
-        assert!(!lines[0].contains('\x1b'));
-        assert!(!lines[0].contains('\u{202e}'));
-
-        let lines = render_event_lines(&StreamEvent::ToolUse {
-            name: "Bash\x1b[31m".to_string(),
-            input: "cargo test\u{2066}".to_string(),
-        });
-        assert_eq!(lines, vec!["  [tool] Bash\\x1b[31m: cargo test\\u{2066}"]);
     }
 
     #[test]

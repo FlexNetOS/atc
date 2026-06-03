@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::kb::kill_tmux_session;
 use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
-use crate::terminal_text::display_text;
+use atc_core::terminal_text::display_text;
 
 /// Execute the `atc stop` command.
 pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) -> Result<()> {

@@ -130,6 +130,41 @@ load helpers/common
     assert_output --partial "claude"
 }
 
+@test "status/info: escape hostile registry values in human output" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running" "implement"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/evil-' || char(27) || '[2J' || char(7) || char(8238) || 'gpj.exe',
+    branch = 'branch-' || char(27) || '[31m',
+    worktree_path = '${TEST_TMPDIR//\'/\'\'}/worktree-' || char(7),
+    session = 'session-' || char(8238),
+    agent_provider = 'claude-' || char(27) || '[0m'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --all --flat
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}
+
 @test "info: resolves by task slug (latest dispatch)" {
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
@@ -461,6 +496,36 @@ SQL
     assert_output --partial '$4.20'
 }
 
+@test "history: escapes hostile work-unit registry values in human output" {
+    setup_lifecycle
+    insert_test_work_unit "$TEST_TMPDIR/atc.db" "wu-001" "tasks/history-test"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-history" "tasks/history-test" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE work_units
+SET id = 'wu-' || char(27) || '[2J',
+    task_slug = 'tasks/history-' || char(27) || '[2J',
+    branch = 'branch-' || char(7),
+    repos = '["open-source/atc' || char(8238) || 'gpj.exe"]',
+    pr_urls = '["https://github.com/org/repo/pull/77"]'
+WHERE id = 'wu-001';
+UPDATE dispatches
+SET work_unit_id = 'wu-' || char(27) || '[2J'
+WHERE id = 'disp-history';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" history --pr https://github.com/org/repo/pull/77
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}
+
 # ===========================================================================
 # Health --auto: auto-remediation and cost warnings
 # ===========================================================================
@@ -489,6 +554,35 @@ SQL
     assert_success
     assert_output --partial "15.00"
     assert_output --partial "10.00"
+}
+
+@test "health: escapes hostile dispatch id in cost warning output" {
+    setup_lifecycle
+    setup_test_git_worktree
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-cost" "tasks/cost-test" "needs-review"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET id = 'disp-cost-' || char(27) || '[2J' || char(7) || char(8238) || 'gpj.exe',
+    cost_usd = 15.0,
+    pr_url = 'https://github.com/org/repo/pull/98',
+    pr_urls = '["https://github.com/org/repo/pull/98"]'
+WHERE id = 'disp-cost';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" health --auto
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+    [[ "$STDOUT" == *"15.00"* ]]
+    [[ "$STDOUT" == *"10.00"* ]]
 }
 
 @test "health --auto: auto-review prints trigger message for NeedsReview with PR" {

@@ -5,7 +5,7 @@ use std::process::Stdio;
 use tracing::warn;
 
 use crate::resolve::resolve_record;
-use crate::terminal_text::display_text;
+use atc_core::terminal_text::display_text;
 
 /// Timeout for tmux subprocess calls.
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

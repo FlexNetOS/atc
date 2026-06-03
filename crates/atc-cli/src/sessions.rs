@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::output_schema::SCHEMA_VERSION;
 use crate::status::{format_pr_list, DEFAULT_STATUSES};
-use crate::terminal_text::display_text;
+use atc_core::terminal_text::display_text;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);

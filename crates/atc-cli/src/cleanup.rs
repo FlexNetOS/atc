@@ -8,7 +8,7 @@ use tracing::warn;
 use crate::kb::kill_tmux_session;
 use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
-use crate::terminal_text::display_text;
+use atc_core::terminal_text::display_text;
 
 /// Execute the `atc cleanup` command.
 pub async fn run_cleanup(

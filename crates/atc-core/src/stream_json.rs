@@ -5,6 +5,8 @@
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::terminal_text::display_text;
+
 /// A result event from a Claude stream-json log.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResultEvent {
@@ -292,13 +294,18 @@ pub fn extract_artifacts(log_path: &Path) -> Artifacts {
 /// Used by logs viewer (Phase 1C).
 pub fn format_event(event: &StreamEvent) -> Vec<String> {
     match event {
-        StreamEvent::AssistantText(text) => text.lines().map(|l| format!(">>> {l}")).collect(),
+        StreamEvent::AssistantText(text) => text
+            .lines()
+            .map(|line| format!(">>> {}", display_text(line)))
+            .collect(),
         StreamEvent::ToolUse { name, input } => {
+            let name = display_text(name);
+            let input = display_text(input);
             let display_input = if input.chars().count() > 120 {
                 let truncated: String = input.chars().take(120).collect();
                 format!("{truncated}\u{2026}")
             } else {
-                input.clone()
+                input
             };
             vec![format!("  [tool] {name}: {display_input}")]
         }
@@ -319,7 +326,10 @@ pub fn format_event(event: &StreamEvent) -> Vec<String> {
                 String::new(),
                 format!(
                     "=== RESULT: {} | cost={} | turns={} | duration={} ===",
-                    r.subtype, cost, turns, duration
+                    display_text(&r.subtype),
+                    cost,
+                    turns,
+                    duration
                 ),
             ]
         }
@@ -529,6 +539,22 @@ mod tests {
     fn test_format_event_skip() {
         let lines = format_event(&StreamEvent::Skip);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_format_event_escapes_terminal_and_bidi_controls() {
+        let lines = format_event(&StreamEvent::AssistantText(
+            "Hello\x1b[2J\u{202e}gpj.exe".to_string(),
+        ));
+        assert_eq!(lines, vec![">>> Hello\\x1b[2J\\u{202e}gpj.exe"]);
+        assert!(!lines[0].contains('\x1b'));
+        assert!(!lines[0].contains('\u{202e}'));
+
+        let lines = format_event(&StreamEvent::ToolUse {
+            name: "Bash\x1b[31m".to_string(),
+            input: "cargo test\u{2066}".to_string(),
+        });
+        assert_eq!(lines, vec!["  [tool] Bash\\x1b[31m: cargo test\\u{2066}"]);
     }
 
     #[test]

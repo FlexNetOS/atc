@@ -11,5 +11,6 @@ pub mod resolver;
 pub mod source;
 pub mod stream_json;
 pub mod templates;
+pub mod terminal_text;
 pub mod types;
 pub mod worktree;

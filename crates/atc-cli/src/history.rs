@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::display_text;
 use atc_core::types::{DispatchRecord, WorkUnit};
 use serde::Serialize;
 use std::sync::Arc;
@@ -27,15 +28,21 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
 
     // Header
     let task_display = unit.task_slug.as_deref().unwrap_or(unit.id.as_str());
-    out.push_str(&format!("Work Unit: {}\n", task_display));
+    out.push_str(&format!("Work Unit: {}\n", display_text(task_display)));
     if let Some(ref branch) = unit.branch {
-        out.push_str(&format!("  Branch: {}\n", branch));
+        out.push_str(&format!("  Branch: {}\n", display_text(branch)));
     }
     if !unit.repos.is_empty() {
-        out.push_str(&format!("  Repos:  {}\n", unit.repos.join(", ")));
+        out.push_str(&format!(
+            "  Repos:  {}\n",
+            display_text(&unit.repos.join(", "))
+        ));
     }
     if !unit.pr_urls.is_empty() {
-        out.push_str(&format!("  PRs:    {}\n", format_pr_list(&unit.pr_urls)));
+        out.push_str(&format!(
+            "  PRs:    {}\n",
+            display_text(&format_pr_list(&unit.pr_urls))
+        ));
     }
     out.push_str(&format!("  Status: {}\n", unit.status.as_str()));
     out.push('\n');
@@ -71,7 +78,7 @@ pub fn build_history_table(unit: &WorkUnit, dispatches: &[DispatchRecord]) -> St
             .duration_ms
             .map(format_duration)
             .unwrap_or_else(|| "-".to_string());
-        let prs = format_pr_list(&r.pr_urls);
+        let prs = display_text(&format_pr_list(&r.pr_urls));
 
         table.add_row(vec![dispatched, directive, status, cost, duration, prs]);
     }
@@ -123,7 +130,7 @@ pub async fn run_history(
             };
             println!("{}", serde_json::to_string_pretty(&envelope)?);
         } else {
-            println!("No work unit found for: {}", target);
+            println!("No work unit found for: {}", display_text(target));
         }
         return Ok(());
     };
@@ -141,7 +148,7 @@ pub async fn run_history(
     }
 
     if dispatches.is_empty() {
-        println!("Work unit {} has no dispatches.", unit.id);
+        println!("Work unit {} has no dispatches.", display_text(&unit.id));
         return Ok(());
     }
 
@@ -192,6 +199,15 @@ mod tests {
         }
     }
 
+    fn assert_no_raw_terminal_controls(output: &str) {
+        assert!(!output.contains('\x1b'), "raw ESC in output: {output:?}");
+        assert!(!output.contains('\x07'), "raw BEL in output: {output:?}");
+        assert!(
+            !output.contains('\u{202e}'),
+            "raw bidi control in output: {output:?}"
+        );
+    }
+
     #[test]
     fn test_build_history_table_shows_task_and_totals() {
         let unit = sample_work_unit();
@@ -237,6 +253,23 @@ mod tests {
         let table = build_history_table(&unit, &dispatches);
         // Real $0.00 should show as "$0.00", not "-"
         assert!(table.contains("Total: $0.00 across 1 dispatch"));
+    }
+
+    #[test]
+    fn test_build_history_table_escapes_terminal_controls() {
+        let mut unit = sample_work_unit();
+        unit.id = "wu-\x1b[2J".to_string();
+        unit.task_slug = None;
+        unit.branch = Some("branch-\x07".to_string());
+        unit.repos = vec!["open-source/atc\u{202e}gpj.exe".to_string()];
+
+        let dispatches = vec![sample_dispatch(Directive::Implement, Some(0.0))];
+        let table = build_history_table(&unit, &dispatches);
+
+        assert_no_raw_terminal_controls(&table);
+        assert!(table.contains("\\x1b"));
+        assert!(table.contains("\\x07"));
+        assert!(table.contains("\\u{202e}"));
     }
 
     #[test]

@@ -22,7 +22,8 @@ use crate::dispatch::{
     WorktreeOpts,
 };
 use crate::output_schema::SCHEMA_VERSION;
-use crate::terminal_text::display_text;
+use crate::shell_text::shell_display_arg;
+use atc_core::terminal_text::display_text;
 
 fn agent_invocation_from_metadata(metadata: &AgentSessionMetadata) -> AgentInvocation {
     match metadata.session_id {
@@ -353,9 +354,10 @@ impl<'a> DispatchPipeline<'a> {
             resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
                 "tmux session '{}' already exists. Use --force to override.\n\
-                 hint: `atc info {session_name}` shows the existing dispatch; \
+                 hint: `atc info {}` shows the existing dispatch; \
                  `atc stop` and `atc cleanup` end it cleanly.",
-                session_name
+                display_text(&session_name),
+                shell_display_arg(&session_name)
             );
         }
 
@@ -1824,6 +1826,65 @@ pub fn resolver_by_name(name: &str) -> Option<Box<dyn InputResolver>> {
 
 /// Print post-dispatch confirmation block.
 #[allow(clippy::too_many_arguments)]
+fn build_dispatch_confirmation(
+    task_slug: Option<&str>,
+    directive: &Directive,
+    id: &str,
+    branch: &str,
+    worktree_path: &Path,
+    session: &str,
+    log_file: &Path,
+    resolver_name: &str,
+    worktree_policy: WorktreePolicy,
+    primary_repo: Option<&str>,
+) -> String {
+    let slug_display = task_slug.unwrap_or("(none)");
+    let policy_label = worktree_policy_label(worktree_policy);
+    let mut lines = Vec::new();
+    lines.push(format!("Dispatched: {}", display_text(slug_display)));
+    lines.push(format!("  Resolver:  {}", display_text(resolver_name)));
+    lines.push(format!("  Directive: {}", directive.as_str()));
+    lines.push(format!("  ID:        {}", display_text(id)));
+    lines.push(format!("  Branch:    {}", display_text(branch)));
+    lines.push(format!(
+        "  Worktree:  {} ({})",
+        worktree_policy.as_str(),
+        policy_label
+    ));
+    lines.push(format!(
+        "  Path:      {}",
+        display_text(&worktree_path.display().to_string())
+    ));
+    if let Some(repo) = primary_repo {
+        lines.push(format!("  Repo:      {}", display_text(repo)));
+    }
+    lines.push(format!("  Session:   {}", display_text(session)));
+    lines.push(format!(
+        "  Log:       {}",
+        display_text(&log_file.display().to_string())
+    ));
+    lines.push(String::new());
+    lines.push("  Next steps:".to_string());
+    if let Some(slug) = task_slug {
+        lines.push(format!("    atc logs {}", shell_display_arg(slug)));
+    }
+    lines.push(format!("    atc watch --id {}", shell_display_arg(id)));
+    lines.push(format!(
+        "    atc watch --id {} --pretty",
+        shell_display_arg(id)
+    ));
+    lines.push("    atc status --flat --json".to_string());
+    if let Some(slug) = task_slug {
+        lines.push(format!(
+            "    atc redirect {} [message]",
+            shell_display_arg(slug)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Print post-dispatch confirmation block.
+#[allow(clippy::too_many_arguments)]
 fn print_dispatch_confirmation(
     task_slug: Option<&str>,
     directive: &Directive,
@@ -1836,41 +1897,21 @@ fn print_dispatch_confirmation(
     worktree_policy: WorktreePolicy,
     primary_repo: Option<&str>,
 ) {
-    let slug_display = task_slug.unwrap_or("(none)");
-    let policy_label = worktree_policy_label(worktree_policy);
-    println!("Dispatched: {}", display_text(slug_display));
-    println!("  Resolver:  {}", display_text(resolver_name));
-    println!("  Directive: {}", directive.as_str());
-    println!("  ID:        {}", display_text(id));
-    println!("  Branch:    {}", display_text(branch));
     println!(
-        "  Worktree:  {} ({})",
-        worktree_policy.as_str(),
-        policy_label
+        "{}",
+        build_dispatch_confirmation(
+            task_slug,
+            directive,
+            id,
+            branch,
+            worktree_path,
+            session,
+            log_file,
+            resolver_name,
+            worktree_policy,
+            primary_repo
+        )
     );
-    println!(
-        "  Path:      {}",
-        display_text(&worktree_path.display().to_string())
-    );
-    if let Some(repo) = primary_repo {
-        println!("  Repo:      {}", display_text(repo));
-    }
-    println!("  Session:   {}", display_text(session));
-    println!(
-        "  Log:       {}",
-        display_text(&log_file.display().to_string())
-    );
-    println!();
-    println!("  Next steps:");
-    if let Some(slug) = task_slug {
-        println!("    atc logs {}", display_text(slug));
-    }
-    println!("    atc watch --id \"{}\"", display_text(id));
-    println!("    atc watch --id \"{}\" --pretty", display_text(id));
-    println!("    atc status --flat --json");
-    if let Some(slug) = task_slug {
-        println!("    atc redirect {} [message]", display_text(slug));
-    }
 }
 
 /// Embedded template for PR start comments. Editable without touching Rust code.
@@ -2284,6 +2325,34 @@ mod tests {
         let joined = format_error_chain(&err);
         assert!(joined.contains("failed to read template"));
         assert!(joined.contains("no such file"));
+    }
+
+    #[test]
+    fn test_build_dispatch_confirmation_quotes_and_escapes_next_steps() {
+        let task = "tasks/evil; rm -rf /\x1b[2J\x07\u{202e}gpj.exe";
+        let id = "sess 123; rm -rf /";
+        let out = build_dispatch_confirmation(
+            Some(task),
+            &Directive::Implement,
+            id,
+            "branch-\x1b[31m",
+            Path::new("/tmp/worktrees/evil\x07"),
+            "session-\u{202e}",
+            Path::new("/tmp/logs/evil\x1b.jsonl"),
+            "task",
+            WorktreePolicy::Branch,
+            Some("open-source/atc"),
+        );
+
+        assert!(!out.contains('\x1b'), "raw ESC in output: {out:?}");
+        assert!(!out.contains('\x07'), "raw BEL in output: {out:?}");
+        assert!(!out.contains('\u{202e}'), "raw bidi in output: {out:?}");
+        assert!(out.contains("\\x1b"));
+        assert!(out.contains("\\x07"));
+        assert!(out.contains("\\u{202e}"));
+        assert!(out.contains("atc logs 'tasks/evil; rm -rf /"));
+        assert!(out.contains("atc watch --id 'sess 123; rm -rf /'"));
+        assert!(out.contains("atc redirect 'tasks/evil; rm -rf /"));
     }
 
     #[test]

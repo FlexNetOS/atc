@@ -8,6 +8,7 @@ use atc_core::config::AtcConfig;
 use atc_core::post_completion;
 use atc_core::registry::{Registry, StatusFilter};
 use atc_core::stream_json;
+use atc_core::terminal_text::display_text;
 use atc_core::types::Status;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -207,6 +208,181 @@ enum OutputFormat {
     Pretty,
 }
 
+fn render_event_lines(event: &WatchEvent, format: &OutputFormat) -> (Vec<String>, Vec<String>) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    match format {
+        OutputFormat::Ndjson => {
+            stdout.push(serde_json::to_string(event).unwrap_or_default());
+        }
+        OutputFormat::Human => match event {
+            WatchEvent::Started {
+                id,
+                task,
+                directive,
+                ..
+            } => {
+                let label = task.as_deref().unwrap_or(id);
+                stderr.push(format!(
+                    "▶ watching {} ({})",
+                    display_text(label),
+                    display_text(directive)
+                ));
+            }
+            WatchEvent::LogLine {
+                event_type,
+                text,
+                tool,
+                ..
+            } => match event_type.as_str() {
+                "assistant" => {
+                    if let Some(t) = text {
+                        for line in t.lines() {
+                            stdout.push(format!(">>> {}", display_text(line)));
+                        }
+                    }
+                }
+                "tool_use" => {
+                    let tool_name = tool.as_deref().unwrap_or("?");
+                    let input = text.as_deref().unwrap_or("");
+                    stdout.push(format!(
+                        "  [{}] {}",
+                        display_text(tool_name),
+                        display_text(input)
+                    ));
+                }
+                _ => {}
+            },
+            WatchEvent::CostThreshold {
+                id,
+                cost_usd,
+                threshold,
+            } => {
+                stderr.push(format!(
+                    "⚠ {}: cost ${cost_usd:.2} exceeds ${threshold:.2} threshold",
+                    display_text(id)
+                ));
+            }
+            WatchEvent::Completed {
+                id,
+                cost_usd,
+                pr_url,
+                ..
+            } => {
+                let cost = cost_usd
+                    .map(|c| format!("${c:.2}"))
+                    .unwrap_or_else(|| "-".to_string());
+                let pr = pr_url.as_deref().unwrap_or("no PR");
+                stderr.push(format!(
+                    "✅ {}: done ({cost}) {}",
+                    display_text(id),
+                    display_text(pr)
+                ));
+            }
+            WatchEvent::Failed { id, subtype, .. } => {
+                stderr.push(format!(
+                    "❌ {}: failed ({})",
+                    display_text(id),
+                    display_text(subtype)
+                ));
+            }
+            WatchEvent::SessionDied { id } => {
+                stderr.push(format!(
+                    "💀 {}: session died without result event",
+                    display_text(id)
+                ));
+            }
+        },
+        OutputFormat::Pretty => match event {
+            WatchEvent::Started {
+                id,
+                task,
+                directive,
+                ..
+            } => {
+                let label = task.as_deref().unwrap_or(id);
+                stderr.push(format!(
+                    "▶ {} ({})",
+                    display_text(label),
+                    display_text(directive)
+                ));
+            }
+            WatchEvent::LogLine {
+                id,
+                event_type,
+                text,
+                tool,
+                ..
+            } => match event_type.as_str() {
+                "assistant" => {
+                    if let Some(t) = text {
+                        let first = t.lines().next().unwrap_or("");
+                        stdout.push(format!(
+                            "  [{}] {}",
+                            display_text(id),
+                            truncate(&display_text(first), 120)
+                        ));
+                    }
+                }
+                "tool_use" => {
+                    let name = tool.as_deref().unwrap_or("?");
+                    let input = text.as_deref().unwrap_or("");
+                    stdout.push(format!(
+                        "  [{}] \x1b[2m[{}]\x1b[0m {}",
+                        display_text(id),
+                        display_text(name),
+                        truncate(&display_text(input), 120)
+                    ));
+                }
+                _ => {}
+            },
+            WatchEvent::CostThreshold {
+                id,
+                cost_usd,
+                threshold,
+                ..
+            } => {
+                stderr.push(format!(
+                    "  \x1b[33m{}: ⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m",
+                    display_text(id)
+                ));
+            }
+            WatchEvent::Completed {
+                id,
+                cost_usd,
+                pr_url,
+                ..
+            } => {
+                let cost = cost_usd
+                    .map(|c| format!("${c:.2}"))
+                    .unwrap_or_else(|| "-".into());
+                let pr = pr_url.as_deref().unwrap_or("");
+                stderr.push(format!(
+                    "  \x1b[32m{}: ✓ done ({cost}) {}\x1b[0m",
+                    display_text(id),
+                    display_text(pr)
+                ));
+            }
+            WatchEvent::Failed { id, subtype, .. } => {
+                stderr.push(format!(
+                    "  \x1b[31m{}: ✗ failed ({})\x1b[0m",
+                    display_text(id),
+                    display_text(subtype)
+                ));
+            }
+            WatchEvent::SessionDied { id } => {
+                stderr.push(format!(
+                    "  \x1b[31m{}: ✗ session died\x1b[0m",
+                    display_text(id)
+                ));
+            }
+        },
+    }
+
+    (stdout, stderr)
+}
+
 /// Main entry point for `atc watch`.
 pub async fn run_watch(
     config: &AtcConfig,
@@ -398,123 +574,101 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
     // Broadcast to socket consumers
     let _ = tx.send(json.clone());
 
-    match format {
-        OutputFormat::Ndjson => {
-            println!("{json}");
-        }
-        OutputFormat::Human => match event {
-            WatchEvent::Started {
-                id,
-                task,
-                directive,
-                ..
-            } => {
-                let label = task.as_deref().unwrap_or(id);
-                eprintln!("▶ watching {label} ({directive})");
-            }
-            WatchEvent::LogLine {
-                event_type,
-                text,
-                tool,
-                ..
-            } => match event_type.as_str() {
-                "assistant" => {
-                    if let Some(t) = text {
-                        for line in t.lines() {
-                            println!(">>> {line}");
-                        }
-                    }
-                }
-                "tool_use" => {
-                    let tool_name = tool.as_deref().unwrap_or("?");
-                    let input = text.as_deref().unwrap_or("");
-                    println!("  [{tool_name}] {input}");
-                }
-                _ => {}
-            },
-            WatchEvent::CostThreshold {
-                id,
-                cost_usd,
-                threshold,
-            } => {
-                eprintln!("⚠ {id}: cost ${cost_usd:.2} exceeds ${threshold:.2} threshold");
-            }
-            WatchEvent::Completed {
-                id,
-                cost_usd,
-                pr_url,
-                ..
-            } => {
-                let cost = cost_usd
-                    .map(|c| format!("${c:.2}"))
-                    .unwrap_or_else(|| "-".to_string());
-                let pr = pr_url.as_deref().unwrap_or("no PR");
-                eprintln!("✅ {id}: done ({cost}) {pr}");
-            }
-            WatchEvent::Failed { id, subtype, .. } => {
-                eprintln!("❌ {id}: failed ({subtype})");
-            }
-            WatchEvent::SessionDied { id } => {
-                eprintln!("💀 {id}: session died without result event");
-            }
-        },
-        OutputFormat::Pretty => match event {
-            WatchEvent::Started {
-                id,
-                task,
-                directive,
-                ..
-            } => {
-                let label = task.as_deref().unwrap_or(id);
-                eprintln!("▶ {label} ({directive})");
-            }
-            WatchEvent::LogLine {
-                id,
-                event_type,
-                text,
-                tool,
-                ..
-            } => match event_type.as_str() {
-                "assistant" => {
-                    if let Some(t) = text {
-                        // First line only, truncated
-                        let first = t.lines().next().unwrap_or("");
-                        println!("  [{id}] {first}");
-                    }
-                }
-                "tool_use" => {
-                    let name = tool.as_deref().unwrap_or("?");
-                    let input = text.as_deref().unwrap_or("");
-                    println!("  [{id}] \x1b[2m[{name}]\x1b[0m {input}");
-                }
-                _ => {}
-            },
-            WatchEvent::CostThreshold {
-                id,
-                cost_usd,
-                threshold,
-                ..
-            } => {
-                eprintln!("  \x1b[33m{id}: ⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m");
-            }
-            WatchEvent::Completed {
-                id,
-                cost_usd,
-                pr_url,
-                ..
-            } => {
-                let cost = cost_usd
-                    .map(|c| format!("${c:.2}"))
-                    .unwrap_or_else(|| "-".into());
-                let pr = pr_url.as_deref().unwrap_or("");
-                eprintln!("  \x1b[32m{id}: ✓ done ({cost}) {pr}\x1b[0m");
-            }
-            WatchEvent::Failed { id, subtype, .. } => {
-                eprintln!("  \x1b[31m{id}: ✗ failed ({subtype})\x1b[0m");
-            }
-            WatchEvent::SessionDied { id } => {
-                eprintln!("  \x1b[31m{id}: ✗ session died\x1b[0m");
-            }
-        },
+    if matches!(format, OutputFormat::Ndjson) {
+        println!("{json}");
+        return;
+    }
+
+    let (stdout, stderr) = render_event_lines(event, format);
+    for line in stdout {
+        println!("{line}");
+    }
+    for line in stderr {
+        eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn joined(stdout: &[String], stderr: &[String]) -> String {
+        stdout
+            .iter()
+            .chain(stderr.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_no_raw_terminal_controls(output: &str) {
+        assert!(!output.contains('\x1b'), "raw ESC in output: {output:?}");
+        assert!(!output.contains('\x07'), "raw BEL in output: {output:?}");
+        assert!(
+            !output.contains('\u{202e}'),
+            "raw bidi control in output: {output:?}"
+        );
+    }
+
+    #[test]
+    fn human_renderer_escapes_started_event_fields() {
+        let event = WatchEvent::Started {
+            id: "disp-\x1b[2J".to_string(),
+            task: Some("tasks/evil\x07\u{202e}gpj.exe".to_string()),
+            directive: "implement\x1b[31m".to_string(),
+            worktree: "/tmp/worktree".to_string(),
+        };
+
+        let (stdout, stderr) = render_event_lines(&event, &OutputFormat::Human);
+        let output = joined(&stdout, &stderr);
+
+        assert_no_raw_terminal_controls(&output);
+        assert!(output.contains("\\x1b"));
+        assert!(output.contains("\\x07"));
+        assert!(output.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn human_renderer_escapes_log_line_payloads() {
+        let assistant = WatchEvent::LogLine {
+            id: "disp".to_string(),
+            event_type: "assistant".to_string(),
+            text: Some("first\x1b[2J\nsecond\x07\u{202e}".to_string()),
+            tool: None,
+        };
+        let tool = WatchEvent::LogLine {
+            id: "disp".to_string(),
+            event_type: "tool_use".to_string(),
+            text: Some("{\"cmd\":\"rm -rf /\x1b[31m\"}".to_string()),
+            tool: Some("Bash\u{202e}".to_string()),
+        };
+
+        let (stdout_a, stderr_a) = render_event_lines(&assistant, &OutputFormat::Human);
+        let (stdout_t, stderr_t) = render_event_lines(&tool, &OutputFormat::Human);
+        let output = format!(
+            "{}\n{}",
+            joined(&stdout_a, &stderr_a),
+            joined(&stdout_t, &stderr_t)
+        );
+
+        assert_no_raw_terminal_controls(&output);
+        assert!(output.contains("\\x1b"));
+        assert!(output.contains("\\x07"));
+        assert!(output.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn pretty_renderer_escapes_user_bidi_inside_colored_lines() {
+        let event = WatchEvent::Failed {
+            id: "disp-\u{202e}gpj.exe".to_string(),
+            status: "failed".to_string(),
+            subtype: "error-\u{202e}".to_string(),
+        };
+
+        let (stdout, stderr) = render_event_lines(&event, &OutputFormat::Pretty);
+        let output = joined(&stdout, &stderr);
+
+        assert!(!output.contains('\u{202e}'));
+        assert!(output.contains("\\u{202e}"));
     }
 }

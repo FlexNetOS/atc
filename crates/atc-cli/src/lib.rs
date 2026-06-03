@@ -33,8 +33,9 @@ pub mod status;
 pub mod stop;
 pub mod style;
 pub mod subprocess;
-pub mod terminal_text;
 pub mod watch;
+
+pub(crate) mod shell_text;
 
 #[cfg(test)]
 pub(crate) mod test_support;

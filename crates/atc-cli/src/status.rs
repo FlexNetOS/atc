@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use atc_core::config::PagerConfig;
 use atc_core::registry::{Registry, StatusFilter};
+use atc_core::terminal_text::display_text;
 use atc_core::types::{DispatchRecord, Status, WorkUnit};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -93,15 +94,11 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
     for r in records {
         let dispatched = r.dispatched_at.format("%Y-%m-%dT%H:%M:%S").to_string();
         let status = render_status(r.status);
-        let task = r.task_slug.as_deref().unwrap_or(&r.id);
-        let task_display = if narrow {
-            truncate(task, 40)
-        } else {
-            task.to_string()
-        };
+        let task = display_text(r.task_slug.as_deref().unwrap_or(&r.id));
+        let task_display = if narrow { truncate(&task, 40) } else { task };
         let task_styled = apply(task_display, strong());
         let directive_str = r.directive.as_str().to_string();
-        let pr_urls_display = format_pr_list(&r.pr_urls);
+        let pr_urls_display = display_text(&format_pr_list(&r.pr_urls));
         let cost = render_cost(r.cost_usd);
         let turns = r
             .num_turns
@@ -111,11 +108,11 @@ pub fn build_table(records: &[DispatchRecord], width: u16) -> String {
             .duration_ms
             .map(format_duration)
             .unwrap_or_else(|| "-".to_string());
-        let worktree_str = r.worktree_path.to_string_lossy();
+        let worktree_str = display_text(&r.worktree_path.display().to_string());
         let worktree = if narrow {
             truncate(&worktree_str, 40)
         } else {
-            worktree_str.to_string()
+            worktree_str
         };
 
         table.add_row(vec![
@@ -277,10 +274,10 @@ pub fn build_grouped_table(
     ]);
 
     for wu in work_units {
-        let id = short_id(&wu.id);
-        let task = wu.task_slug.as_deref().unwrap_or("(none)");
-        let branch = wu.branch.as_deref().unwrap_or("-");
-        let prs = format_pr_list(&wu.pr_urls);
+        let id = display_text(&short_id(&wu.id));
+        let task = display_text(wu.task_slug.as_deref().unwrap_or("(none)"));
+        let branch = display_text(wu.branch.as_deref().unwrap_or("-"));
+        let prs = display_text(&format_pr_list(&wu.pr_urls));
         let dispatches_for_wu = by_wu.get(wu.id.as_str());
         let dispatch_count = dispatches_for_wu.map(|d| d.len()).unwrap_or(0);
         let dispatch_label = format!(
@@ -301,7 +298,7 @@ pub fn build_grouped_table(
         };
         table.add_row(vec![
             id,
-            branch.to_string(),
+            branch,
             apply(task, strong()),
             render_work_unit_status(wu.status),
             prs,
@@ -311,13 +308,13 @@ pub fn build_grouped_table(
     }
 
     for r in &orphan_records {
-        let id = short_id(&r.id);
-        let task = r.task_slug.as_deref().unwrap_or("(none)");
-        let prs = format_pr_list(&r.pr_urls);
+        let id = display_text(&short_id(&r.id));
+        let task = display_text(r.task_slug.as_deref().unwrap_or("(none)"));
+        let prs = display_text(&format_pr_list(&r.pr_urls));
         let cost_str = render_cost(r.cost_usd);
         table.add_row(vec![
             id,
-            r.branch.clone(),
+            display_text(&r.branch),
             apply(task, strong()),
             render_status(r.status),
             prs,
@@ -613,6 +610,15 @@ mod tests {
         }
     }
 
+    fn assert_no_raw_terminal_controls(output: &str) {
+        assert!(!output.contains('\x1b'), "raw ESC in output: {output:?}");
+        assert!(!output.contains('\x07'), "raw BEL in output: {output:?}");
+        assert!(
+            !output.contains('\u{202e}'),
+            "raw bidi control in output: {output:?}"
+        );
+    }
+
     #[test]
     fn test_format_duration() {
         assert_eq!(format_duration(592_000), "9m 52s");
@@ -640,6 +646,21 @@ mod tests {
         assert!(table.contains("running"));
         assert!(table.contains("$1.50"));
         assert!(table.contains("9m 52s"));
+    }
+
+    #[test]
+    fn test_build_table_escapes_terminal_controls_in_human_cells() {
+        crate::style::set_color_mode(crate::style::ColorMode::Never);
+        let mut record = sample_record("id-1", Status::Running);
+        record.task_slug = Some("tasks/evil\x1b[2J\x07\u{202e}gpj.exe".to_string());
+        record.worktree_path = PathBuf::from("/tmp/worktrees/evil\x1b[31m");
+
+        let table = build_table(&[record], 160);
+
+        assert_no_raw_terminal_controls(&table);
+        assert!(table.contains("\\x1b"));
+        assert!(table.contains("\\x07"));
+        assert!(table.contains("\\u{202e}"));
     }
 
     #[test]
@@ -789,6 +810,32 @@ mod tests {
         assert!(table.contains("tasks--harmony-537"));
         assert!(table.contains("atc#57"));
         assert!(table.contains("1 run"));
+    }
+
+    #[test]
+    fn test_build_grouped_table_escapes_terminal_controls_in_work_units() {
+        use atc_core::types::{WorkUnit, WorkUnitStatus};
+        crate::style::set_color_mode(crate::style::ColorMode::Never);
+
+        let wu = WorkUnit {
+            id: "wu-\x1b[2J".to_string(),
+            task_slug: Some("tasks/evil\x07".to_string()),
+            branch: Some("branch-\u{202e}gpj.exe".to_string()),
+            repos: vec!["open-source/atc".to_string()],
+            pr_urls: vec![],
+            status: WorkUnitStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut record = sample_record("d-1", Status::Running);
+        record.work_unit_id = Some(wu.id.clone());
+
+        let table = build_grouped_table(std::slice::from_ref(&wu), &[record], 200);
+
+        assert_no_raw_terminal_controls(&table);
+        assert!(table.contains("\\x1b"));
+        assert!(table.contains("\\x07"));
+        assert!(table.contains("\\u{202e}"));
     }
 
     #[test]
