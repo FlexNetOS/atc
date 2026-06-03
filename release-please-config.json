@@ -18,10 +18,10 @@
         { "type": "refactor", "section": "Refactoring" },
         { "type": "perf", "section": "Performance" },
         { "type": "deps", "section": "Dependencies" },
-        { "type": "chore", "section": "Miscellaneous" },
-        { "type": "docs", "section": "Documentation" },
-        { "type": "test", "section": "Tests" },
-        { "type": "ci", "section": "CI" }
+        { "type": "chore", "section": "Miscellaneous", "hidden": false },
+        { "type": "docs", "section": "Documentation", "hidden": false },
+        { "type": "test", "section": "Tests", "hidden": false },
+        { "type": "ci", "section": "CI", "hidden": false }
       ]
     }
   }
