@@ -1,6 +1,6 @@
 # Git Hooks
 
-Optional pre-commit hooks for local development.
+Optional local hooks for development.
 
 ## Setup
 
@@ -16,6 +16,10 @@ Or use the Makefile:
 make install-hooks
 ```
 
+`make install-hooks` installs pinned npm development dependencies from
+`package-lock.json` so the commit message hook can run without fetching packages
+at commit time.
+
 ## Available Hooks
 
 ### pre-commit
@@ -25,6 +29,24 @@ Runs `cargo fmt --check` before commit. Blocks commit if formatting is wrong.
 To fix: run `cargo fmt --all` and re-stage files.
 
 To bypass (not recommended): `git commit --no-verify`
+
+### commit-msg
+
+Validates the first line of the commit message with the same Conventional
+Commits shape required by the PR-title CI check. This keeps local commits and
+squash-merge titles parseable by Release Please.
+
+Examples:
+
+```text
+feat: add resumable runs
+feat!: change dispatch metadata format
+fix(cli): preserve json output envelope
+chore(main): release 0.1.6
+```
+
+To bypass local hooks in an emergency: `git commit --no-verify`. The required
+PR-title check still protects squash merges.
 
 ### pre-push
 

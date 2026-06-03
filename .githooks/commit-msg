@@ -1,0 +1,26 @@
+#!/bin/bash
+# Commit message hook — validates Conventional Commits format.
+# PR title CI remains the merge-blocking guard for squash-merge subjects.
+
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "Warning: npx not found; skipping local commitlint check." >&2
+  echo "CI still requires a semantic PR title before merge." >&2
+  exit 0
+fi
+
+if [ ! -x node_modules/.bin/commitlint ]; then
+  echo "Warning: local commitlint is not installed; skipping local check." >&2
+  echo "Run 'make install-hooks' to install pinned hook dependencies." >&2
+  echo "CI still requires a semantic PR title before merge." >&2
+  exit 0
+fi
+
+if ! output=$(npx --no-install commitlint --edit "$1" 2>&1); then
+  printf '%s\n' "$output" >&2
+  exit 1
+fi
