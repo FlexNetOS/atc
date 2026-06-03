@@ -247,7 +247,7 @@ mod args {
             /// Include terminal records beyond the default active/needs-* set
             #[arg(long)]
             all: bool,
-            /// Interactive refresh interval, e.g. 1s, 2s, 500ms
+            /// Interactive refresh interval, e.g. 1s, 2s, 500ms (minimum 250ms)
             #[arg(long = "poll-interval")]
             poll_interval: Option<String>,
             /// Render once and exit

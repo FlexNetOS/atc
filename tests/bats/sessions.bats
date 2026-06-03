@@ -99,6 +99,35 @@ SQL
     echo "$STDOUT" | jq -e '.rows[0].group_key == "wu-001"' >/dev/null
 }
 
+@test "sessions task and search filters use linked work-unit task fallback" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = NULL
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --task tasks/test-1
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.rows | length == 1' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].id == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].task_slug == "tasks/test-1"' >/dev/null
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --search tasks/test-1
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.rows | length == 1' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].id == "disp-001"' >/dev/null
+}
+
+@test "sessions rejects zero poll interval before entering tui" {
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --poll-interval 0s
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"--poll-interval must be at least 250ms"* ]]
+}
+
 @test "sessions renders hostile registry values as inert text" {
     setup_sessions_data
     local sentinel="$TEST_TMPDIR/sessions-pwned"
@@ -114,5 +143,39 @@ SQL
     assert_success
     assert_output --partial "ATC Sessions"
     assert_output --partial "tmux; touch"
+    assert_file_not_exists "$sentinel"
+}
+
+@test "sessions --json emits hostile registry values as inert JSON strings" {
+    require_jq
+    setup_sessions_data
+    local sentinel="$TEST_TMPDIR/sessions-json-pwned"
+    local command_payload="\$(touch $sentinel)"
+    local semicolon_payload="value; touch $sentinel"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET branch = 'branch-$command_payload',
+    session = 'tmux-$semicolon_payload',
+    worktree_path = '$TEST_TMPDIR/worktree-$command_payload',
+    log_file = '$TEST_TMPDIR/log-$command_payload.jsonl',
+    agent_provider = 'claude-$semicolon_payload',
+    agent_transcript_cwd = '$TEST_TMPDIR/transcript-$command_payload',
+    resume_of_dispatch_id = 'source-$command_payload',
+    pr_urls = '["https://example.invalid/pr?x=$command_payload","https://example.invalid/$semicolon_payload"]'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].branch | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$semicolon_payload" '.rows[0].session | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].worktree_path | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].log_file | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$semicolon_payload" '.rows[0].provider | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].transcript_cwd | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].resume_of_dispatch_id | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].pr_urls[0] | contains($payload)' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$semicolon_payload" '.rows[0].pr_urls[1] | contains($payload)' >/dev/null
     assert_file_not_exists "$sentinel"
 }

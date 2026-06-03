@@ -1,6 +1,6 @@
 //! `atc sessions` — keyboard switchboard for ATC dispatch sessions.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::{Registry, StatusFilter};
@@ -28,6 +28,9 @@ use std::time::{Duration, Instant};
 
 use crate::output_schema::SCHEMA_VERSION;
 use crate::status::{format_pr_list, DEFAULT_STATUSES};
+
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct SessionsOpts {
@@ -350,7 +353,7 @@ pub fn build_snapshot(
 
     let mut rows: Vec<SessionRow> = records
         .into_iter()
-        .filter(|record| record_matches_filter(record, filter))
+        .filter(|record| record_matches_filter(record, &work_units_by_id, filter))
         .map(|record| row_from_record(record, &work_units_by_id, group))
         .collect();
     rows.sort_by(|a, b| {
@@ -384,13 +387,7 @@ fn row_from_record(
     group: SessionGroupBy,
 ) -> SessionRow {
     let group_key = group_key(&record, work_units_by_id, group);
-    let task_slug = record.task_slug.clone().or_else(|| {
-        record
-            .work_unit_id
-            .as_ref()
-            .and_then(|id| work_units_by_id.get(id))
-            .and_then(|wu| wu.task_slug.clone())
-    });
+    let task_slug = task_slug_for_record(&record, work_units_by_id).map(str::to_string);
     let log_file = path_to_nonempty_string(&record.log_file);
     let actions = action_state(&record);
     SessionRow {
@@ -427,17 +424,9 @@ fn group_key(
     group: SessionGroupBy,
 ) -> String {
     match group {
-        SessionGroupBy::Task => record
-            .task_slug
-            .clone()
-            .or_else(|| {
-                record
-                    .work_unit_id
-                    .as_ref()
-                    .and_then(|id| work_units_by_id.get(id))
-                    .and_then(|wu| wu.task_slug.clone())
-            })
-            .unwrap_or_else(|| "(no task)".to_string()),
+        SessionGroupBy::Task => task_slug_for_record(record, work_units_by_id)
+            .unwrap_or("(no task)")
+            .to_string(),
         SessionGroupBy::WorkUnit => record
             .work_unit_id
             .clone()
@@ -449,9 +438,26 @@ fn group_key(
     }
 }
 
-fn record_matches_filter(record: &DispatchRecord, filter: &SessionFilter) -> bool {
+fn task_slug_for_record<'a>(
+    record: &'a DispatchRecord,
+    work_units_by_id: &'a HashMap<String, WorkUnit>,
+) -> Option<&'a str> {
+    record.task_slug.as_deref().or_else(|| {
+        record
+            .work_unit_id
+            .as_ref()
+            .and_then(|id| work_units_by_id.get(id))
+            .and_then(|wu| wu.task_slug.as_deref())
+    })
+}
+
+fn record_matches_filter(
+    record: &DispatchRecord,
+    work_units_by_id: &HashMap<String, WorkUnit>,
+    filter: &SessionFilter,
+) -> bool {
     if let Some(task) = filter.task.as_deref() {
-        if record.task_slug.as_deref() != Some(task) {
+        if task_slug_for_record(record, work_units_by_id) != Some(task) {
             return false;
         }
     }
@@ -479,14 +485,17 @@ fn record_matches_filter(record: &DispatchRecord, filter: &SessionFilter) -> boo
     }
     if let Some(search) = filter.search.as_deref() {
         let needle = search.to_ascii_lowercase();
-        if !search_haystack(record).contains(&needle) {
+        if !search_haystack(record, work_units_by_id).contains(&needle) {
             return false;
         }
     }
     true
 }
 
-fn search_haystack(record: &DispatchRecord) -> String {
+fn search_haystack(
+    record: &DispatchRecord,
+    work_units_by_id: &HashMap<String, WorkUnit>,
+) -> String {
     let mut parts = vec![
         record.id.clone(),
         record.branch.clone(),
@@ -497,8 +506,8 @@ fn search_haystack(record: &DispatchRecord) -> String {
         record.worktree_path.to_string_lossy().to_string(),
         record.log_file.to_string_lossy().to_string(),
     ];
-    if let Some(task) = &record.task_slug {
-        parts.push(task.clone());
+    if let Some(task) = task_slug_for_record(record, work_units_by_id) {
+        parts.push(task.to_string());
     }
     if let Some(work_unit) = &record.work_unit_id {
         parts.push(work_unit.clone());
@@ -577,7 +586,9 @@ pub fn action_state(record: &DispatchRecord) -> SessionActionState {
 }
 
 fn readable_file(path: &Path) -> bool {
-    !path.as_os_str().is_empty() && path.metadata().map(|m| m.is_file()).unwrap_or(false)
+    !path.as_os_str().is_empty()
+        && path.metadata().map(|m| m.is_file()).unwrap_or(false)
+        && std::fs::File::open(path).is_ok()
 }
 
 fn path_to_nonempty_string(path: &Path) -> Option<String> {
@@ -827,11 +838,7 @@ async fn run_tui(
     poll_interval: Duration,
     initial_snapshot: SessionSnapshot,
 ) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = setup_tui_terminal()?;
 
     let mut app = SessionsApp::new(initial_snapshot);
     let mut last_poll = Instant::now();
@@ -1265,26 +1272,154 @@ fn prompt_line(label: &str) -> Result<Option<String>> {
     }
 }
 
+#[derive(Debug, Default)]
+struct TuiSetupCleanup {
+    raw_mode_enabled: bool,
+    alternate_screen_entered: bool,
+}
+
+impl TuiSetupCleanup {
+    fn active() -> Self {
+        Self {
+            raw_mode_enabled: true,
+            alternate_screen_entered: true,
+        }
+    }
+
+    fn mark_raw_mode_enabled(&mut self) {
+        self.raw_mode_enabled = true;
+    }
+
+    fn mark_alternate_screen_entered(&mut self) {
+        self.alternate_screen_entered = true;
+    }
+
+    fn disarm(&mut self) {
+        self.raw_mode_enabled = false;
+        self.alternate_screen_entered = false;
+    }
+
+    fn cleanup_best_effort_stdout(&mut self) {
+        let _ = self.cleanup_with_ops(
+            || {
+                let mut stdout = io::stdout();
+                execute!(stdout, LeaveAlternateScreen).context("failed to leave alternate screen")
+            },
+            || disable_raw_mode().context("failed to disable raw mode"),
+        );
+    }
+
+    fn cleanup_with_backend<W: Write>(&mut self, writer: &mut W) -> Result<()> {
+        self.cleanup_with_ops(
+            || execute!(writer, LeaveAlternateScreen).context("failed to leave alternate screen"),
+            || disable_raw_mode().context("failed to disable raw mode"),
+        )
+    }
+
+    fn cleanup_with_ops<LeaveAlternate, DisableRaw>(
+        &mut self,
+        mut leave_alternate: LeaveAlternate,
+        mut disable_raw: DisableRaw,
+    ) -> Result<()>
+    where
+        LeaveAlternate: FnMut() -> Result<()>,
+        DisableRaw: FnMut() -> Result<()>,
+    {
+        let mut first_error = None;
+
+        if self.alternate_screen_entered {
+            if let Err(e) = leave_alternate() {
+                first_error = Some(e);
+            }
+            self.alternate_screen_entered = false;
+        }
+
+        if self.raw_mode_enabled {
+            if let Err(e) = disable_raw() {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            self.raw_mode_enabled = false;
+        }
+
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+fn setup_tui_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    let mut cleanup = TuiSetupCleanup::default();
+
+    enable_raw_mode().context("failed to enable raw mode")?;
+    cleanup.mark_raw_mode_enabled();
+
+    let mut stdout = io::stdout();
+    if let Err(e) =
+        execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")
+    {
+        cleanup.cleanup_best_effort_stdout();
+        return Err(e);
+    }
+    cleanup.mark_alternate_screen_entered();
+
+    let backend = CrosstermBackend::new(stdout);
+    match Terminal::new(backend).context("failed to initialize terminal") {
+        Ok(terminal) => {
+            cleanup.disarm();
+            Ok(terminal)
+        }
+        Err(e) => {
+            cleanup.cleanup_best_effort_stdout();
+            Err(e)
+        }
+    }
+}
+
 fn leave_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    TuiSetupCleanup::active().cleanup_with_backend(terminal.backend_mut())?;
     terminal.show_cursor()?;
     Ok(())
 }
 
 fn enter_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-    terminal.clear()?;
+    let mut cleanup = TuiSetupCleanup::default();
+
+    enable_raw_mode().context("failed to enable raw mode")?;
+    cleanup.mark_raw_mode_enabled();
+
+    if let Err(e) = execute!(terminal.backend_mut(), EnterAlternateScreen)
+        .context("failed to enter alternate screen")
+    {
+        cleanup.cleanup_best_effort_stdout();
+        return Err(e);
+    }
+    cleanup.mark_alternate_screen_entered();
+
+    if let Err(e) = terminal.clear().context("failed to clear terminal") {
+        let _ = cleanup.cleanup_with_backend(terminal.backend_mut());
+        return Err(e);
+    }
+
+    cleanup.disarm();
     Ok(())
 }
 
 fn parse_poll_interval(value: Option<&str>) -> Result<Duration> {
-    match value {
+    let interval = match value {
         Some(value) => humantime::parse_duration(value)
-            .with_context(|| format!("invalid --poll-interval value '{value}'")),
-        None => Ok(Duration::from_secs(2)),
+            .with_context(|| format!("invalid --poll-interval value '{value}'"))?,
+        None => DEFAULT_POLL_INTERVAL,
+    };
+    if interval < MIN_POLL_INTERVAL {
+        bail!(
+            "--poll-interval must be at least {}",
+            humantime::format_duration(MIN_POLL_INTERVAL)
+        );
     }
+    Ok(interval)
 }
 
 pub fn render_app(frame: &mut Frame<'_>, app: &SessionsApp) {
@@ -1496,6 +1631,7 @@ mod tests {
     };
     use chrono::TimeZone;
     use ratatui::backend::TestBackend;
+    use std::cell::RefCell;
     use std::path::PathBuf;
 
     fn record(id: &str, status: Status) -> DispatchRecord {
@@ -1583,6 +1719,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_filters_and_searches_work_unit_task_fallback() {
+        let mut fallback = record("fallback", Status::Running);
+        fallback.task_slug = None;
+        fallback.work_unit_id = Some("wu-1".to_string());
+
+        let task_filter = SessionFilter {
+            task: Some("tasks/harmony-794".to_string()),
+            ..SessionFilter::default()
+        };
+        let snapshot = build_snapshot(
+            vec![fallback.clone()],
+            vec![work_unit()],
+            &task_filter,
+            SessionGroupBy::Task,
+        );
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].id, "fallback");
+        assert_eq!(
+            snapshot.rows[0].task_slug.as_deref(),
+            Some("tasks/harmony-794")
+        );
+        assert_eq!(snapshot.rows[0].group_key, "tasks/harmony-794");
+
+        let search_filter = SessionFilter {
+            search: Some("harmony-794".to_string()),
+            ..SessionFilter::default()
+        };
+        let snapshot = build_snapshot(
+            vec![fallback],
+            vec![work_unit()],
+            &search_filter,
+            SessionGroupBy::None,
+        );
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].id, "fallback");
+    }
+
+    #[test]
     fn action_state_gates_resume_and_redirect() {
         let mut running = record("running", Status::Running);
         let running_actions = action_state(&running);
@@ -1602,6 +1776,43 @@ mod tests {
             .reason
             .unwrap()
             .contains("provider does not advertise"));
+    }
+
+    #[test]
+    fn action_state_enables_logs_only_for_openable_files() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_file = tempdir.path().join("dispatch.jsonl");
+        std::fs::write(&log_file, "{}\n").unwrap();
+
+        let mut readable = record("readable", Status::Running);
+        readable.log_file = log_file;
+        let actions = action_state(&readable);
+        assert!(actions.logs.enabled);
+        assert!(actions.follow_logs.enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn action_state_rejects_unreadable_log_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_file = tempdir.path().join("dispatch.jsonl");
+        std::fs::write(&log_file, "{}\n").unwrap();
+
+        let mut permissions = std::fs::metadata(&log_file).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&log_file, permissions).unwrap();
+
+        let mut unreadable = record("unreadable", Status::Running);
+        unreadable.log_file = log_file.clone();
+        let actions = action_state(&unreadable);
+        assert!(!actions.logs.enabled);
+        assert!(!actions.follow_logs.enabled);
+
+        let mut permissions = std::fs::metadata(&log_file).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&log_file, permissions).unwrap();
     }
 
     #[test]
@@ -1671,6 +1882,70 @@ mod tests {
         assert_eq!(group, SessionGroupBy::Status);
         group = group.next();
         assert_eq!(group, SessionGroupBy::None);
+    }
+
+    #[test]
+    fn parse_poll_interval_rejects_zero_and_too_fast_values() {
+        assert_eq!(parse_poll_interval(None).unwrap(), DEFAULT_POLL_INTERVAL);
+        assert_eq!(
+            parse_poll_interval(Some("250ms")).unwrap(),
+            MIN_POLL_INTERVAL
+        );
+        assert!(parse_poll_interval(Some("0s"))
+            .unwrap_err()
+            .to_string()
+            .contains("at least 250ms"));
+        assert!(parse_poll_interval(Some("249ms"))
+            .unwrap_err()
+            .to_string()
+            .contains("at least 250ms"));
+    }
+
+    #[test]
+    fn tui_setup_cleanup_runs_registered_cleanup_in_reverse_order() {
+        let calls = RefCell::new(Vec::new());
+        let mut cleanup = TuiSetupCleanup::active();
+
+        cleanup
+            .cleanup_with_ops(
+                || {
+                    calls.borrow_mut().push("leave-alternate");
+                    Ok(())
+                },
+                || {
+                    calls.borrow_mut().push("disable-raw");
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(calls.into_inner(), vec!["leave-alternate", "disable-raw"]);
+        assert!(!cleanup.alternate_screen_entered);
+        assert!(!cleanup.raw_mode_enabled);
+    }
+
+    #[test]
+    fn tui_setup_cleanup_reports_first_error_and_still_cleans_all_state() {
+        let calls = RefCell::new(Vec::new());
+        let mut cleanup = TuiSetupCleanup::active();
+
+        let err = cleanup
+            .cleanup_with_ops(
+                || {
+                    calls.borrow_mut().push("leave-alternate");
+                    Err(anyhow::anyhow!("leave failed"))
+                },
+                || {
+                    calls.borrow_mut().push("disable-raw");
+                    Err(anyhow::anyhow!("raw failed"))
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "leave failed");
+        assert_eq!(calls.into_inner(), vec!["leave-alternate", "disable-raw"]);
+        assert!(!cleanup.alternate_screen_entered);
+        assert!(!cleanup.raw_mode_enabled);
     }
 
     #[test]
