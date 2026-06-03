@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.6](https://github.com/gitkb/atc/compare/v0.1.5...v0.1.6) (2026-06-03)
+
+
+### Features
+
+* add durable agent session metadata ([#64](https://github.com/gitkb/atc/issues/64)) ([a4ac948](https://github.com/gitkb/atc/commit/a4ac948449745ad008fd180739d50011b3f7215c))
+* add composable ATC run resume ([#65](https://github.com/gitkb/atc/issues/65)) ([75c3e35](https://github.com/gitkb/atc/commit/75c3e35d84f18f0de5597a0894129fbe350c3910))
+
+
+### Bug Fixes
+
+* **release:** include all conventional types ([#67](https://github.com/gitkb/atc/issues/67)) ([e11d953](https://github.com/gitkb/atc/commit/e11d95300c1a814ca7905e64bbc528f88c67c201))
+
+
+### CI
+
+* add semantic PR title checks ([#66](https://github.com/gitkb/atc/issues/66)) ([37dafee](https://github.com/gitkb/atc/commit/37dafeef486d73130d6df48cee230c095fb1d629))
+
 ## [0.1.5](https://github.com/gitkb/atc/compare/v0.1.4...v0.1.5) (2026-04-26)
 
 
