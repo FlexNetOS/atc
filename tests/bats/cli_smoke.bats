@@ -16,11 +16,11 @@ load helpers/common
     assert_output --partial "dispatch"
 }
 
-@test "atc dispatch --help exits 0 and shows dispatch usage" {
-    run atc dispatch --help
+@test "atc run --help exits 0 and shows run usage" {
+    run atc run --help
     assert_success
-    assert_output --partial "SLUG"
-    assert_output --partial "MODE"
+    assert_output --partial "INPUT"
+    assert_output --partial "--directive"
 }
 
 @test "atc health --help exits 0 and shows health usage" {
@@ -39,14 +39,13 @@ load helpers/common
     assert_failure
 }
 
-@test "atc dispatch with no slug fails" {
-    run atc dispatch
+@test "atc run with no input fails" {
+    run atc run
     assert_failure
 }
 
-@test "atc dispatch with invalid directive fails with clap error" {
-    # Arg order: atc dispatch <SLUG> [DIRECTIVE]
-    run atc dispatch tasks/test-1 not-a-real-directive
+@test "atc run with invalid directive fails with clap error" {
+    run atc run task tasks/test-1 --directive not-a-real-directive
     [ "$status" -eq 2 ]
     assert_output --partial "invalid value"
 }
@@ -60,25 +59,25 @@ load helpers/common
 # Config loading
 # ---------------------------------------------------------------------------
 
-@test "atc dispatch with --config pointing to nonexistent file fails" {
-    run atc --config /tmp/does-not-exist-atc.toml dispatch tasks/test-1 implement
+@test "atc run with --config pointing to nonexistent file fails" {
+    run atc --config /tmp/does-not-exist-atc.toml run task tasks/test-1 --directive implement
     assert_failure
 }
 
-@test "atc dispatch with invalid TOML config fails" {
+@test "atc run with invalid TOML config fails" {
     local bad_config="$TEST_TMPDIR/bad.toml"
     echo "this is not valid toml [[[" > "$bad_config"
-    run atc --config "$bad_config" dispatch tasks/test-1 implement
+    run atc --config "$bad_config" run task tasks/test-1 --directive implement
     assert_failure
 }
 
-@test "atc dispatch with valid config but missing git-kb fails without panic" {
+@test "atc run with valid config but missing git-kb fails without panic" {
     write_test_config "$TEST_TMPDIR/atc.toml"
     mkdir -p "$TEST_TMPDIR/workspace"
 
     # This will fail because git-kb isn't available for mode resolution,
     # but it should NOT panic — it should return a clean error.
-    run atc --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
+    run atc --config "$TEST_TMPDIR/atc.toml" run task tasks/test-1 --directive implement --inline
     assert_failure
     refute_output --partial "panicked"
     refute_output --partial "SIGSEGV"
@@ -91,9 +90,8 @@ load helpers/common
 @test "all valid directives are accepted by clap" {
     local directives=(implement research kb-update review-fix pr-comments refine create-task)
     for d in "${directives[@]}"; do
-        # Arg order: atc dispatch <SLUG> [DIRECTIVE]
         # We just check that clap accepts the mode (it will fail later at config/git-kb).
-        run atc dispatch tasks/test-1 "$d"
+        run atc run task tasks/test-1 --directive "$d"
         # Status 2 = clap parse error — that would be a bug
         if [ "$status" -eq 2 ]; then
             echo "Directive '$d' rejected by clap with status 2"
@@ -110,9 +108,9 @@ load helpers/common
     write_test_config "$TEST_TMPDIR/atc.toml"
     mkdir -p "$TEST_TMPDIR/workspace"
 
-    # With ATC_CI=true, dispatch should run inline even without --inline flag.
+    # With ATC_CI=true, run should run inline even without --inline flag.
     # It will fail (no git-kb), but the error path differs from tmux mode.
-    ATC_CI=true run atc --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement
+    ATC_CI=true run atc --config "$TEST_TMPDIR/atc.toml" run task tasks/test-1 --directive implement
     assert_failure
     refute_output --partial "panicked"
 }
@@ -127,7 +125,7 @@ load helpers/common
 
     # Pass a slug that would be dangerous if interpolated into a shell command.
     # The binary should fail cleanly (no git-kb), NOT execute the injected command.
-    run atc --config "$TEST_TMPDIR/atc.toml" dispatch 'tasks/$(whoami)' implement --inline
+    run atc --config "$TEST_TMPDIR/atc.toml" run task 'tasks/$(whoami)' --directive implement --inline
     assert_failure
     refute_output --partial "panicked"
 }
@@ -137,7 +135,7 @@ load helpers/common
     mkdir -p "$dir_with_spaces"
     write_test_config "$dir_with_spaces/atc.toml" "$dir_with_spaces/atc.db"
 
-    run atc --config "$dir_with_spaces/atc.toml" dispatch tasks/test-1 implement --inline
+    run atc --config "$dir_with_spaces/atc.toml" run task tasks/test-1 --directive implement --inline
     # Should fail (no git-kb), but should not panic or misparse the path
     assert_failure
     refute_output --partial "panicked"
@@ -154,11 +152,13 @@ load helpers/common
     assert_output --partial "No dispatch records found"
 }
 
-@test "atc health --json with empty registry outputs empty array" {
+@test "atc health --json with empty registry outputs v1 envelope" {
+    require_jq
     write_test_config "$TEST_TMPDIR/atc.toml"
     run atc --config "$TEST_TMPDIR/atc.toml" health --json
     assert_success
-    assert_output "[]"
+    echo "$output" | jq -e '.schema_version == 1' >/dev/null
+    echo "$output" | jq -e '.records == []' >/dev/null
 }
 
 @test "atc health --all with empty registry shows no records" {
@@ -208,10 +208,10 @@ EOF
 # Empty / malformed config edge cases
 # ---------------------------------------------------------------------------
 
-@test "atc dispatch with empty config file fails cleanly" {
+@test "atc run with empty config file fails cleanly" {
     local empty_config="$TEST_TMPDIR/empty.toml"
     : > "$empty_config"
-    run atc --config "$empty_config" dispatch tasks/test-1 implement --inline
+    run atc --config "$empty_config" run task tasks/test-1 --directive implement --inline
     assert_failure
     refute_output --partial "panicked"
 }
@@ -225,8 +225,8 @@ EOF
     mkdir -p "$TEST_TMPDIR/workspace"
 
     # With RUST_LOG=debug, the tracing subscriber should emit DEBUG spans.
-    # The dispatch will fail (no git-kb), but we should see debug output.
-    RUST_LOG=debug run atc --config "$TEST_TMPDIR/atc.toml" dispatch tasks/test-1 implement --inline
+    # The run will fail (no git-kb), but we should see debug output.
+    RUST_LOG=debug run atc --config "$TEST_TMPDIR/atc.toml" run task tasks/test-1 --directive implement --inline
     assert_failure
     refute_output --partial "panicked"
     # Debug output should contain DEBUG level traces
@@ -294,11 +294,15 @@ EOF
     assert_output --partial "No dispatch records found"
 }
 
-@test "atc status --json with empty registry outputs empty array" {
+@test "atc status --json with empty registry outputs v1 envelope" {
+    require_jq
     write_test_config "$TEST_TMPDIR/atc.toml"
     run atc --config "$TEST_TMPDIR/atc.toml" status --json
     assert_success
-    assert_output "[]"
+    echo "$output" | jq -e '.schema_version == 1' >/dev/null
+    echo "$output" | jq -e '.records == []' >/dev/null
+    echo "$output" | jq -e '.work_units == []' >/dev/null
+    echo "$output" | jq -e '.summary.total == 0' >/dev/null
 }
 
 # ---------------------------------------------------------------------------

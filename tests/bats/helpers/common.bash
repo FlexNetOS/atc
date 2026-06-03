@@ -144,6 +144,20 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_task_slug ON dispatches(task_slug);
 CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);
 CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);
 CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);
+CREATE INDEX IF NOT EXISTS idx_dispatches_work_unit ON dispatches(work_unit_id);
+CREATE TABLE IF NOT EXISTS work_units (
+  id          TEXT PRIMARY KEY,
+  task_slug   TEXT,
+  branch      TEXT,
+  repos       TEXT NOT NULL DEFAULT '[]',
+  pr_urls     TEXT NOT NULL DEFAULT '[]',
+  status      TEXT NOT NULL DEFAULT 'active',
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_units_task ON work_units(task_slug);
+CREATE INDEX IF NOT EXISTS idx_work_units_branch ON work_units(branch);
+CREATE INDEX IF NOT EXISTS idx_work_units_status ON work_units(status);
 SCHEMA
 }
 
@@ -158,6 +172,19 @@ insert_test_dispatch() {
     sqlite3 "$db" <<SQL
 INSERT INTO dispatches (id, task_slug, branch, worktree_path, session, log_file, status, directive, retries, resolver, dispatched_at, updated_at)
 VALUES ('${id//\'/\'\'}', '${task_slug//\'/\'\'}', 'test-branch', '${TEST_TMPDIR//\'/\'\'}/worktree', '${id//\'/\'\'}', '${TEST_TMPDIR//\'/\'\'}/${id//\'/\'\'}.jsonl', '${status//\'/\'\'}', '${mode//\'/\'\'}', ${retries}, 'task', '$now', '$now');
+SQL
+}
+
+# ---------------------------------------------------------------------------
+# insert_test_work_unit — insert a work-unit record directly into the registry
+# ---------------------------------------------------------------------------
+insert_test_work_unit() {
+    local db="$1" id="$2" task_slug="$3" branch="${4:-test-branch}" status="${5:-active}"
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+    sqlite3 "$db" <<SQL
+INSERT INTO work_units (id, task_slug, branch, repos, pr_urls, status, created_at, updated_at)
+VALUES ('${id//\'/\'\'}', '${task_slug//\'/\'\'}', '${branch//\'/\'\'}', '["open-source/atc"]', '[]', '${status//\'/\'\'}', '$now', '$now');
 SQL
 }
 

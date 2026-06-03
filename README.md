@@ -57,6 +57,8 @@ atc daemon --queue default --queue ci-fixes
 
 # Check what's happening
 atc status
+atc sessions
+atc tui
 atc health
 atc daemon status
 ```
@@ -142,6 +144,8 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | `atc daemon stop` | Graceful shutdown |
 | `atc daemon status` | Uptime, queue depth, active dispatches |
 | `atc status` | Table view of all dispatches |
+| `atc sessions` | Keyboard switchboard for ATC dispatch sessions |
+| `atc tui` | Alias for `atc sessions` |
 | `atc info <id>` | Detailed view of a single dispatch |
 | `atc logs [-f] <id>` | Tail stream-json logs (human-readable) |
 | `atc health [--auto]` | Run 6-signal health checks (`--auto` dispatches review-fix for NeedsReview) |
@@ -293,6 +297,22 @@ atc run --resume <dispatch-id> 'summarize what changed and finish cleanup'
 
 `atc retry <id>` is intentionally different: it starts a fresh provider conversation for a failed dispatch and adjusts budget/turns when applicable. `atc redirect <id> '<msg>'` is also different: it sends text to a currently running tmux-backed session instead of creating a new dispatch record.
 
+## Session Switchboard
+
+`atc sessions` opens a terminal switchboard for ATC-known dispatch sessions. `atc tui` is the same command as a shorter alias. The switchboard is a convenience layer over the existing registry, status, info, logs, redirect, stop, cleanup, and resume surfaces; it does not replace those commands.
+
+```bash
+atc sessions
+atc tui
+atc sessions --task tasks/my-task
+atc sessions --provider claude
+atc sessions --status running
+atc sessions --once
+atc sessions --json
+```
+
+Use `--once` for a non-interactive table and `--json` for the stable v1 session envelope used by automation and UI dogfooding. Interactive mode polls the registry on a bounded interval, supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata and capability-gated actions, and hands off log/terminal actions through the existing ATC command logic.
+
 ## Configuration
 
 ATC loads config from (in priority order):
@@ -412,6 +432,7 @@ atc-core/                           atc-cli/
 +-- project_env.rs   .dispatch/env  +-- stop.rs           Stop command
 +-- types.rs         Core types     +-- cleanup.rs        Cleanup command
 +-- worktree.rs      Cleanup        +-- retry.rs          Adaptive retry
+                                    +-- sessions.rs       Session switchboard
                                     +-- health.rs         Health CLI
                                     +-- redirect.rs       Tmux injection
                                     +-- close.rs          Task closure

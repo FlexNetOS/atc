@@ -28,6 +28,7 @@ pub mod redirect;
 pub mod resolve;
 pub mod resolvers;
 pub mod retry;
+pub mod sessions;
 pub mod status;
 pub mod stop;
 pub mod style;
@@ -38,6 +39,7 @@ pub mod watch;
 pub(crate) mod test_support;
 
 mod args {
+    use crate::sessions::SessionGroupBy;
     use atc_core::types::Directive;
     use clap::{Parser, Subcommand};
     use std::path::PathBuf;
@@ -47,7 +49,7 @@ mod args {
         name = "atc",
         about = "Air Traffic Control — agent orchestrator",
         version,
-        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc run task tasks/foo      # Dispatch a task\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
+        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc sessions                # Keyboard switchboard for sessions\n  atc tui                     # Alias for atc sessions\n  atc run task tasks/foo      # Dispatch a task\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
     )]
     pub struct Args {
         #[arg(long, global = true)]
@@ -213,6 +215,47 @@ mod args {
             /// Render newest first (default: newest at the bottom of the buffer)
             #[arg(long)]
             reverse: bool,
+        },
+        /// Browse and switch between ATC agent sessions
+        #[command(
+            name = "sessions",
+            visible_alias = "tui",
+            after_help = "EXAMPLES:\n  atc sessions                         # Interactive session switchboard\n  atc tui                              # Alias for atc sessions\n  atc sessions --task tasks/foo        # Filter by task\n  atc sessions --provider claude       # Filter by provider\n  atc sessions --status running        # Filter by status\n  atc sessions --once                  # Render once and exit\n  atc sessions --json | jq             # Stable v1 schema for agents\n  atc tui --json                       # Alias emits the same schema\n"
+        )]
+        Sessions {
+            /// Filter by task slug
+            #[arg(long)]
+            task: Option<String>,
+            /// Filter by work unit id
+            #[arg(long = "work-unit")]
+            work_unit: Option<String>,
+            /// Filter by branch
+            #[arg(long)]
+            branch: Option<String>,
+            /// Filter by agent provider
+            #[arg(long)]
+            provider: Option<String>,
+            /// Filter by status (running, done, failed, needs-review, needs-human, stopped, retrying)
+            #[arg(long = "status")]
+            status_filter: Option<String>,
+            /// Text search across visible session fields
+            #[arg(long)]
+            search: Option<String>,
+            /// Group rows by task, work-unit, branch, provider, status, or none
+            #[arg(long, value_enum, default_value = "none")]
+            group: SessionGroupBy,
+            /// Include terminal records beyond the default active/needs-* set
+            #[arg(long)]
+            all: bool,
+            /// Interactive refresh interval, e.g. 1s, 2s, 500ms
+            #[arg(long = "poll-interval")]
+            poll_interval: Option<String>,
+            /// Render once and exit
+            #[arg(long)]
+            once: bool,
+            /// Emit stable v1 JSON and exit
+            #[arg(long)]
+            json: bool,
         },
         /// Show dispatch history for a work unit (by task, PR, or branch)
         #[command(
@@ -699,6 +742,40 @@ pub async fn run(
             )
             .await
         }
+        Commands::Sessions {
+            task,
+            work_unit,
+            branch,
+            provider,
+            status_filter,
+            search,
+            group,
+            all,
+            poll_interval,
+            once,
+            json,
+        } => {
+            let opts = sessions::SessionsOpts {
+                task: task.clone(),
+                work_unit: work_unit.clone(),
+                branch: branch.clone(),
+                provider: provider.clone(),
+                status: status_filter.clone(),
+                search: search.clone(),
+                group: *group,
+                all: *all,
+                poll_interval: poll_interval.clone(),
+                once: *once,
+                json: *json,
+            };
+            sessions::run_sessions(
+                config,
+                registry.clone() as Arc<dyn Registry>,
+                executor,
+                opts,
+            )
+            .await
+        }
         Commands::Info { id, json } => {
             info::run_info(registry.clone() as Arc<dyn Registry>, id, *json).await
         }
@@ -897,5 +974,23 @@ pub async fn run(
                 daemon::run_daemon(registry, executor, config, &opts).await
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn tui_visible_alias_parses_as_sessions_command() {
+        let args = Args::try_parse_from(["atc", "tui", "--json", "--once"]).unwrap();
+        match args.command {
+            Commands::Sessions { json, once, .. } => {
+                assert!(json);
+                assert!(once);
+            }
+            _ => panic!("expected sessions command"),
+        }
     }
 }

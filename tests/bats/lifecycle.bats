@@ -15,7 +15,7 @@ load helpers/common
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
 
-    run atc --config "$TEST_TMPDIR/atc.toml" status
+    run atc --config "$TEST_TMPDIR/atc.toml" status --all
     assert_success
     assert_output --partial "tasks/test-1"
     assert_output --partial "running"
@@ -26,7 +26,7 @@ load helpers/common
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-1" "done"
 
-    run atc --config "$TEST_TMPDIR/atc.toml" status
+    run atc --config "$TEST_TMPDIR/atc.toml" status --all
     assert_success
     assert_output --partial "running"
     assert_output --partial "done"
@@ -191,17 +191,21 @@ load helpers/common
     [ "$duration" = "45000" ]
 }
 
-@test "post-complete: extracts PR URL from log" {
+@test "post-complete: extracts PR URLs from log" {
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
-    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+    cat > "$TEST_TMPDIR/disp-001.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"text","text":"Working on the task..."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Created PRs https://github.com/org/repo/pull/42 and https://github.com/org/api/pull/7"}]}}
+{"type":"result","subtype":"success","total_cost_usd":2.50,"num_turns":15,"duration_ms":45000}
+EOF
 
     run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
     assert_success
 
-    local pr_url
-    pr_url=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "pr_url")
-    [ "$pr_url" = "https://github.com/org/repo/pull/42" ]
+    local pr_urls
+    pr_urls=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "pr_urls")
+    echo "$pr_urls" | jq -e '. == ["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]'
 }
 
 @test "post-complete: stores artifacts JSON blob" {
@@ -368,13 +372,13 @@ load helpers/common
     run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
     assert_success
 
-    # Info should now show cost and PR URL
+    # Info should now show cost and PR URLs
     run atc --config "$TEST_TMPDIR/atc.toml" info disp-001
     assert_success
     assert_output --partial "done"
     assert_output --partial '$4.20'
     assert_output --partial "15"
-    assert_output --partial "pr_url:"
+    assert_output --partial "pr_urls:"
     assert_output --partial "github.com"
 }
 
@@ -386,7 +390,7 @@ load helpers/common
     run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
     assert_success
 
-    run atc --config "$TEST_TMPDIR/atc.toml" status
+    run atc --config "$TEST_TMPDIR/atc.toml" status --status done
     assert_success
     assert_output --partial "done"
     assert_output --partial '$4.20'
@@ -409,9 +413,10 @@ load helpers/common
     setup_test_git_worktree
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-cost" "tasks/cost-test" "needs-review"
 
-    # Set a high cost on the record
+    # Set a high cost and a known PR on the record so health can transition
+    # through NeedsReview without relying on gh PR discovery in the test env.
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET cost_usd = 15.0 WHERE id = 'disp-cost';"
+        "UPDATE dispatches SET cost_usd = 15.0, pr_url = 'https://github.com/org/repo/pull/98', pr_urls = '[\"https://github.com/org/repo/pull/98\"]' WHERE id = 'disp-cost';"
 
     # health will evaluate signals — tmux check will return "exited" since no
     # session exists, but that's fine for verifying cost warning output.
@@ -430,11 +435,11 @@ load helpers/common
     # serve as the baseline for detecting change.
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-review" "tasks/review-test" "running"
 
-    # Set pr_url and checks matching what health evaluation will produce
+    # Set pr_urls and checks matching what health evaluation will produce
     # (agent exited=true via tmux, branch pushed=true via git ls-remote,
-    # pr created=true via pr_url shortcut, ci=false since gh fails in test env).
+    # pr created=true via pr_urls shortcut, ci=false since gh fails in test env).
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/99', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-review';"
+        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/99', pr_urls = '[\"https://github.com/org/repo/pull/99\"]', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-review';"
 
     # The dispatch will fail (no meta workspace, no tmux, etc.) but the auto-review
     # trigger message should be printed before that.
@@ -451,7 +456,7 @@ load helpers/common
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-auto" "tasks/auto-test" "running"
 
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/100', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-auto';"
+        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/100', pr_urls = '[\"https://github.com/org/repo/pull/100\"]', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-auto';"
 
     # Write config with auto_review = true
     cat > "$TEST_TMPDIR/atc.toml" <<EOF
@@ -475,9 +480,10 @@ EOF
     setup_test_git_worktree
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-thresh" "tasks/thresh-test" "needs-review"
 
-    # Set cost just above 5.0
+    # Set cost just above 5.0 and a known PR so health reaches the warning path
+    # without relying on gh PR discovery in the test env.
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET cost_usd = 6.0 WHERE id = 'disp-thresh';"
+        "UPDATE dispatches SET cost_usd = 6.0, pr_url = 'https://github.com/org/repo/pull/101', pr_urls = '[\"https://github.com/org/repo/pull/101\"]' WHERE id = 'disp-thresh';"
 
     # Config with low threshold
     cat > "$TEST_TMPDIR/atc.toml" <<EOF

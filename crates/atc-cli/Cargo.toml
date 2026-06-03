@@ -22,11 +22,13 @@ clap.workspace = true
 futures.workspace = true
 anyhow.workspace = true
 comfy-table = "7"
+crossterm = "0.28"
 humantime = { workspace = true }
 inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
 libc.workspace = true
 notify = "7"
 owo-colors = { workspace = true }
+ratatui = "0.29"
 regex.workspace = true
 serde.workspace = true
 shlex.workspace = true
