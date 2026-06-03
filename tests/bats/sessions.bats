@@ -227,3 +227,22 @@ SQL
     [[ "$STDOUT" == *"\\x1b"* ]]
     [[ "$STDOUT" == *"\\x07"* ]]
 }
+
+@test "sessions --once escapes bidi formatting controls in human output" {
+    setup_sessions_data
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/bidi-' || char(8238) || 'gpj.exe',
+    branch = 'branch-' || char(8238) || 'gpj.exe',
+    session = 'tmux-' || char(8238) || 'gpj.exe',
+    agent_provider = 'claude-' || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --once --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}

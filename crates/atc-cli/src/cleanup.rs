@@ -8,6 +8,7 @@ use tracing::warn;
 use crate::kb::kill_tmux_session;
 use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
+use crate::terminal_text::display_text;
 
 /// Execute the `atc cleanup` command.
 pub async fn run_cleanup(
@@ -18,7 +19,10 @@ pub async fn run_cleanup(
 ) -> Result<()> {
     if let Some(arg) = id {
         let removed = cleanup_single(config, registry, arg).await?;
-        println!("Cleaned {arg} (worktree removed: {removed})");
+        println!(
+            "Cleaned {} (worktree removed: {removed})",
+            display_text(arg)
+        );
         Ok(())
     } else if done {
         cleanup_done(config, registry).await
@@ -47,7 +51,7 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
         if !record.status.is_terminal() {
             anyhow::bail!(
                 "failed to confirm tmux session '{}' was stopped; leaving dispatch state unchanged",
-                record.session
+                display_text(&record.session)
             );
         }
         warn!(

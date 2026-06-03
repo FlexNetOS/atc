@@ -7,6 +7,8 @@ use atc_core::stream_json::{parse_stream_events, StreamEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::terminal_text::display_text;
+
 /// Resolve the log file path from an id-or-session argument.
 ///
 /// Lookup priority:
@@ -41,31 +43,35 @@ async fn resolve_log_path(
     let log_dir = config.dispatch.resolved_log_dir();
     let sanitized = std::path::Path::new(arg)
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("invalid log argument: {arg}"))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid log argument: {}", display_text(arg)))?;
     let fallback = log_dir.join(format!("{}.jsonl", sanitized.to_string_lossy()));
     if fallback.exists() {
         return Ok(fallback);
     }
 
-    anyhow::bail!("No log file: {}", fallback.display());
+    anyhow::bail!(
+        "No log file: {}",
+        display_text(&fallback.display().to_string())
+    );
 }
 
-/// Render a single stream event to stdout.
-fn render_event(event: &StreamEvent) {
+/// Format a single stream event for human terminal output.
+fn render_event_lines(event: &StreamEvent) -> Vec<String> {
     match event {
-        StreamEvent::AssistantText(text) => {
-            for line in text.lines() {
-                println!(">>> {line}");
-            }
-        }
+        StreamEvent::AssistantText(text) => text
+            .lines()
+            .map(|line| format!(">>> {}", display_text(line)))
+            .collect(),
         StreamEvent::ToolUse { name, input } => {
+            let name = display_text(name);
+            let input = display_text(input);
             let display_input = if input.chars().count() > 120 {
                 let truncated: String = input.chars().take(120).collect();
                 format!("{truncated}\u{2026}")
             } else {
-                input.clone()
+                input
             };
-            println!("  [tool] {name}: {display_input}");
+            vec![format!("  [tool] {name}: {display_input}")]
         }
         StreamEvent::Result(r) => {
             let cost = r
@@ -80,13 +86,25 @@ fn render_event(event: &StreamEvent) {
                 .duration_ms
                 .map(|ms| format!("{}s", ms / 1000))
                 .unwrap_or_else(|| "-".to_string());
-            println!();
-            println!(
-                "=== RESULT: {} | cost={} | turns={} | duration={} ===",
-                r.subtype, cost, turns, duration
-            );
+            vec![
+                String::new(),
+                format!(
+                    "=== RESULT: {} | cost={} | turns={} | duration={} ===",
+                    display_text(&r.subtype),
+                    cost,
+                    turns,
+                    duration
+                ),
+            ]
         }
-        StreamEvent::Skip => {}
+        StreamEvent::Skip => Vec::new(),
+    }
+}
+
+/// Render a single stream event to stdout.
+fn render_event(event: &StreamEvent) {
+    for line in render_event_lines(event) {
+        println!("{line}");
     }
 }
 
@@ -268,6 +286,22 @@ mod tests {
     fn test_render_assistant_text() {
         // Just verify the render function doesn't panic
         render_event(&StreamEvent::AssistantText("Hello world".to_string()));
+    }
+
+    #[test]
+    fn test_render_event_lines_escape_terminal_and_bidi_controls() {
+        let lines = render_event_lines(&StreamEvent::AssistantText(
+            "Hello\x1b[2J\u{202e}gpj.exe".to_string(),
+        ));
+        assert_eq!(lines, vec![">>> Hello\\x1b[2J\\u{202e}gpj.exe"]);
+        assert!(!lines[0].contains('\x1b'));
+        assert!(!lines[0].contains('\u{202e}'));
+
+        let lines = render_event_lines(&StreamEvent::ToolUse {
+            name: "Bash\x1b[31m".to_string(),
+            input: "cargo test\u{2066}".to_string(),
+        });
+        assert_eq!(lines, vec!["  [tool] Bash\\x1b[31m: cargo test\\u{2066}"]);
     }
 
     #[test]

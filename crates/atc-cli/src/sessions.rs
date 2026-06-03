@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::output_schema::SCHEMA_VERSION;
 use crate::status::{format_pr_list, DEFAULT_STATUSES};
+use crate::terminal_text::display_text;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -327,9 +328,20 @@ pub async fn load_snapshot(
     filter: &SessionFilter,
     group: SessionGroupBy,
 ) -> Result<SessionSnapshot> {
-    let records = registry.list(StatusFilter::All).await?;
+    let records = registry.list(snapshot_status_filter(filter)).await?;
     let work_units = registry.list_work_units().await?;
     Ok(build_snapshot(records, work_units, filter, group))
+}
+
+fn snapshot_status_filter(filter: &SessionFilter) -> StatusFilter {
+    if let Some(status) = filter.status {
+        StatusFilter::by_status(status)
+    } else {
+        // Default mode includes active records plus recent terminal records. The
+        // registry trait does not yet expose updated_at range filters, so this
+        // path must load all rows and apply the recency cutoff in memory.
+        StatusFilter::All
+    }
 }
 
 pub fn build_snapshot(
@@ -653,27 +665,6 @@ pub fn render_once(snapshot: &SessionSnapshot, now: DateTime<Utc>) -> String {
 
     out.push_str(&table.to_string());
     out.push('\n');
-    out
-}
-
-fn display_text(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control() => {
-                let code = ch as u32;
-                if code <= 0xff {
-                    out.push_str(&format!("\\x{code:02x}"));
-                } else {
-                    out.push_str(&format!("\\u{{{code:x}}}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
     out
 }
 
@@ -1674,6 +1665,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atc_core::registry::{Registry, StatusFilter};
     use atc_core::types::{
         claude_agent_capabilities, AgentCapabilities, AgentSessionId, Directive, HealthChecks,
         Status, WorkUnitStatus, CLAUDE_AGENT_PROVIDER,
@@ -1682,6 +1674,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use std::cell::RefCell;
     use std::path::PathBuf;
+
+    use crate::test_support::MockRegistry;
 
     fn record(id: &str, status: Status) -> DispatchRecord {
         DispatchRecord {
@@ -1750,6 +1744,39 @@ mod tests {
         assert_eq!(ids, vec!["recent-done", "running"]);
         assert_eq!(snapshot.summary.running, 1);
         assert_eq!(snapshot.summary.done, 1);
+    }
+
+    #[test]
+    fn snapshot_status_filter_uses_narrow_query_for_explicit_status() {
+        let filter = SessionFilter {
+            status: Some(Status::Failed),
+            ..SessionFilter::default()
+        };
+        match snapshot_status_filter(&filter) {
+            StatusFilter::One(Status::Failed) => {}
+            other => panic!("expected failed status filter, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_reads_updated_registry_state_on_each_call() {
+        let registry = MockRegistry::new(vec![record("reactive", Status::Running)]);
+        let filter = SessionFilter::default();
+
+        let first = load_snapshot(&registry, &filter, SessionGroupBy::None)
+            .await
+            .unwrap();
+        assert_eq!(first.rows[0].status, Status::Running);
+
+        registry
+            .update_status("reactive", Status::Done)
+            .await
+            .unwrap();
+
+        let second = load_snapshot(&registry, &filter, SessionGroupBy::None)
+            .await
+            .unwrap();
+        assert_eq!(second.rows[0].status, Status::Done);
     }
 
     #[test]
@@ -1953,16 +1980,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least 250ms"));
-    }
-
-    #[test]
-    fn display_text_escapes_terminal_control_sequences() {
-        let value = "task\x1b[31mred\x1b[0m\r\n\t\x07\u{9b}done";
-        let escaped = display_text(value);
-        assert_eq!(escaped, "task\\x1b[31mred\\x1b[0m\\r\\n\\t\\x07\\x9bdone");
-        assert!(!escaped.contains('\x1b'));
-        assert!(!escaped.contains('\x07'));
-        assert!(!escaped.contains('\u{9b}'));
     }
 
     #[test]

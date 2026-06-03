@@ -22,6 +22,7 @@ use crate::dispatch::{
     WorktreeOpts,
 };
 use crate::output_schema::SCHEMA_VERSION;
+use crate::terminal_text::display_text;
 
 fn agent_invocation_from_metadata(metadata: &AgentSessionMetadata) -> AgentInvocation {
     match metadata.session_id {
@@ -1653,18 +1654,18 @@ impl<'a> DispatchPipeline<'a> {
         }
         println!(
             "Input:       {}",
-            resolved.task_slug.as_deref().unwrap_or(&resolved.branch)
+            display_text(resolved.task_slug.as_deref().unwrap_or(&resolved.branch))
         );
-        println!("Resolver:    {}", resolver_name);
+        println!("Resolver:    {}", display_text(resolver_name));
         println!("Directive:   {}", resolved.directive.as_str());
-        println!("Branch:      {}", resolved.branch);
-        println!("ID:          {}", resolved.dispatch_id);
+        println!("Branch:      {}", display_text(&resolved.branch));
+        println!("ID:          {}", display_text(&resolved.dispatch_id));
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
-        println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
+        println!("PR URL:      {}", display_text(pr_url.unwrap_or("(none)")));
         if let Some(metadata) = resume_metadata {
             if let Some(resume_of) = metadata.resume_of_dispatch_id.as_deref() {
-                println!("Resume:     {}", resume_of);
+                println!("Resume:     {}", display_text(resume_of));
             }
             if let Some(session_id) = metadata.session_id {
                 println!("Agent ID:   {}", session_id);
@@ -1676,12 +1677,15 @@ impl<'a> DispatchPipeline<'a> {
             worktree_policy.as_str(),
             policy_label
         );
-        println!("Path:        {}", resolved_path.display());
+        println!(
+            "Path:        {}",
+            display_text(&resolved_path.display().to_string())
+        );
         if !repos.is_empty() {
-            println!("Repo:        {}", repos.join(", "));
+            println!("Repo:        {}", display_text(&repos.join(", ")));
         }
         if let Some(h) = hint {
-            println!("Hint:        {}", h);
+            println!("Hint:        {}", display_text(&h));
         }
 
         if ephemeral {
@@ -1834,32 +1838,38 @@ fn print_dispatch_confirmation(
 ) {
     let slug_display = task_slug.unwrap_or("(none)");
     let policy_label = worktree_policy_label(worktree_policy);
-    println!("Dispatched: {}", slug_display);
-    println!("  Resolver:  {}", resolver_name);
+    println!("Dispatched: {}", display_text(slug_display));
+    println!("  Resolver:  {}", display_text(resolver_name));
     println!("  Directive: {}", directive.as_str());
-    println!("  ID:        {}", id);
-    println!("  Branch:    {}", branch);
+    println!("  ID:        {}", display_text(id));
+    println!("  Branch:    {}", display_text(branch));
     println!(
         "  Worktree:  {} ({})",
         worktree_policy.as_str(),
         policy_label
     );
-    println!("  Path:      {}", worktree_path.display());
+    println!(
+        "  Path:      {}",
+        display_text(&worktree_path.display().to_string())
+    );
     if let Some(repo) = primary_repo {
-        println!("  Repo:      {}", repo);
+        println!("  Repo:      {}", display_text(repo));
     }
-    println!("  Session:   {}", session);
-    println!("  Log:       {}", log_file.display());
+    println!("  Session:   {}", display_text(session));
+    println!(
+        "  Log:       {}",
+        display_text(&log_file.display().to_string())
+    );
     println!();
     println!("  Next steps:");
     if let Some(slug) = task_slug {
-        println!("    atc logs {slug}");
+        println!("    atc logs {}", display_text(slug));
     }
-    println!("    atc watch --id \"{id}\"");
-    println!("    atc watch --id \"{id}\" --pretty");
+    println!("    atc watch --id \"{}\"", display_text(id));
+    println!("    atc watch --id \"{}\" --pretty", display_text(id));
     println!("    atc status --flat --json");
     if let Some(slug) = task_slug {
-        println!("    atc redirect {slug} [message]");
+        println!("    atc redirect {} [message]", display_text(slug));
     }
 }
 

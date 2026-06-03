@@ -340,3 +340,20 @@ EOF
     assert_output --partial "No log file"
     refute_output --partial "panicked"
 }
+
+@test "atc logs with hostile missing arg escapes terminal controls" {
+    write_test_config "$TEST_TMPDIR/atc.toml"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    local arg="missing-${esc}[2J${bel}${bidi}gpj.exe"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" logs "$arg"
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bel"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" == *"\\x07"* ]]
+    [[ "$STDERR" == *"\\u{202e}"* ]]
+}

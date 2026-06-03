@@ -261,6 +261,27 @@ EOF
     assert_output --partial ">>> Working on the task..."
 }
 
+@test "logs: escapes terminal and bidi controls in human output" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    cat > "$TEST_TMPDIR/disp-001.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u001b[2J\u202egpj.exe\u0007"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash\u001b[31m","input":{"command":"cargo test \u202e"}}]}}
+EOF
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" logs disp-001
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}
+
 # ===========================================================================
 # Stop: status transitions
 # ===========================================================================
@@ -289,6 +310,50 @@ EOF
     local new_status
     new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
     [ "$new_status" = "done" ]
+}
+
+@test "stop: escapes hostile session names in human output" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET session = 'tmux-' || char(27) || '[31mred' || char(7) || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" stop disp-001
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}
+
+@test "redirect: escapes hostile session names in errors" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET session = 'tmux-' || char(27) || '[31mred' || char(7) || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" redirect disp-001 "hello"
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bel"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" == *"\\x07"* ]]
+    [[ "$STDERR" == *"\\u{202e}"* ]]
 }
 
 # ===========================================================================
