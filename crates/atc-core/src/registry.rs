@@ -1,7 +1,10 @@
 use crate::queue::{
     DispatchQueue, EnqueueItem, EnqueueResult, QueueInputType, QueueItemStatus, QueueRow,
 };
-use crate::types::{AgentCapabilities, AgentSessionId, DispatchRecord, HealthChecks, Status};
+use crate::types::{
+    claude_agent_capabilities, AgentCapabilities, AgentSessionId, DispatchRecord, HealthChecks,
+    Status, CLAUDE_AGENT_PROVIDER,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -48,6 +51,13 @@ pub enum StatusFilter {
     One(Status),
     /// Any of the given statuses (generates `WHERE status IN (...)`).
     Any(Vec<Status>),
+    /// Records with any of the given statuses, plus records updated at or after
+    /// the timestamp. Useful for live views that show active records and a
+    /// bounded recent tail without loading the entire registry.
+    AnyOrUpdatedSince {
+        statuses: Vec<Status>,
+        updated_since: DateTime<Utc>,
+    },
 }
 
 impl StatusFilter {
@@ -59,6 +69,12 @@ impl StatusFilter {
     }
     pub fn any(statuses: Vec<Status>) -> Self {
         Self::Any(statuses)
+    }
+    pub fn any_or_updated_since(statuses: Vec<Status>, updated_since: DateTime<Utc>) -> Self {
+        Self::AnyOrUpdatedSince {
+            statuses,
+            updated_since,
+        }
     }
 }
 
@@ -255,6 +271,7 @@ const CREATE_INDEXES_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);",
     "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_updated_at ON dispatches(updated_at);",
 ];
 
 const CREATE_WORK_UNITS_TABLE_SQL: &str = r#"
@@ -493,6 +510,21 @@ impl SqliteRegistry {
                     sqlx::query(ddl).execute(pool).await?;
                 }
             }
+
+            // Backfill provider capability snapshots for legacy Claude rows.
+            // Capabilities describe the provider contract rather than per-run
+            // state; per-action checks still require the needed session/log data.
+            let claude_capabilities_json = serde_json::to_string(&claude_agent_capabilities())?;
+            sqlx::query(
+                "UPDATE dispatches
+                 SET agent_capabilities_json = ?1
+                 WHERE agent_provider = ?2
+                   AND (agent_capabilities_json IS NULL OR trim(agent_capabilities_json) = '')",
+            )
+            .bind(&claude_capabilities_json)
+            .bind(CLAUDE_AGENT_PROVIDER)
+            .execute(pool)
+            .await?;
         }
 
         Ok(())
@@ -941,6 +973,36 @@ impl Registry for SqliteRegistry {
                     query = query.bind(s.as_str());
                 }
                 query.fetch_all(&self.pool).await?
+            }
+            StatusFilter::AnyOrUpdatedSince {
+                statuses,
+                updated_since,
+            } => {
+                let updated_since = updated_since.to_rfc3339();
+                if statuses.is_empty() {
+                    sqlx::query(
+                        "SELECT * FROM dispatches WHERE updated_at >= ?1 ORDER BY dispatched_at DESC, id DESC",
+                    )
+                    .bind(updated_since)
+                    .fetch_all(&self.pool)
+                    .await?
+                } else {
+                    let placeholders: Vec<String> =
+                        (1..=statuses.len()).map(|i| format!("?{i}")).collect();
+                    let updated_param = statuses.len() + 1;
+                    let sql = format!(
+                        "SELECT * FROM dispatches \
+                         WHERE status IN ({}) OR updated_at >= ?{} \
+                         ORDER BY dispatched_at DESC, id DESC",
+                        placeholders.join(", "),
+                        updated_param
+                    );
+                    let mut query = sqlx::query(&sql);
+                    for s in statuses {
+                        query = query.bind(s.as_str());
+                    }
+                    query.bind(updated_since).fetch_all(&self.pool).await?
+                }
             }
         };
 
@@ -2372,6 +2434,44 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_list_with_any_or_updated_since_filter() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let cutoff = DateTime::parse_from_rfc3339("2026-06-03T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mut running_old = sample_record("running-old");
+        running_old.status = Status::Running;
+        running_old.updated_at = cutoff - chrono::Duration::hours(48);
+        running_old.dispatched_at = running_old.updated_at;
+
+        let mut done_recent = sample_record("done-recent");
+        done_recent.status = Status::Done;
+        done_recent.updated_at = cutoff + chrono::Duration::minutes(1);
+        done_recent.dispatched_at = done_recent.updated_at;
+
+        let mut done_old = sample_record("done-old");
+        done_old.status = Status::Done;
+        done_old.updated_at = cutoff - chrono::Duration::hours(48);
+        done_old.dispatched_at = done_old.updated_at;
+
+        for record in [&running_old, &done_recent, &done_old] {
+            registry.insert(record).await.unwrap();
+        }
+
+        let records = registry
+            .list(StatusFilter::any_or_updated_since(
+                vec![Status::Running],
+                cutoff,
+            ))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = records.iter().map(|record| record.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["done-recent", "running-old"]);
+    }
+
     // --- New query method tests ---
 
     #[tokio::test]
@@ -2710,7 +2810,7 @@ mod tests {
         );
         assert!(record.agent_transcript_cwd.is_none());
         assert!(record.resume_of_dispatch_id.is_none());
-        assert!(record.agent_capabilities.is_none());
+        assert_eq!(record.agent_capabilities, Some(claude_agent_capabilities()));
     }
 
     #[tokio::test]

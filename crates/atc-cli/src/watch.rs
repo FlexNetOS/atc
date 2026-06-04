@@ -591,6 +591,8 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::MockRegistry;
+    use tokio::io::AsyncBufReadExt;
 
     fn joined(stdout: &[String], stderr: &[String]) -> String {
         stdout
@@ -712,5 +714,77 @@ mod tests {
 
         assert!(!output.contains('\u{202e}'));
         assert!(output.contains("\\u{202e}"));
+    }
+
+    #[tokio::test]
+    async fn run_watch_socket_broadcasts_terminal_safe_json_to_connected_client() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let log_file = tempdir.path().join("dispatch.jsonl");
+        let socket_path = tempdir.path().join("watch.sock");
+        std::fs::write(&log_file, "").unwrap();
+
+        let mut record = crate::test_support::dispatch_record_fixture();
+        record.id = "disp-socket".to_string();
+        record.task_slug = Some("tasks/socket-\u{202e}gpj.exe".to_string());
+        record.status = Status::Running;
+        record.log_file = log_file.clone();
+        record.session = "missing-atc-watch-test-session".to_string();
+
+        let registry = Arc::new(MockRegistry::new(vec![record]));
+        let mut config = AtcConfig::default();
+        config.watch.poll_interval_secs = 1;
+        let socket_for_watch = socket_path.clone();
+
+        let handle = tokio::spawn(async move {
+            run_watch(
+                &config,
+                registry,
+                Some("disp-socket"),
+                false,
+                "human",
+                Some(socket_for_watch),
+            )
+            .await
+        });
+
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(socket_path.exists(), "watch socket was not created");
+
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        tokio::fs::write(
+            &log_file,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u202egpj.exe"}]}}
+{"type":"result","subtype":"success","total_cost_usd":1.00,"num_turns":1,"duration_ms":1000}
+"#,
+        )
+        .await
+        .unwrap();
+
+        let mut reader = tokio::io::BufReader::new(stream);
+        let json = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await.unwrap();
+                assert!(n > 0, "socket closed before log_line event");
+                if line.contains(r#""event":"log_line""#) {
+                    break line;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(!json.contains('\u{202e}'));
+        assert!(json.contains("\\u202e"));
+        let decoded: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(decoded["text"], "Hello \u{202e}gpj.exe");
+
+        handle.await.unwrap().unwrap();
+        assert!(!socket_path.exists(), "watch socket was not cleaned up");
     }
 }

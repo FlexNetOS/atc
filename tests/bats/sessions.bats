@@ -55,6 +55,28 @@ SQL
     echo "$STDOUT" | jq -e '.work_units[0].id == "wu-001"' >/dev/null
 }
 
+@test "sessions backfills legacy Claude capabilities for action state" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET agent_capabilities_json = NULL
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == true' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
+
+    local caps
+    caps="$(sqlite3 "$TEST_TMPDIR/atc.db" "SELECT agent_capabilities_json FROM dispatches WHERE id = 'disp-001';")"
+    echo "$caps" | jq -e '.supports_tmux_attach == true' >/dev/null
+    echo "$caps" | jq -e '.supports_tmux_redirect == true' >/dev/null
+}
+
 @test "tui --json is the same sessions command surface" {
     require_jq
     setup_sessions_data

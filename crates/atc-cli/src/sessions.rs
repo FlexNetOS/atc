@@ -328,19 +328,20 @@ pub async fn load_snapshot(
     filter: &SessionFilter,
     group: SessionGroupBy,
 ) -> Result<SessionSnapshot> {
-    let records = registry.list(snapshot_status_filter(filter)).await?;
+    let now = Utc::now();
+    let records = registry.list(snapshot_status_filter(filter, now)).await?;
     let work_units = registry.list_work_units().await?;
-    Ok(build_snapshot(records, work_units, filter, group))
+    Ok(build_snapshot_at(records, work_units, filter, group, now))
 }
 
-fn snapshot_status_filter(filter: &SessionFilter) -> StatusFilter {
+fn snapshot_status_filter(filter: &SessionFilter, now: DateTime<Utc>) -> StatusFilter {
     if let Some(status) = filter.status {
         StatusFilter::by_status(status)
-    } else {
-        // Default mode includes active records plus recent terminal records. The
-        // registry trait does not yet expose updated_at range filters, so this
-        // path must load all rows and apply the recency cutoff in memory.
+    } else if filter.all {
         StatusFilter::All
+    } else {
+        let recent_terminal_cutoff = now - ChronoDuration::hours(DEFAULT_RECENT_TERMINAL_HOURS);
+        StatusFilter::any_or_updated_since(DEFAULT_STATUSES.to_vec(), recent_terminal_cutoff)
     }
 }
 
@@ -1752,9 +1753,42 @@ mod tests {
             status: Some(Status::Failed),
             ..SessionFilter::default()
         };
-        match snapshot_status_filter(&filter) {
+        let now = Utc.with_ymd_and_hms(2026, 6, 3, 13, 0, 0).unwrap();
+        match snapshot_status_filter(&filter, now) {
             StatusFilter::One(Status::Failed) => {}
             other => panic!("expected failed status filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_status_filter_bounds_default_recent_terminal_query() {
+        let filter = SessionFilter::default();
+        let now = Utc.with_ymd_and_hms(2026, 6, 3, 13, 0, 0).unwrap();
+        match snapshot_status_filter(&filter, now) {
+            StatusFilter::AnyOrUpdatedSince {
+                statuses,
+                updated_since,
+            } => {
+                assert_eq!(statuses, DEFAULT_STATUSES);
+                assert_eq!(
+                    updated_since,
+                    now - ChronoDuration::hours(DEFAULT_RECENT_TERMINAL_HOURS)
+                );
+            }
+            other => panic!("expected bounded default status filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_status_filter_all_uses_full_query() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let now = Utc.with_ymd_and_hms(2026, 6, 3, 13, 0, 0).unwrap();
+        match snapshot_status_filter(&filter, now) {
+            StatusFilter::All => {}
+            other => panic!("expected all status filter, got {other:?}"),
         }
     }
 

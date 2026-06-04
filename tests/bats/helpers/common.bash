@@ -145,6 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);
 CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);
 CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);
 CREATE INDEX IF NOT EXISTS idx_dispatches_work_unit ON dispatches(work_unit_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_updated_at ON dispatches(updated_at);
 CREATE TABLE IF NOT EXISTS work_units (
   id          TEXT PRIMARY KEY,
   task_slug   TEXT,
