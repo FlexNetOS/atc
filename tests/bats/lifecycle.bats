@@ -347,6 +347,38 @@ EOF
     [[ "$STDOUT" == *"\\u{202e}"* ]]
 }
 
+@test "watch --format json escapes bidi controls in encoded bytes while preserving decoded values" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/watch-test" "running"
+    local bidi=$'\u202e'
+    cat >> "$TEST_TMPDIR/atc.toml" <<EOF
+
+[watch]
+poll_interval_secs = 1
+EOF
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/watch-' || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+    cat > "$TEST_TMPDIR/disp-001.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u202egpj.exe"}]}}
+{"type":"result","subtype":"success","total_cost_usd":2.50,"num_turns":15,"duration_ms":45000}
+EOF
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --id disp-001 --format json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+
+    local decoded_task decoded_text
+    decoded_task="$(printf '%s\n' "$STDOUT" | jq -r 'select(.event == "started") | .task' | head -n1)"
+    decoded_text="$(printf '%s\n' "$STDOUT" | jq -r 'select(.event == "log_line") | .text' | head -n1)"
+    [[ "$decoded_task" == *"$bidi"* ]]
+    [[ "$decoded_text" == *"$bidi"* ]]
+}
+
 # ===========================================================================
 # Stop: status transitions
 # ===========================================================================

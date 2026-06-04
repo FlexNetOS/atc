@@ -34,6 +34,15 @@ where
     serde_json::to_string_pretty(value).map(|json| escape_json_format_controls(&json))
 }
 
+/// Serialize compact JSON while applying the same terminal-spoofing escapes as
+/// [`terminal_safe_json_pretty`].
+pub fn terminal_safe_json<T>(value: &T) -> Result<String, serde_json::Error>
+where
+    T: serde::Serialize + ?Sized,
+{
+    serde_json::to_string(value).map(|json| escape_json_format_controls(&json))
+}
+
 /// Escape dangerous raw Unicode format controls in already-serialized JSON.
 pub fn escape_json_format_controls(value: &str) -> String {
     if !value.chars().any(is_dangerous_format_control) {
@@ -110,6 +119,28 @@ mod tests {
         });
 
         let json = terminal_safe_json_pretty(&value).unwrap();
+
+        assert!(!json.contains('\u{202e}'));
+        assert!(!json.contains('\u{2066}'));
+        assert!(!json.contains('\u{2069}'));
+        assert!(!json.contains('\u{7}'));
+        assert!(json.contains("\\u202e"));
+        assert!(json.contains("\\u2066"));
+        assert!(json.contains("\\u2069"));
+        assert!(json.contains("\\u0007"));
+
+        let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn terminal_safe_json_escapes_bidi_but_preserves_decoded_data() {
+        let value = serde_json::json!({
+            "text": "safe\u{202e}gpj.exe\u{2066}visible\u{2069}",
+            "control": "bell\u{7}"
+        });
+
+        let json = terminal_safe_json(&value).unwrap();
 
         assert!(!json.contains('\u{202e}'));
         assert!(!json.contains('\u{2066}'));

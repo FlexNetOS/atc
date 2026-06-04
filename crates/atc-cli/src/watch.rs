@@ -8,7 +8,7 @@ use atc_core::config::AtcConfig;
 use atc_core::post_completion;
 use atc_core::registry::{Registry, StatusFilter};
 use atc_core::stream_json;
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json};
 use atc_core::types::Status;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -214,7 +214,7 @@ fn render_event_lines(event: &WatchEvent, format: &OutputFormat) -> (Vec<String>
 
     match format {
         OutputFormat::Ndjson => {
-            stdout.push(serde_json::to_string(event).unwrap_or_default());
+            stdout.push(terminal_safe_json(event).unwrap_or_default());
         }
         OutputFormat::Human => match event {
             WatchEvent::Started {
@@ -569,7 +569,7 @@ pub async fn run_watch(
 }
 
 fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<String>) {
-    let json = serde_json::to_string(event).unwrap_or_default();
+    let json = terminal_safe_json(event).unwrap_or_default();
 
     // Broadcast to socket consumers
     let _ = tx.send(json.clone());
@@ -655,6 +655,48 @@ mod tests {
         assert!(output.contains("\\x1b"));
         assert!(output.contains("\\x07"));
         assert!(output.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn ndjson_renderer_escapes_bidi_but_preserves_decoded_values() {
+        let event = WatchEvent::LogLine {
+            id: "disp-\u{202e}gpj.exe".to_string(),
+            event_type: "assistant".to_string(),
+            text: Some("hello\u{202e}gpj.exe".to_string()),
+            tool: None,
+        };
+
+        let (stdout, stderr) = render_event_lines(&event, &OutputFormat::Ndjson);
+
+        assert!(stderr.is_empty());
+        assert_eq!(stdout.len(), 1);
+        assert!(!stdout[0].contains('\u{202e}'));
+        assert!(stdout[0].contains("\\u202e"));
+
+        let decoded: serde_json::Value = serde_json::from_str(&stdout[0]).unwrap();
+        assert_eq!(decoded["id"], "disp-\u{202e}gpj.exe");
+        assert_eq!(decoded["text"], "hello\u{202e}gpj.exe");
+    }
+
+    #[test]
+    fn emit_event_broadcasts_terminal_safe_json() {
+        let event = WatchEvent::Failed {
+            id: "disp-\u{202e}gpj.exe".to_string(),
+            status: "failed".to_string(),
+            subtype: "error-\u{202e}".to_string(),
+        };
+        let (tx, mut rx) = broadcast::channel(4);
+        let _subscription = tx.subscribe();
+
+        emit_event(&event, &OutputFormat::Ndjson, &tx);
+
+        let json = rx.try_recv().unwrap();
+        assert!(!json.contains('\u{202e}'));
+        assert!(json.contains("\\u202e"));
+
+        let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded["id"], "disp-\u{202e}gpj.exe");
+        assert_eq!(decoded["subtype"], "error-\u{202e}");
     }
 
     #[test]

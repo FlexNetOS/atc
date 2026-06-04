@@ -984,6 +984,7 @@ pub async fn run(
 mod tests {
     use super::{Args, Commands};
     use clap::Parser;
+    use std::path::Path;
 
     #[test]
     fn tui_visible_alias_parses_as_sessions_command() {
@@ -994,6 +995,46 @@ mod tests {
                 assert!(once);
             }
             _ => panic!("expected sessions command"),
+        }
+    }
+
+    #[test]
+    fn cli_json_stdout_emitters_use_terminal_safe_helpers() {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let forbidden = [
+            concat!("serde_json::", "to_string_pretty"),
+            concat!("println!(\"{}\", ", "serde_json::to_string"),
+            concat!("stdout.push(", "serde_json::to_string"),
+            concat!("let json = ", "serde_json::to_string(event)"),
+        ];
+        let mut offenders = Vec::new();
+        scan_rust_files(&src_dir, &forbidden, &mut offenders);
+
+        assert!(
+            offenders.is_empty(),
+            "CLI terminal JSON output must use atc_core::terminal_text::terminal_safe_json* helpers:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn scan_rust_files(dir: &Path, forbidden: &[&str], offenders: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                scan_rust_files(&path, forbidden, offenders);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+
+            let source = std::fs::read_to_string(&path).unwrap();
+            for pattern in forbidden {
+                if source.contains(pattern) {
+                    offenders.push(format!("{} contains `{pattern}`", path.display()));
+                }
+            }
         }
     }
 }
