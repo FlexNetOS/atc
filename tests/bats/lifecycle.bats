@@ -379,6 +379,17 @@ EOF
     [[ "$decoded_text" == *"$bidi"* ]]
 }
 
+@test "watch --socket refuses to replace regular files" {
+    setup_lifecycle
+    local socket_path="$TEST_TMPDIR/not-a-socket"
+    printf 'keep me\n' > "$socket_path"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$socket_path" --id disp-missing
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"refusing to replace non-socket --socket path"* ]]
+    [ "$(cat "$socket_path")" = "keep me" ]
+}
+
 # ===========================================================================
 # Stop: status transitions
 # ===========================================================================

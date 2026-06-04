@@ -13,8 +13,9 @@ use atc_core::types::Status;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -206,6 +207,116 @@ enum OutputFormat {
     Human,
     /// Pretty: concise one-line-per-event with color (like --pretty for logs).
     Pretty,
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+struct SocketServer {
+    #[cfg(unix)]
+    socket_path: PathBuf,
+    #[cfg(unix)]
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SocketServer {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            self.handle.abort();
+            cleanup_socket_path(&self.socket_path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn start_socket_broadcaster(
+    socket_path: &Path,
+    tx: broadcast::Sender<String>,
+) -> Result<SocketServer> {
+    let socket_path = socket_path.to_path_buf();
+    prepare_socket_path(&socket_path)?;
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    info!(path = %socket_path.display(), "listening on Unix socket");
+
+    let handle = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let mut rx = tx.subscribe();
+                    tokio::spawn(async move {
+                        let mut stream = stream;
+                        while let Ok(line) = rx.recv().await {
+                            let data = format!("{line}\n");
+                            if stream.write_all(data.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!(error = %e, "socket accept failed");
+                }
+            }
+        }
+    });
+
+    Ok(SocketServer {
+        socket_path,
+        handle,
+    })
+}
+
+#[cfg(not(unix))]
+fn start_socket_broadcaster(
+    socket_path: &Path,
+    _tx: broadcast::Sender<String>,
+) -> Result<SocketServer> {
+    anyhow::bail!(
+        "atc watch --socket is only supported on Unix platforms for now; Windows named-pipe support is not implemented yet (requested path: {})",
+        display_text(&socket_path.display().to_string())
+    )
+}
+
+#[cfg(unix)]
+fn prepare_socket_path(socket_path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            std::fs::remove_file(socket_path)?;
+        }
+        Ok(_) => {
+            anyhow::bail!(
+                "refusing to replace non-socket --socket path: {}",
+                display_text(&socket_path.display().to_string())
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn cleanup_socket_path(socket_path: &Path) {
+    use std::os::unix::fs::FileTypeExt;
+
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            if let Err(e) = std::fs::remove_file(socket_path) {
+                warn!(path = %socket_path.display(), error = %e, "failed to clean up watch socket");
+            }
+        }
+        Ok(_) => {
+            warn!(
+                path = %socket_path.display(),
+                "not removing non-socket path during watch socket cleanup"
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(path = %socket_path.display(), error = %e, "failed to inspect watch socket during cleanup");
+        }
+    }
 }
 
 fn render_event_lines(event: &WatchEvent, format: &OutputFormat) -> (Vec<String>, Vec<String>) {
@@ -412,35 +523,10 @@ pub async fn run_watch(
     let (tx, _) = broadcast::channel::<String>(1024);
     let tx_clone = tx.clone();
 
-    if let Some(ref socket_path) = socket {
-        // Remove existing socket
-        let _ = std::fs::remove_file(socket_path);
-        let listener = tokio::net::UnixListener::bind(socket_path)?;
-        info!(path = %socket_path.display(), "listening on Unix socket");
-
-        let tx_socket = tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let mut rx = tx_socket.subscribe();
-                        tokio::spawn(async move {
-                            let mut stream = stream;
-                            while let Ok(line) = rx.recv().await {
-                                let data = format!("{line}\n");
-                                if stream.write_all(data.as_bytes()).await.is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "socket accept failed");
-                    }
-                }
-            }
-        });
-    }
+    let _socket_server = socket
+        .as_deref()
+        .map(|socket_path| start_socket_broadcaster(socket_path, tx.clone()))
+        .transpose()?;
 
     // Resolve dispatches to watch
     let records = if all_running {
@@ -560,11 +646,6 @@ pub async fn run_watch(
         tokio::time::sleep(poll_interval).await;
     }
 
-    // Clean up socket
-    if let Some(ref socket_path) = socket {
-        let _ = std::fs::remove_file(socket_path);
-    }
-
     Ok(())
 }
 
@@ -591,7 +672,9 @@ fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::test_support::MockRegistry;
+    #[cfg(unix)]
     use tokio::io::AsyncBufReadExt;
 
     fn joined(stdout: &[String], stderr: &[String]) -> String {
@@ -716,6 +799,46 @@ mod tests {
         assert!(output.contains("\\u{202e}"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_removes_stale_socket_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let socket_path = tempdir.path().join("stale.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+        assert!(socket_path.exists());
+
+        prepare_socket_path(&socket_path).unwrap();
+
+        assert!(!socket_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_refuses_regular_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let socket_path = tempdir.path().join("not-a-socket");
+        std::fs::write(&socket_path, "keep me").unwrap();
+
+        let err = prepare_socket_path(&socket_path).unwrap_err();
+
+        assert!(err.to_string().contains("refusing to replace non-socket"));
+        assert_eq!(std::fs::read_to_string(&socket_path).unwrap(), "keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_path_refuses_regular_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let socket_path = tempdir.path().join("not-a-socket");
+        std::fs::write(&socket_path, "keep me").unwrap();
+
+        cleanup_socket_path(&socket_path);
+
+        assert_eq!(std::fs::read_to_string(&socket_path).unwrap(), "keep me");
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_watch_socket_broadcasts_terminal_safe_json_to_connected_client() {
         let tempdir = tempfile::tempdir().unwrap();
