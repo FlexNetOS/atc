@@ -190,6 +190,20 @@ pub trait Registry: Send + Sync {
     async fn list_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
         Ok(Vec::new())
     }
+    /// List only the requested work units. Default implementations may scan
+    /// `list_work_units`; SQLite overrides this to keep live views bounded.
+    async fn list_work_units_by_ids(&self, ids: &[String]) -> Result<Vec<crate::types::WorkUnit>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        Ok(self
+            .list_work_units()
+            .await?
+            .into_iter()
+            .filter(|unit| wanted.contains(unit.id.as_str()))
+            .collect())
+    }
     async fn list_active_work_units(&self) -> Result<Vec<crate::types::WorkUnit>> {
         Ok(Vec::new())
     }
@@ -1486,6 +1500,24 @@ impl Registry for SqliteRegistry {
         let rows = sqlx::query("SELECT * FROM work_units ORDER BY updated_at DESC")
             .fetch_all(&self.pool)
             .await?;
+        rows.iter().map(Self::row_to_work_unit).collect()
+    }
+
+    async fn list_work_units_by_ids(&self, ids: &[String]) -> Result<Vec<crate::types::WorkUnit>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT * FROM work_units WHERE id IN ({}) ORDER BY updated_at DESC",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
         rows.iter().map(Self::row_to_work_unit).collect()
     }
 
@@ -3658,5 +3690,33 @@ mod tests {
 
         let all = registry.list_work_units().await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_work_unit_list_by_ids_is_bounded_to_requested_units() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let wu1 = sample_work_unit("wu-010", Some("tasks/harmony-370"), None);
+        let wu2 = sample_work_unit("wu-011", None, Some("fix/bug"));
+        let wu3 = sample_work_unit("wu-012", Some("tasks/other"), None);
+        registry.insert_work_unit(&wu1).await.unwrap();
+        registry.insert_work_unit(&wu2).await.unwrap();
+        registry.insert_work_unit(&wu3).await.unwrap();
+
+        let bounded = registry
+            .list_work_units_by_ids(&["wu-011".to_string(), "wu-010".to_string()])
+            .await
+            .unwrap();
+        let ids: std::collections::HashSet<&str> =
+            bounded.iter().map(|unit| unit.id.as_str()).collect();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("wu-010"));
+        assert!(ids.contains("wu-011"));
+        assert!(!ids.contains("wu-012"));
+        assert!(registry
+            .list_work_units_by_ids(&[])
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

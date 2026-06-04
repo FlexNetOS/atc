@@ -3,7 +3,7 @@
 //! Monitors tmux session liveness, tails log files for new events, and emits
 //! structured NDJSON events for consumption by AI harnesses or human terminals.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::post_completion;
 use atc_core::registry::{Registry, StatusFilter};
@@ -241,8 +241,7 @@ fn start_socket_broadcaster(
     socket_path: &Path,
     tx: broadcast::Sender<String>,
 ) -> Result<SocketServer> {
-    let socket_path = socket_path.to_path_buf();
-    prepare_socket_path(&socket_path)?;
+    let socket_path = prepare_socket_path(socket_path)?;
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let socket_identity = socket_identity(&socket_path)?;
     info!(path = %socket_path.display(), "listening on Unix socket");
@@ -288,10 +287,10 @@ fn start_socket_broadcaster(
 }
 
 #[cfg(unix)]
-fn prepare_socket_path(socket_path: &Path) -> Result<()> {
-    ensure_private_socket_parent(socket_path)?;
+fn prepare_socket_path(socket_path: &Path) -> Result<PathBuf> {
+    let socket_path = private_socket_path(socket_path)?;
 
-    match std::fs::symlink_metadata(socket_path) {
+    match std::fs::symlink_metadata(&socket_path) {
         Ok(_) => {
             anyhow::bail!(
                 "refusing to replace existing --socket path: {}",
@@ -301,27 +300,30 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    Ok(())
+    Ok(socket_path)
 }
 
 #[cfg(unix)]
 fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
     use std::os::unix::fs::FileTypeExt;
 
-    if let Err(e) = ensure_private_socket_parent(socket_path) {
-        warn!(
-            path = %socket_path.display(),
-            error = %e,
-            "not removing watch socket because its parent is no longer private"
-        );
-        return;
-    }
+    let socket_path = match private_socket_path(socket_path) {
+        Ok(socket_path) => socket_path,
+        Err(e) => {
+            warn!(
+                path = %socket_path.display(),
+                error = %e,
+                "not removing watch socket because its parent is no longer private"
+            );
+            return;
+        }
+    };
 
-    match std::fs::symlink_metadata(socket_path) {
+    match std::fs::symlink_metadata(&socket_path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
             let actual = socket_identity_from_metadata(&metadata);
             if actual == expected {
-                if let Err(e) = std::fs::remove_file(socket_path) {
+                if let Err(e) = std::fs::remove_file(&socket_path) {
                     warn!(path = %socket_path.display(), error = %e, "failed to clean up watch socket");
                 }
             } else {
@@ -349,14 +351,29 @@ fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
 }
 
 #[cfg(unix)]
-fn ensure_private_socket_parent(socket_path: &Path) -> Result<()> {
+fn private_socket_path(socket_path: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
+    let file_name = socket_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--socket path must include a file name: {}",
+                display_text(&socket_path.display().to_string())
+            )
+        })?;
     let parent = socket_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::metadata(parent)?;
+    let canonical_parent = parent.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve --socket parent directory: {}",
+            display_text(&parent.display().to_string())
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical_parent)?;
     anyhow::ensure!(
         metadata.is_dir(),
         "--socket parent is not a directory: {}",
@@ -368,17 +385,17 @@ fn ensure_private_socket_parent(socket_path: &Path) -> Result<()> {
     anyhow::ensure!(
         metadata.uid() == current_uid,
         "refusing --socket path outside a private directory: parent {} is owned by uid {}, expected {}",
-        display_text(&parent.display().to_string()),
+        display_text(&canonical_parent.display().to_string()),
         metadata.uid(),
         current_uid
     );
     anyhow::ensure!(
         mode & 0o077 == 0,
         "refusing --socket path outside a private directory: parent {} has mode {mode:o}; use a directory writable only by the current user",
-        display_text(&parent.display().to_string())
+        display_text(&canonical_parent.display().to_string())
     );
 
-    Ok(())
+    Ok(canonical_parent.join(file_name))
 }
 
 #[cfg(unix)]
@@ -942,6 +959,24 @@ mod tests {
         let err = prepare_socket_path(&public_dir.join("watch.sock")).unwrap_err();
 
         assert!(err.to_string().contains("private directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_uses_canonical_private_parent() {
+        let tempdir = private_socket_dir();
+        let link_root = private_socket_dir();
+        let link = link_root.path().join("socket-dir");
+        std::os::unix::fs::symlink(tempdir.path(), &link).unwrap();
+
+        let requested = link.join("watch.sock");
+        let prepared = prepare_socket_path(&requested).unwrap();
+
+        assert_eq!(
+            prepared,
+            tempdir.path().canonicalize().unwrap().join("watch.sock")
+        );
+        assert_ne!(prepared, requested);
     }
 
     #[cfg(unix)]

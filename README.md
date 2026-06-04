@@ -315,6 +315,17 @@ Use `--once` for a non-interactive table and `--json` for the stable v1 session 
 
 By default, the switchboard shows active/actionable sessions plus terminal records updated in the last 24 hours. Use `--all` to include every stored status. Interactive mode supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata and capability-gated actions, and hands off log/terminal actions through the existing ATC command logic.
 
+## Watch Sockets
+
+`atc watch --socket <path>` streams the same watch events to Unix socket clients while the watch process runs. The socket path must not already exist, and its parent directory must be private to the current user: owned by the current uid with no group/other permissions. Shared directories such as `/tmp` or normal `0755` project checkouts are refused.
+
+```bash
+sockdir="${XDG_RUNTIME_DIR:-$(mktemp -d)}/atc"
+mkdir -p "$sockdir"
+chmod 700 "$sockdir"
+atc watch --socket "$sockdir/watch.sock" --id <dispatch-id>
+```
+
 ## Configuration
 
 ATC loads config from (in priority order):

@@ -374,7 +374,7 @@ mod args {
         },
         /// Watch running agent sessions and emit structured events
         #[command(
-            after_help = "EXAMPLES:\n  atc watch                          # Most recent Running dispatch\n  atc watch --id <dispatch-id>       # Specific dispatch\n  atc watch --all-running            # All running dispatches\n  atc watch --pretty                 # Human-formatted output\n  atc watch --format json            # JSON event stream (default)\n"
+            after_help = "EXAMPLES:\n  atc watch                          # Most recent Running dispatch\n  atc watch --id <dispatch-id>       # Specific dispatch\n  atc watch --all-running            # All running dispatches\n  atc watch --pretty                 # Human-formatted output\n  atc watch --format json            # JSON event stream (default)\n  atc watch --socket \"$XDG_RUNTIME_DIR/atc/watch.sock\" --id <dispatch-id>\n\nSOCKETS:\n  --socket requires a non-existing path inside a directory owned by the current\n  user with no group/other permissions (mode 0700/0600-style parent). Shared\n  directories such as /tmp or normal 0755 project directories are refused.\n"
         )]
         Watch {
             /// Dispatch ID to watch (default: most recent Running)
@@ -389,7 +389,7 @@ mod args {
             /// Shorthand for --format pretty
             #[arg(long)]
             pretty: bool,
-            /// Unix socket path for multi-consumer mode
+            /// Unix socket path for multi-consumer mode; parent must be private to the current user
             #[arg(long)]
             socket: Option<std::path::PathBuf>,
         },

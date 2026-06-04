@@ -390,6 +390,18 @@ EOF
     [ "$(cat "$socket_path")" = "keep me" ]
 }
 
+@test "watch --socket refuses group-writable parent directories" {
+    setup_lifecycle
+    local public_dir="$TEST_TMPDIR/public-socket-dir"
+    mkdir "$public_dir"
+    chmod 0770 "$public_dir"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$public_dir/watch.sock" --id disp-missing
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"private directory"* ]]
+    assert_file_not_exists "$public_dir/watch.sock"
+}
+
 # ===========================================================================
 # Stop: status transitions
 # ===========================================================================

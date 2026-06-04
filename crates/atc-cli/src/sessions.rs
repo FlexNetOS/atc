@@ -25,6 +25,7 @@ use std::io::{self, Stdout, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 use crate::output_schema::SCHEMA_VERSION;
 use crate::status::{format_pr_list, DEFAULT_STATUSES};
@@ -330,8 +331,23 @@ pub async fn load_snapshot(
 ) -> Result<SessionSnapshot> {
     let now = Utc::now();
     let records = registry.list(snapshot_status_filter(filter, now)).await?;
-    let work_units = registry.list_work_units().await?;
+    let work_unit_ids = work_unit_ids_for_records(&records);
+    let work_units = registry.list_work_units_by_ids(&work_unit_ids).await?;
     Ok(build_snapshot_at(records, work_units, filter, group, now))
+}
+
+fn work_unit_ids_for_records(records: &[DispatchRecord]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for id in records
+        .iter()
+        .filter_map(|record| record.work_unit_id.as_ref())
+    {
+        if seen.insert(id.as_str()) {
+            ids.push(id.clone());
+        }
+    }
+    ids
 }
 
 fn snapshot_status_filter(filter: &SessionFilter, now: DateTime<Utc>) -> StatusFilter {
@@ -898,7 +914,10 @@ async fn run_tui(
             if last_poll.elapsed() >= poll_interval {
                 match load_snapshot(ctx.registry.as_ref(), &ctx.filter, ctx.group).await {
                     Ok(snapshot) => app.set_snapshot(snapshot),
-                    Err(e) => app.message = Some(format!("refresh failed: {e}")),
+                    Err(e) => {
+                        warn!(error = %e, "atc sessions refresh failed");
+                        app.message = Some(format!("refresh failed: {e}"));
+                    }
                 }
                 last_poll = Instant::now();
             }
@@ -1790,6 +1809,23 @@ mod tests {
             StatusFilter::All => {}
             other => panic!("expected all status filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn work_unit_ids_for_records_deduplicates_in_first_seen_order() {
+        let mut first = record("first", Status::Running);
+        first.work_unit_id = Some("wu-shared".to_string());
+        let mut second = record("second", Status::Running);
+        second.work_unit_id = Some("wu-other".to_string());
+        let mut third = record("third", Status::Running);
+        third.work_unit_id = Some("wu-shared".to_string());
+        let mut no_work_unit = record("none", Status::Running);
+        no_work_unit.work_unit_id = None;
+
+        assert_eq!(
+            work_unit_ids_for_records(&[first, second, third, no_work_unit]),
+            vec!["wu-shared".to_string(), "wu-other".to_string()]
+        );
     }
 
     #[tokio::test]
