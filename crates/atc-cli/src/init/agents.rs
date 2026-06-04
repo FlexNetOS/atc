@@ -11,6 +11,7 @@
 //! [`super::picker`] both call it — there is no duplicated install logic.
 
 use anyhow::{anyhow, bail, Context, Result};
+use atc_core::terminal_text::terminal_safe_json_pretty;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -322,7 +323,7 @@ pub fn list_agents_json(base: &Path) -> Result<()> {
             })
         })
         .collect();
-    println!("{}", serde_json::to_string_pretty(&arr)?);
+    println!("{}", terminal_safe_json_pretty(&arr)?);
     Ok(())
 }
 

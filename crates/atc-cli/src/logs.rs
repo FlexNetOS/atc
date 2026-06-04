@@ -3,9 +3,12 @@
 use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::stream_json::{parse_stream_events, StreamEvent};
+use atc_core::stream_json::{format_event, parse_stream_events, StreamEvent};
+use atc_core::terminal_text::display_text;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::shell_text::shell_display_arg;
 
 /// Resolve the log file path from an id-or-session argument.
 ///
@@ -41,52 +44,22 @@ async fn resolve_log_path(
     let log_dir = config.dispatch.resolved_log_dir();
     let sanitized = std::path::Path::new(arg)
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("invalid log argument: {arg}"))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid log argument: {}", display_text(arg)))?;
     let fallback = log_dir.join(format!("{}.jsonl", sanitized.to_string_lossy()));
     if fallback.exists() {
         return Ok(fallback);
     }
 
-    anyhow::bail!("No log file: {}", fallback.display());
+    anyhow::bail!(
+        "No log file: {}",
+        display_text(&fallback.display().to_string())
+    );
 }
 
 /// Render a single stream event to stdout.
 fn render_event(event: &StreamEvent) {
-    match event {
-        StreamEvent::AssistantText(text) => {
-            for line in text.lines() {
-                println!(">>> {line}");
-            }
-        }
-        StreamEvent::ToolUse { name, input } => {
-            let display_input = if input.chars().count() > 120 {
-                let truncated: String = input.chars().take(120).collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                input.clone()
-            };
-            println!("  [tool] {name}: {display_input}");
-        }
-        StreamEvent::Result(r) => {
-            let cost = r
-                .total_cost_usd
-                .map(|c| format!("${c}"))
-                .unwrap_or_else(|| "-".to_string());
-            let turns = r
-                .num_turns
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let duration = r
-                .duration_ms
-                .map(|ms| format!("{}s", ms / 1000))
-                .unwrap_or_else(|| "-".to_string());
-            println!();
-            println!(
-                "=== RESULT: {} | cost={} | turns={} | duration={} ===",
-                r.subtype, cost, turns, duration
-            );
-        }
-        StreamEvent::Skip => {}
+    for line in format_event(event) {
+        println!("{line}");
     }
 }
 
@@ -129,8 +102,9 @@ pub async fn run_logs(
 
     if !log_path.exists() {
         anyhow::bail!(
-            "No log file: {}\nhint: try `atc info {arg}` to verify the dispatch exists.",
-            log_path.display()
+            "No log file: {}\nhint: try `atc info {}` to verify the dispatch exists.",
+            display_text(&log_path.display().to_string()),
+            shell_display_arg(arg)
         );
     }
 

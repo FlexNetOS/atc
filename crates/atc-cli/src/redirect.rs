@@ -1,9 +1,11 @@
 use anyhow::Result;
 use atc_core::registry::Registry;
 use atc_core::types::Status;
+use std::process::Stdio;
 use tracing::warn;
 
 use crate::resolve::resolve_record;
+use atc_core::terminal_text::display_text;
 
 /// Timeout for tmux subprocess calls.
 const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -22,7 +24,8 @@ pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> 
         );
         eprintln!(
             "warning: [{}] status is '{}', not 'running'",
-            record.id, record.status
+            display_text(&record.id),
+            record.status
         );
     }
 
@@ -32,11 +35,13 @@ pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> 
     {
         let mut child = tokio::process::Command::new("tmux")
             .args(["has-session", "-t", session_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
         match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
             Ok(Ok(s)) if !s.success() => {
-                anyhow::bail!("No active tmux session: {session_name}");
+                anyhow::bail!("No active tmux session: {}", display_text(session_name));
             }
             Ok(Err(e)) => {
                 anyhow::bail!("tmux has-session failed: {e}");
@@ -54,6 +59,8 @@ pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> 
     let send = {
         let mut child = tokio::process::Command::new("tmux")
             .args(["send-keys", "-t", session_name, message, "Enter"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
         match tokio::time::timeout(CMD_TIMEOUT, child.wait()).await {
@@ -71,7 +78,11 @@ pub async fn run_redirect(registry: &dyn Registry, arg: &str, message: &str) -> 
     }
 
     // 5. Print result
-    println!("[{}] redirected | session={session_name}", record.id);
+    println!(
+        "[{}] redirected | session={}",
+        display_text(&record.id),
+        display_text(session_name)
+    );
 
     Ok(())
 }

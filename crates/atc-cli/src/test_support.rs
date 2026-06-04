@@ -118,6 +118,16 @@ impl Registry for MockRegistry {
                 .filter(|record| statuses.contains(&record.status))
                 .cloned()
                 .collect(),
+            StatusFilter::AnyOrUpdatedSince {
+                ref statuses,
+                updated_since,
+            } => records
+                .iter()
+                .filter(|record| {
+                    statuses.contains(&record.status) || record.updated_at >= updated_since
+                })
+                .cloned()
+                .collect(),
         })
     }
 

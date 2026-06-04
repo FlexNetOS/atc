@@ -57,6 +57,8 @@ atc daemon --queue default --queue ci-fixes
 
 # Check what's happening
 atc status
+atc sessions
+atc tui
 atc health
 atc daemon status
 ```
@@ -142,6 +144,8 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | `atc daemon stop` | Graceful shutdown |
 | `atc daemon status` | Uptime, queue depth, active dispatches |
 | `atc status` | Table view of all dispatches |
+| `atc sessions` | Keyboard switchboard for ATC dispatch sessions |
+| `atc tui` | Alias for `atc sessions` |
 | `atc info <id>` | Detailed view of a single dispatch |
 | `atc logs [-f] <id>` | Tail stream-json logs (human-readable) |
 | `atc health [--auto]` | Run 6-signal health checks (`--auto` dispatches review-fix for NeedsReview) |
@@ -293,6 +297,35 @@ atc run --resume <dispatch-id> 'summarize what changed and finish cleanup'
 
 `atc retry <id>` is intentionally different: it starts a fresh provider conversation for a failed dispatch and adjusts budget/turns when applicable. `atc redirect <id> '<msg>'` is also different: it sends text to a currently running tmux-backed session instead of creating a new dispatch record.
 
+## Session Switchboard
+
+`atc sessions` opens a terminal switchboard for ATC-known dispatch sessions. `atc tui` is the same command as a shorter alias. The switchboard is a convenience layer over the existing registry, status, info, logs, redirect, stop, cleanup, and resume surfaces; it does not replace those commands.
+
+```bash
+atc sessions
+atc tui
+atc sessions --task tasks/my-task
+atc sessions --provider claude
+atc sessions --status running
+atc sessions --once
+atc sessions --json
+```
+
+Use `--once` for a non-interactive table and `--json` for the stable v1 session envelope used by automation and UI dogfooding. Interactive mode polls the embedded SQLite registry on a bounded interval, defaulting to 2 seconds, so dispatches updated by other shells or ATC commands appear while the switchboard is open. `--once` and `--json` are point-in-time snapshots.
+
+By default, the switchboard shows active/actionable sessions plus terminal records updated in the last 24 hours. Use `--all` to include every stored status. Interactive mode supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata and capability-gated actions, and hands off log/terminal actions through the existing ATC command logic.
+
+## Watch Sockets
+
+`atc watch --socket <path>` streams the same watch events to Unix socket clients while the watch process runs. The socket path must not already exist, and its parent directory must be private to the current user: owned by the current uid with no group/other permissions. Shared directories such as `/tmp` or normal `0755` project checkouts are refused.
+
+```bash
+sockdir="${XDG_RUNTIME_DIR:-$(mktemp -d)}/atc"
+mkdir -p "$sockdir"
+chmod 700 "$sockdir"
+atc watch --socket "$sockdir/watch.sock" --id <dispatch-id>
+```
+
 ## Configuration
 
 ATC loads config from (in priority order):
@@ -412,6 +445,7 @@ atc-core/                           atc-cli/
 +-- project_env.rs   .dispatch/env  +-- stop.rs           Stop command
 +-- types.rs         Core types     +-- cleanup.rs        Cleanup command
 +-- worktree.rs      Cleanup        +-- retry.rs          Adaptive retry
+                                    +-- sessions.rs       Session switchboard
                                     +-- health.rs         Health CLI
                                     +-- redirect.rs       Tmux injection
                                     +-- close.rs          Task closure

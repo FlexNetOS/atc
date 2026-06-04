@@ -7,6 +7,7 @@ use tracing::warn;
 use crate::kb::kill_tmux_session;
 use crate::pipeline::resolver_by_name;
 use crate::resolve::resolve_record;
+use atc_core::terminal_text::display_text;
 
 /// Execute the `atc stop` command.
 pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) -> Result<()> {
@@ -28,7 +29,7 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     if !session_killed && !record.status.is_terminal() {
         anyhow::bail!(
             "failed to confirm tmux session '{}' was stopped; leaving dispatch state unchanged",
-            record.session
+            display_text(&record.session)
         );
     }
 
@@ -48,7 +49,11 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     }
 
     // 6. Print result
-    println!("Stopped {id} (session: {})", record.session);
+    println!(
+        "Stopped {} (session: {})",
+        display_text(id),
+        display_text(&record.session)
+    );
 
     Ok(())
 }

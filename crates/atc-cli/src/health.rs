@@ -4,6 +4,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::{Directive, DispatchRecord, RunOpts, Status, WorkUnitStatus};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -87,7 +88,7 @@ fn print_table(records: &[DispatchRecord]) {
         let signals = signal_values(record);
         println!(
             "{:<25} {:<14} {:<14} {:<15} {:<12} {:<11} {:<18} {:<16}",
-            record.id,
+            display_text(&record.id),
             record.status.as_str(),
             signal_display(signals[0]),
             signal_display(signals[1]),
@@ -123,7 +124,9 @@ pub fn cost_warning(record: &DispatchRecord, threshold: f64) -> Option<String> {
         if cost > threshold {
             return Some(format!(
                 "\u{26a0} {} cost ${:.2} (exceeds ${:.2} threshold)",
-                record.id, cost, threshold
+                display_text(&record.id),
+                cost,
+                threshold
             ));
         }
     }
@@ -132,6 +135,7 @@ pub fn cost_warning(record: &DispatchRecord, threshold: f64) -> Option<String> {
 
 /// Print a message to stdout, or stderr when in JSON mode (to keep stdout parsable).
 fn emit(json: bool, msg: &str) {
+    let msg = display_text(msg);
     if json {
         eprintln!("{msg}");
     } else {
@@ -332,7 +336,7 @@ pub async fn run_health(
                         json,
                         &format!(
                             "Work unit {} → {} (all PRs done)",
-                            wu.task_slug.as_deref().unwrap_or(&wu.id),
+                            display_text(wu.task_slug.as_deref().unwrap_or(&wu.id)),
                             new_status.as_str()
                         ),
                     );
@@ -358,7 +362,10 @@ pub async fn run_health(
             let pr_url = record.pr_urls.first().cloned();
             emit(
                 json,
-                &format!("Auto-triggering review-fix for {task_slug}..."),
+                &format!(
+                    "Auto-triggering review-fix for {}...",
+                    display_text(&task_slug)
+                ),
             );
             let opts = RunOpts {
                 input: format!("task {task_slug}"),
@@ -393,7 +400,8 @@ pub async fn run_health(
                         json,
                         &format!(
                             "  Dispatched review-fix for {}: session={}",
-                            task_slug, outcome.session
+                            display_text(&task_slug),
+                            display_text(&outcome.session)
                         ),
                     );
                 }
@@ -401,7 +409,11 @@ pub async fn run_health(
                     warn!(task = %task_slug, error = %e, "auto review-fix dispatch failed");
                     emit(
                         json,
-                        &format!("  Warning: review-fix dispatch failed for {task_slug}: {e}"),
+                        &format!(
+                            "  Warning: review-fix dispatch failed for {}: {}",
+                            display_text(&task_slug),
+                            display_text(&e.to_string())
+                        ),
                     );
                 }
             }
@@ -445,7 +457,7 @@ pub async fn run_health(
             schema_version: SCHEMA_VERSION,
             records: &display_records,
         };
-        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        println!("{}", terminal_safe_json_pretty(&envelope)?);
     } else if display_records.is_empty() {
         println!("No dispatch records found.");
     } else {
@@ -737,6 +749,22 @@ mod tests {
         let msg = msg.unwrap();
         assert!(msg.contains("15.00"));
         assert!(msg.contains("10.00"));
+    }
+
+    #[test]
+    fn test_cost_warning_escapes_terminal_controls_in_dispatch_id() {
+        let mut record =
+            make_record_with_pr(Status::Done, HealthChecks::default(), None, Some(15.0));
+        record.id = "disp-\x1b[2J\x07\u{202e}gpj.exe".to_string();
+
+        let msg = cost_warning(&record, 10.0).unwrap();
+
+        assert!(!msg.contains('\x1b'), "raw ESC in output: {msg:?}");
+        assert!(!msg.contains('\x07'), "raw BEL in output: {msg:?}");
+        assert!(!msg.contains('\u{202e}'), "raw bidi in output: {msg:?}");
+        assert!(msg.contains("\\x1b"));
+        assert!(msg.contains("\\x07"));
+        assert!(msg.contains("\\u{202e}"));
     }
 
     #[test]

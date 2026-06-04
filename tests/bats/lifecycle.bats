@@ -15,7 +15,7 @@ load helpers/common
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
 
-    run atc --config "$TEST_TMPDIR/atc.toml" status
+    run atc --config "$TEST_TMPDIR/atc.toml" status --all
     assert_success
     assert_output --partial "tasks/test-1"
     assert_output --partial "running"
@@ -26,7 +26,7 @@ load helpers/common
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-002" "tasks/test-1" "done"
 
-    run atc --config "$TEST_TMPDIR/atc.toml" status
+    run atc --config "$TEST_TMPDIR/atc.toml" status --all
     assert_success
     assert_output --partial "running"
     assert_output --partial "done"
@@ -112,6 +112,36 @@ load helpers/common
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
 }
 
+@test "status/info --json escape bidi controls in encoded bytes while preserving decoded values" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/json-' || char(8238) || 'gpj.exe',
+    branch = 'branch-' || char(8238) || 'gpj.exe',
+    session = 'session-' || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+    local decoded_status_task
+    decoded_status_task="$(echo "$STDOUT" | jq -r '.records[0].task_slug')"
+    [[ "$decoded_status_task" == *"$bidi"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+    local decoded_info_task
+    decoded_info_task="$(echo "$STDOUT" | jq -r '.record.task_slug')"
+    [[ "$decoded_info_task" == *"$bidi"* ]]
+}
+
 @test "info: shows correct fields for a dispatch" {
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running" "implement"
@@ -128,6 +158,41 @@ load helpers/common
     assert_output --partial "implement"
     assert_output --partial "agent_provider:"
     assert_output --partial "claude"
+}
+
+@test "status/info: escape hostile registry values in human output" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running" "implement"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/evil-' || char(27) || '[2J' || char(7) || char(8238) || 'gpj.exe',
+    branch = 'branch-' || char(27) || '[31m',
+    worktree_path = '${TEST_TMPDIR//\'/\'\'}/worktree-' || char(7),
+    session = 'session-' || char(8238),
+    agent_provider = 'claude-' || char(27) || '[0m'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --all --flat
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
 }
 
 @test "info: resolves by task slug (latest dispatch)" {
@@ -191,17 +256,21 @@ load helpers/common
     [ "$duration" = "45000" ]
 }
 
-@test "post-complete: extracts PR URL from log" {
+@test "post-complete: extracts PR URLs from log" {
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
-    write_test_log "$TEST_TMPDIR/disp-001.jsonl" "success" "2.50"
+    cat > "$TEST_TMPDIR/disp-001.jsonl" <<EOF
+{"type":"assistant","message":{"content":[{"type":"text","text":"Working on the task..."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Created PRs https://github.com/org/repo/pull/42 and https://github.com/org/api/pull/7"}]}}
+{"type":"result","subtype":"success","total_cost_usd":2.50,"num_turns":15,"duration_ms":45000}
+EOF
 
     run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
     assert_success
 
-    local pr_url
-    pr_url=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "pr_url")
-    [ "$pr_url" = "https://github.com/org/repo/pull/42" ]
+    local pr_urls
+    pr_urls=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "pr_urls")
+    echo "$pr_urls" | jq -e '. == ["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]'
 }
 
 @test "post-complete: stores artifacts JSON blob" {
@@ -257,6 +326,82 @@ load helpers/common
     assert_output --partial ">>> Working on the task..."
 }
 
+@test "logs: escapes terminal and bidi controls in human output" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    cat > "$TEST_TMPDIR/disp-001.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u001b[2J\u202egpj.exe\u0007"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash\u001b[31m","input":{"command":"cargo test \u202e"}}]}}
+EOF
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" logs disp-001
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}
+
+@test "watch --format json escapes bidi controls in encoded bytes while preserving decoded values" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/watch-test" "running"
+    local bidi=$'\u202e'
+    cat >> "$TEST_TMPDIR/atc.toml" <<EOF
+
+[watch]
+poll_interval_secs = 1
+EOF
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/watch-' || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+    cat > "$TEST_TMPDIR/disp-001.jsonl" <<'EOF'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u202egpj.exe"}]}}
+{"type":"result","subtype":"success","total_cost_usd":2.50,"num_turns":15,"duration_ms":45000}
+EOF
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --id disp-001 --format json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+
+    local decoded_task decoded_text
+    decoded_task="$(printf '%s\n' "$STDOUT" | jq -r 'select(.event == "started") | .task' | head -n1)"
+    decoded_text="$(printf '%s\n' "$STDOUT" | jq -r 'select(.event == "log_line") | .text' | head -n1)"
+    [[ "$decoded_task" == *"$bidi"* ]]
+    [[ "$decoded_text" == *"$bidi"* ]]
+}
+
+@test "watch --socket refuses to replace existing regular files" {
+    setup_lifecycle
+    local socket_path="$TEST_TMPDIR/not-a-socket"
+    printf 'keep me\n' > "$socket_path"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$socket_path" --id disp-missing
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"refusing to replace existing --socket path"* ]]
+    [ "$(cat "$socket_path")" = "keep me" ]
+}
+
+@test "watch --socket refuses group-writable parent directories" {
+    setup_lifecycle
+    local public_dir="$TEST_TMPDIR/public-socket-dir"
+    mkdir "$public_dir"
+    chmod 0770 "$public_dir"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$public_dir/watch.sock" --id disp-missing
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"private directory"* ]]
+    assert_file_not_exists "$public_dir/watch.sock"
+}
+
 # ===========================================================================
 # Stop: status transitions
 # ===========================================================================
@@ -285,6 +430,72 @@ load helpers/common
     local new_status
     new_status=$(query_dispatch_field "$TEST_TMPDIR/atc.db" "disp-001" "status")
     [ "$new_status" = "done" ]
+}
+
+@test "stop: escapes hostile session names in human output" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET session = 'tmux-' || char(27) || '[31mred' || char(7) || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" stop disp-001
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+}
+
+@test "redirect: escapes hostile session names in errors" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET session = 'tmux-' || char(27) || '[31mred' || char(7) || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" redirect disp-001 "hello"
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bel"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" == *"\\x07"* ]]
+    [[ "$STDERR" == *"\\u{202e}"* ]]
+}
+
+@test "status debug logs escape malformed hostile PR URLs" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET pr_urls = '["https://github.com/org/repo/pull/not-a-number\u001b\u0007\u202egpj.exe"]'
+WHERE id = 'disp-001';
+SQL
+
+    run_split env RUST_LOG=atc_cli::status=debug "$ATC_BIN" --color never --config "$TEST_TMPDIR/atc.toml" status --all --flat
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bel"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" == *"\\x07"* ]]
+    [[ "$STDERR" == *"\\u{202e}"* ]]
 }
 
 # ===========================================================================
@@ -368,13 +579,13 @@ load helpers/common
     run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
     assert_success
 
-    # Info should now show cost and PR URL
+    # Info should now show cost and PR URLs
     run atc --config "$TEST_TMPDIR/atc.toml" info disp-001
     assert_success
     assert_output --partial "done"
     assert_output --partial '$4.20'
     assert_output --partial "15"
-    assert_output --partial "pr_url:"
+    assert_output --partial "pr_urls:"
     assert_output --partial "github.com"
 }
 
@@ -386,10 +597,40 @@ load helpers/common
     run atc --config "$TEST_TMPDIR/atc.toml" post-complete --id disp-001
     assert_success
 
-    run atc --config "$TEST_TMPDIR/atc.toml" status
+    run atc --config "$TEST_TMPDIR/atc.toml" status --status done
     assert_success
     assert_output --partial "done"
     assert_output --partial '$4.20'
+}
+
+@test "history: escapes hostile work-unit registry values in human output" {
+    setup_lifecycle
+    insert_test_work_unit "$TEST_TMPDIR/atc.db" "wu-001" "tasks/history-test"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-history" "tasks/history-test" "done"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE work_units
+SET id = 'wu-' || char(27) || '[2J',
+    task_slug = 'tasks/history-' || char(27) || '[2J',
+    branch = 'branch-' || char(7),
+    repos = '["open-source/atc' || char(8238) || 'gpj.exe"]',
+    pr_urls = '["https://github.com/org/repo/pull/77"]'
+WHERE id = 'wu-001';
+UPDATE dispatches
+SET work_unit_id = 'wu-' || char(27) || '[2J'
+WHERE id = 'disp-history';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" history --pr https://github.com/org/repo/pull/77
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
 }
 
 # ===========================================================================
@@ -409,9 +650,10 @@ load helpers/common
     setup_test_git_worktree
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-cost" "tasks/cost-test" "needs-review"
 
-    # Set a high cost on the record
+    # Set a high cost and a known PR on the record so health can transition
+    # through NeedsReview without relying on gh PR discovery in the test env.
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET cost_usd = 15.0 WHERE id = 'disp-cost';"
+        "UPDATE dispatches SET cost_usd = 15.0, pr_url = 'https://github.com/org/repo/pull/98', pr_urls = '[\"https://github.com/org/repo/pull/98\"]' WHERE id = 'disp-cost';"
 
     # health will evaluate signals — tmux check will return "exited" since no
     # session exists, but that's fine for verifying cost warning output.
@@ -419,6 +661,35 @@ load helpers/common
     assert_success
     assert_output --partial "15.00"
     assert_output --partial "10.00"
+}
+
+@test "health: escapes hostile dispatch id in cost warning output" {
+    setup_lifecycle
+    setup_test_git_worktree
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-cost" "tasks/cost-test" "needs-review"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET id = 'disp-cost-' || char(27) || '[2J' || char(7) || char(8238) || 'gpj.exe',
+    cost_usd = 15.0,
+    pr_url = 'https://github.com/org/repo/pull/98',
+    pr_urls = '["https://github.com/org/repo/pull/98"]'
+WHERE id = 'disp-cost';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" health --auto
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDOUT" != *"$bel"* ]]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\x1b"* ]]
+    [[ "$STDOUT" == *"\\x07"* ]]
+    [[ "$STDOUT" == *"\\u{202e}"* ]]
+    [[ "$STDOUT" == *"15.00"* ]]
+    [[ "$STDOUT" == *"10.00"* ]]
 }
 
 @test "health --auto: auto-review prints trigger message for NeedsReview with PR" {
@@ -430,11 +701,11 @@ load helpers/common
     # serve as the baseline for detecting change.
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-review" "tasks/review-test" "running"
 
-    # Set pr_url and checks matching what health evaluation will produce
+    # Set pr_urls and checks matching what health evaluation will produce
     # (agent exited=true via tmux, branch pushed=true via git ls-remote,
-    # pr created=true via pr_url shortcut, ci=false since gh fails in test env).
+    # pr created=true via pr_urls shortcut, ci=false since gh fails in test env).
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/99', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-review';"
+        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/99', pr_urls = '[\"https://github.com/org/repo/pull/99\"]', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-review';"
 
     # The dispatch will fail (no meta workspace, no tmux, etc.) but the auto-review
     # trigger message should be printed before that.
@@ -451,7 +722,7 @@ load helpers/common
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-auto" "tasks/auto-test" "running"
 
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/100', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-auto';"
+        "UPDATE dispatches SET pr_url = 'https://github.com/org/repo/pull/100', pr_urls = '[\"https://github.com/org/repo/pull/100\"]', check_agent_exited_clean = 1, check_branch_pushed = 1, check_pr_created = 1 WHERE id = 'disp-auto';"
 
     # Write config with auto_review = true
     cat > "$TEST_TMPDIR/atc.toml" <<EOF
@@ -475,9 +746,10 @@ EOF
     setup_test_git_worktree
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-thresh" "tasks/thresh-test" "needs-review"
 
-    # Set cost just above 5.0
+    # Set cost just above 5.0 and a known PR so health reaches the warning path
+    # without relying on gh PR discovery in the test env.
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET cost_usd = 6.0 WHERE id = 'disp-thresh';"
+        "UPDATE dispatches SET cost_usd = 6.0, pr_url = 'https://github.com/org/repo/pull/101', pr_urls = '[\"https://github.com/org/repo/pull/101\"]' WHERE id = 'disp-thresh';"
 
     # Config with low threshold
     cat > "$TEST_TMPDIR/atc.toml" <<EOF

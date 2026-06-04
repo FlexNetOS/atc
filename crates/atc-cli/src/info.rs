@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::DispatchRecord;
 use serde::Serialize;
 use std::sync::Arc;
@@ -24,7 +25,11 @@ pub fn format_info(record: &DispatchRecord) -> String {
     let label_width = 16; // width for colon-aligned labels
 
     let add_line = |lines: &mut Vec<String>, label: &str, value: &str| {
-        lines.push(format!("  {:<label_width$}{}", format!("{label}:"), value));
+        lines.push(format!(
+            "  {:<label_width$}{}",
+            format!("{label}:"),
+            display_text(value)
+        ));
     };
 
     add_line(&mut lines, "id", &record.id);
@@ -129,7 +134,7 @@ pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Res
             schema_version: SCHEMA_VERSION,
             record: &record,
         };
-        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        println!("{}", terminal_safe_json_pretty(&envelope)?);
     } else {
         println!("{}", format_info(&record));
     }
@@ -192,6 +197,15 @@ mod tests {
         }
     }
 
+    fn assert_no_raw_terminal_controls(output: &str) {
+        assert!(!output.contains('\x1b'), "raw ESC in output: {output:?}");
+        assert!(!output.contains('\x07'), "raw BEL in output: {output:?}");
+        assert!(
+            !output.contains('\u{202e}'),
+            "raw bidi control in output: {output:?}"
+        );
+    }
+
     #[test]
     fn test_format_info_full_record() {
         let mut record = full_record();
@@ -244,5 +258,25 @@ mod tests {
         assert!(!output.contains("resume_of_dispatch_id:"));
         assert!(output.contains("id:"));
         assert!(output.contains("checks:"));
+    }
+
+    #[test]
+    fn test_format_info_escapes_terminal_controls_in_record_fields() {
+        let mut record = full_record();
+        record.id = "disp-\x1b[2J".to_string();
+        record.task_slug = Some("tasks/evil\x07".to_string());
+        record.branch = "branch-\u{202e}gpj.exe".to_string();
+        record.worktree_path = PathBuf::from("/tmp/worktrees/evil\x1b[31m");
+        record.session = "session-\x1b[0m".to_string();
+        record.agent_provider = "claude\u{202e}".to_string();
+        record.pr_urls = vec!["https://github.com/org/repo/pull/1\x1b[2J".to_string()];
+        record.resume_of_dispatch_id = Some("source-\x07".to_string());
+
+        let output = format_info(&record);
+
+        assert_no_raw_terminal_controls(&output);
+        assert!(output.contains("\\x1b"));
+        assert!(output.contains("\\x07"));
+        assert!(output.contains("\\u{202e}"));
     }
 }

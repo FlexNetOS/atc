@@ -2,6 +2,7 @@ use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::terminal_safe_json_pretty;
 use atc_core::types::RunOpts;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,16 +29,20 @@ pub mod redirect;
 pub mod resolve;
 pub mod resolvers;
 pub mod retry;
+pub mod sessions;
 pub mod status;
 pub mod stop;
 pub mod style;
 pub mod subprocess;
 pub mod watch;
 
+pub(crate) mod shell_text;
+
 #[cfg(test)]
 pub(crate) mod test_support;
 
 mod args {
+    use crate::sessions::SessionGroupBy;
     use atc_core::types::Directive;
     use clap::{Parser, Subcommand};
     use std::path::PathBuf;
@@ -47,7 +52,7 @@ mod args {
         name = "atc",
         about = "Air Traffic Control — agent orchestrator",
         version,
-        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc run task tasks/foo      # Dispatch a task\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
+        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc sessions                # Keyboard switchboard for sessions\n  atc tui                     # Alias for atc sessions\n  atc run task tasks/foo      # Dispatch a task\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
     )]
     pub struct Args {
         #[arg(long, global = true)]
@@ -214,6 +219,47 @@ mod args {
             #[arg(long)]
             reverse: bool,
         },
+        /// Browse and switch between ATC agent sessions
+        #[command(
+            name = "sessions",
+            visible_alias = "tui",
+            after_help = "EXAMPLES:\n  atc sessions                         # Interactive session switchboard\n  atc tui                              # Alias for atc sessions\n  atc sessions --task tasks/foo        # Filter by task\n  atc sessions --provider claude       # Filter by provider\n  atc sessions --status running        # Filter by status\n  atc sessions --once                  # Render once and exit\n  atc sessions --json | jq             # Stable v1 schema for agents\n  atc tui --json                       # Alias emits the same schema\n"
+        )]
+        Sessions {
+            /// Filter by task slug
+            #[arg(long)]
+            task: Option<String>,
+            /// Filter by work unit id
+            #[arg(long = "work-unit")]
+            work_unit: Option<String>,
+            /// Filter by branch
+            #[arg(long)]
+            branch: Option<String>,
+            /// Filter by agent provider
+            #[arg(long)]
+            provider: Option<String>,
+            /// Filter by status (running, done, failed, needs-review, needs-human, stopped, retrying)
+            #[arg(long = "status")]
+            status_filter: Option<String>,
+            /// Text search across visible session fields
+            #[arg(long)]
+            search: Option<String>,
+            /// Group rows by task, work-unit, branch, provider, status, or none
+            #[arg(long, value_enum, default_value = "none")]
+            group: SessionGroupBy,
+            /// Include all statuses beyond the default active + recent terminal set
+            #[arg(long)]
+            all: bool,
+            /// Interactive refresh interval, e.g. 1s, 2s, 500ms (minimum 250ms)
+            #[arg(long = "poll-interval")]
+            poll_interval: Option<String>,
+            /// Render once and exit
+            #[arg(long)]
+            once: bool,
+            /// Emit stable v1 JSON and exit
+            #[arg(long)]
+            json: bool,
+        },
         /// Show dispatch history for a work unit (by task, PR, or branch)
         #[command(
             after_help = "EXAMPLES:\n  atc history tasks/harmony-370                              # By task slug\n  atc history --pr https://github.com/o/r/pull/123           # By PR URL\n  atc history --branch tasks--harmony-370                    # By branch\n  atc history tasks/harmony-370 --json | jq                  # Stable v1 schema\n"
@@ -328,7 +374,7 @@ mod args {
         },
         /// Watch running agent sessions and emit structured events
         #[command(
-            after_help = "EXAMPLES:\n  atc watch                          # Most recent Running dispatch\n  atc watch --id <dispatch-id>       # Specific dispatch\n  atc watch --all-running            # All running dispatches\n  atc watch --pretty                 # Human-formatted output\n  atc watch --format json            # JSON event stream (default)\n"
+            after_help = "EXAMPLES:\n  atc watch                          # Most recent Running dispatch\n  atc watch --id <dispatch-id>       # Specific dispatch\n  atc watch --all-running            # All running dispatches\n  atc watch --pretty                 # Human-formatted output\n  atc watch --format json            # JSON event stream (default)\n  atc watch --socket \"$XDG_RUNTIME_DIR/atc/watch.sock\" --id <dispatch-id>\n\nSOCKETS:\n  --socket requires a non-existing path inside a directory owned by the current\n  user with no group/other permissions (mode 0700/0600-style parent). Shared\n  directories such as /tmp or normal 0755 project directories are refused.\n"
         )]
         Watch {
             /// Dispatch ID to watch (default: most recent Running)
@@ -343,7 +389,7 @@ mod args {
             /// Shorthand for --format pretty
             #[arg(long)]
             pretty: bool,
-            /// Unix socket path for multi-consumer mode
+            /// Unix socket path for multi-consumer mode; parent must be private to the current user
             #[arg(long)]
             socket: Option<std::path::PathBuf>,
         },
@@ -515,7 +561,7 @@ pub async fn run(
                             "kind": "templates",
                             "data": { "templates": templates },
                         });
-                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                        println!("{}", terminal_safe_json_pretty(&payload)?);
                     } else if templates.is_empty() {
                         println!("No templates found.");
                     } else {
@@ -695,6 +741,40 @@ pub async fn run(
             status::run_status(
                 registry.clone() as Arc<dyn Registry>,
                 Some(&config.pager),
+                opts,
+            )
+            .await
+        }
+        Commands::Sessions {
+            task,
+            work_unit,
+            branch,
+            provider,
+            status_filter,
+            search,
+            group,
+            all,
+            poll_interval,
+            once,
+            json,
+        } => {
+            let opts = sessions::SessionsOpts {
+                task: task.clone(),
+                work_unit: work_unit.clone(),
+                branch: branch.clone(),
+                provider: provider.clone(),
+                status: status_filter.clone(),
+                search: search.clone(),
+                group: *group,
+                all: *all,
+                poll_interval: poll_interval.clone(),
+                once: *once,
+                json: *json,
+            };
+            sessions::run_sessions(
+                config,
+                registry.clone() as Arc<dyn Registry>,
+                executor,
                 opts,
             )
             .await
@@ -897,5 +977,64 @@ pub async fn run(
                 daemon::run_daemon(registry, executor, config, &opts).await
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, Commands};
+    use clap::Parser;
+    use std::path::Path;
+
+    #[test]
+    fn tui_visible_alias_parses_as_sessions_command() {
+        let args = Args::try_parse_from(["atc", "tui", "--json", "--once"]).unwrap();
+        match args.command {
+            Commands::Sessions { json, once, .. } => {
+                assert!(json);
+                assert!(once);
+            }
+            _ => panic!("expected sessions command"),
+        }
+    }
+
+    #[test]
+    fn cli_json_stdout_emitters_use_terminal_safe_helpers() {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let forbidden = [
+            concat!("serde_json::", "to_string_pretty"),
+            concat!("println!(\"{}\", ", "serde_json::to_string"),
+            concat!("stdout.push(", "serde_json::to_string"),
+            concat!("let json = ", "serde_json::to_string(event)"),
+        ];
+        let mut offenders = Vec::new();
+        scan_rust_files(&src_dir, &forbidden, &mut offenders);
+
+        assert!(
+            offenders.is_empty(),
+            "CLI terminal JSON output must use atc_core::terminal_text::terminal_safe_json* helpers:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn scan_rust_files(dir: &Path, forbidden: &[&str], offenders: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                scan_rust_files(&path, forbidden, offenders);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+
+            let source = std::fs::read_to_string(&path).unwrap();
+            for pattern in forbidden {
+                if source.contains(pattern) {
+                    offenders.push(format!("{} contains `{pattern}`", path.display()));
+                }
+            }
+        }
     }
 }

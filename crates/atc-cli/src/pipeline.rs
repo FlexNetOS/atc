@@ -22,6 +22,8 @@ use crate::dispatch::{
     WorktreeOpts,
 };
 use crate::output_schema::SCHEMA_VERSION;
+use crate::shell_text::shell_display_arg;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 
 fn agent_invocation_from_metadata(metadata: &AgentSessionMetadata) -> AgentInvocation {
     match metadata.session_id {
@@ -106,7 +108,7 @@ pub fn emit_run_error_envelope(err: &anyhow::Error) {
             message: format_error_chain(err),
         },
     };
-    match serde_json::to_string_pretty(&envelope) {
+    match terminal_safe_json_pretty(&envelope) {
         Ok(s) => println!("{s}"),
         Err(e) => {
             // Serialization is essentially infallible for these owned types;
@@ -352,9 +354,10 @@ impl<'a> DispatchPipeline<'a> {
             resolver.on_cleanup(&tmp_record, self.config, None).await;
             anyhow::bail!(
                 "tmux session '{}' already exists. Use --force to override.\n\
-                 hint: `atc info {session_name}` shows the existing dispatch; \
+                 hint: `atc info {}` shows the existing dispatch; \
                  `atc stop` and `atc cleanup` end it cleanly.",
-                session_name
+                display_text(&session_name),
+                shell_display_arg(&session_name)
             );
         }
 
@@ -594,7 +597,7 @@ impl<'a> DispatchPipeline<'a> {
                         dispatched_at: Utc::now(),
                     },
                 };
-                println!("{}", serde_json::to_string_pretty(&envelope)?);
+                println!("{}", terminal_safe_json_pretty(&envelope)?);
             }
 
             return Ok(DispatchOutcome {
@@ -1335,7 +1338,7 @@ impl<'a> DispatchPipeline<'a> {
                     dispatched_at: now,
                 },
             };
-            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            println!("{}", terminal_safe_json_pretty(&envelope)?);
         } else {
             print_dispatch_confirmation(
                 resolved.task_slug.as_deref(),
@@ -1635,7 +1638,7 @@ impl<'a> DispatchPipeline<'a> {
                     dispatched_at: Utc::now(),
                 },
             };
-            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            println!("{}", terminal_safe_json_pretty(&envelope)?);
             // Suppress unused-arg warnings while keeping the same arg list as
             // the human path (so future fields can flow into both branches).
             let _ = (budget, turns, providers, hint, ephemeral, policy_label);
@@ -1653,18 +1656,18 @@ impl<'a> DispatchPipeline<'a> {
         }
         println!(
             "Input:       {}",
-            resolved.task_slug.as_deref().unwrap_or(&resolved.branch)
+            display_text(resolved.task_slug.as_deref().unwrap_or(&resolved.branch))
         );
-        println!("Resolver:    {}", resolver_name);
+        println!("Resolver:    {}", display_text(resolver_name));
         println!("Directive:   {}", resolved.directive.as_str());
-        println!("Branch:      {}", resolved.branch);
-        println!("ID:          {}", resolved.dispatch_id);
+        println!("Branch:      {}", display_text(&resolved.branch));
+        println!("ID:          {}", display_text(&resolved.dispatch_id));
         println!("Budget:      ${:.2}", budget);
         println!("Turns:       {}", turns);
-        println!("PR URL:      {}", pr_url.unwrap_or("(none)"));
+        println!("PR URL:      {}", display_text(pr_url.unwrap_or("(none)")));
         if let Some(metadata) = resume_metadata {
             if let Some(resume_of) = metadata.resume_of_dispatch_id.as_deref() {
-                println!("Resume:     {}", resume_of);
+                println!("Resume:     {}", display_text(resume_of));
             }
             if let Some(session_id) = metadata.session_id {
                 println!("Agent ID:   {}", session_id);
@@ -1676,12 +1679,15 @@ impl<'a> DispatchPipeline<'a> {
             worktree_policy.as_str(),
             policy_label
         );
-        println!("Path:        {}", resolved_path.display());
+        println!(
+            "Path:        {}",
+            display_text(&resolved_path.display().to_string())
+        );
         if !repos.is_empty() {
-            println!("Repo:        {}", repos.join(", "));
+            println!("Repo:        {}", display_text(&repos.join(", ")));
         }
         if let Some(h) = hint {
-            println!("Hint:        {}", h);
+            println!("Hint:        {}", display_text(&h));
         }
 
         if ephemeral {
@@ -1820,6 +1826,65 @@ pub fn resolver_by_name(name: &str) -> Option<Box<dyn InputResolver>> {
 
 /// Print post-dispatch confirmation block.
 #[allow(clippy::too_many_arguments)]
+fn build_dispatch_confirmation(
+    task_slug: Option<&str>,
+    directive: &Directive,
+    id: &str,
+    branch: &str,
+    worktree_path: &Path,
+    session: &str,
+    log_file: &Path,
+    resolver_name: &str,
+    worktree_policy: WorktreePolicy,
+    primary_repo: Option<&str>,
+) -> String {
+    let slug_display = task_slug.unwrap_or("(none)");
+    let policy_label = worktree_policy_label(worktree_policy);
+    let mut lines = Vec::new();
+    lines.push(format!("Dispatched: {}", display_text(slug_display)));
+    lines.push(format!("  Resolver:  {}", display_text(resolver_name)));
+    lines.push(format!("  Directive: {}", directive.as_str()));
+    lines.push(format!("  ID:        {}", display_text(id)));
+    lines.push(format!("  Branch:    {}", display_text(branch)));
+    lines.push(format!(
+        "  Worktree:  {} ({})",
+        worktree_policy.as_str(),
+        policy_label
+    ));
+    lines.push(format!(
+        "  Path:      {}",
+        display_text(&worktree_path.display().to_string())
+    ));
+    if let Some(repo) = primary_repo {
+        lines.push(format!("  Repo:      {}", display_text(repo)));
+    }
+    lines.push(format!("  Session:   {}", display_text(session)));
+    lines.push(format!(
+        "  Log:       {}",
+        display_text(&log_file.display().to_string())
+    ));
+    lines.push(String::new());
+    lines.push("  Next steps:".to_string());
+    if let Some(slug) = task_slug {
+        lines.push(format!("    atc logs {}", shell_display_arg(slug)));
+    }
+    lines.push(format!("    atc watch --id {}", shell_display_arg(id)));
+    lines.push(format!(
+        "    atc watch --id {} --pretty",
+        shell_display_arg(id)
+    ));
+    lines.push("    atc status --flat --json".to_string());
+    if let Some(slug) = task_slug {
+        lines.push(format!(
+            "    atc redirect {} [message]",
+            shell_display_arg(slug)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Print post-dispatch confirmation block.
+#[allow(clippy::too_many_arguments)]
 fn print_dispatch_confirmation(
     task_slug: Option<&str>,
     directive: &Directive,
@@ -1832,35 +1897,21 @@ fn print_dispatch_confirmation(
     worktree_policy: WorktreePolicy,
     primary_repo: Option<&str>,
 ) {
-    let slug_display = task_slug.unwrap_or("(none)");
-    let policy_label = worktree_policy_label(worktree_policy);
-    println!("Dispatched: {}", slug_display);
-    println!("  Resolver:  {}", resolver_name);
-    println!("  Directive: {}", directive.as_str());
-    println!("  ID:        {}", id);
-    println!("  Branch:    {}", branch);
     println!(
-        "  Worktree:  {} ({})",
-        worktree_policy.as_str(),
-        policy_label
+        "{}",
+        build_dispatch_confirmation(
+            task_slug,
+            directive,
+            id,
+            branch,
+            worktree_path,
+            session,
+            log_file,
+            resolver_name,
+            worktree_policy,
+            primary_repo
+        )
     );
-    println!("  Path:      {}", worktree_path.display());
-    if let Some(repo) = primary_repo {
-        println!("  Repo:      {}", repo);
-    }
-    println!("  Session:   {}", session);
-    println!("  Log:       {}", log_file.display());
-    println!();
-    println!("  Next steps:");
-    if let Some(slug) = task_slug {
-        println!("    atc logs {slug}");
-    }
-    println!("    atc watch --id \"{id}\"");
-    println!("    atc watch --id \"{id}\" --pretty");
-    println!("    atc status --flat --json");
-    if let Some(slug) = task_slug {
-        println!("    atc redirect {slug} [message]");
-    }
 }
 
 /// Embedded template for PR start comments. Editable without touching Rust code.
@@ -2274,6 +2325,34 @@ mod tests {
         let joined = format_error_chain(&err);
         assert!(joined.contains("failed to read template"));
         assert!(joined.contains("no such file"));
+    }
+
+    #[test]
+    fn test_build_dispatch_confirmation_quotes_and_escapes_next_steps() {
+        let task = "tasks/evil; rm -rf /\x1b[2J\x07\u{202e}gpj.exe";
+        let id = "sess 123; rm -rf /";
+        let out = build_dispatch_confirmation(
+            Some(task),
+            &Directive::Implement,
+            id,
+            "branch-\x1b[31m",
+            Path::new("/tmp/worktrees/evil\x07"),
+            "session-\u{202e}",
+            Path::new("/tmp/logs/evil\x1b.jsonl"),
+            "task",
+            WorktreePolicy::Branch,
+            Some("open-source/atc"),
+        );
+
+        assert!(!out.contains('\x1b'), "raw ESC in output: {out:?}");
+        assert!(!out.contains('\x07'), "raw BEL in output: {out:?}");
+        assert!(!out.contains('\u{202e}'), "raw bidi in output: {out:?}");
+        assert!(out.contains("\\x1b"));
+        assert!(out.contains("\\x07"));
+        assert!(out.contains("\\u{202e}"));
+        assert!(out.contains("atc logs 'tasks/evil; rm -rf /"));
+        assert!(out.contains("atc watch --id 'sess 123; rm -rf /'"));
+        assert!(out.contains("atc redirect 'tasks/evil; rm -rf /"));
     }
 
     #[test]

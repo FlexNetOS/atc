@@ -3,17 +3,19 @@
 //! Monitors tmux session liveness, tails log files for new events, and emits
 //! structured NDJSON events for consumption by AI harnesses or human terminals.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::post_completion;
 use atc_core::registry::{Registry, StatusFilter};
 use atc_core::stream_json;
+use atc_core::terminal_text::{display_text, terminal_safe_json};
 use atc_core::types::Status;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -207,6 +209,393 @@ enum OutputFormat {
     Pretty,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+struct SocketServer {
+    #[cfg(unix)]
+    socket_path: PathBuf,
+    #[cfg(unix)]
+    socket_identity: SocketIdentity,
+    #[cfg(unix)]
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SocketServer {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            self.handle.abort();
+            cleanup_socket_path(&self.socket_path, self.socket_identity);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+fn start_socket_broadcaster(
+    socket_path: &Path,
+    tx: broadcast::Sender<String>,
+) -> Result<SocketServer> {
+    let socket_path = prepare_socket_path(socket_path)?;
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let socket_identity = socket_identity(&socket_path)?;
+    info!(path = %socket_path.display(), "listening on Unix socket");
+
+    let handle = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let mut rx = tx.subscribe();
+                    tokio::spawn(async move {
+                        let mut stream = stream;
+                        while let Ok(line) = rx.recv().await {
+                            let data = format!("{line}\n");
+                            if stream.write_all(data.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!(error = %e, "socket accept failed");
+                }
+            }
+        }
+    });
+
+    Ok(SocketServer {
+        socket_path,
+        socket_identity,
+        handle,
+    })
+}
+
+#[cfg(not(unix))]
+fn start_socket_broadcaster(
+    socket_path: &Path,
+    _tx: broadcast::Sender<String>,
+) -> Result<SocketServer> {
+    anyhow::bail!(
+        "atc watch --socket is only supported on Unix platforms for now; Windows named-pipe support is not implemented yet (requested path: {})",
+        display_text(&socket_path.display().to_string())
+    )
+}
+
+#[cfg(unix)]
+fn prepare_socket_path(socket_path: &Path) -> Result<PathBuf> {
+    let socket_path = private_socket_path(socket_path)?;
+
+    match std::fs::symlink_metadata(&socket_path) {
+        Ok(_) => {
+            anyhow::bail!(
+                "refusing to replace existing --socket path: {}",
+                display_text(&socket_path.display().to_string())
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(socket_path)
+}
+
+#[cfg(unix)]
+fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
+    use std::os::unix::fs::FileTypeExt;
+
+    let socket_path = match private_socket_path(socket_path) {
+        Ok(socket_path) => socket_path,
+        Err(e) => {
+            warn!(
+                path = %socket_path.display(),
+                error = %e,
+                "not removing watch socket because its parent is no longer private"
+            );
+            return;
+        }
+    };
+
+    match std::fs::symlink_metadata(&socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            let actual = socket_identity_from_metadata(&metadata);
+            if actual == expected {
+                if let Err(e) = std::fs::remove_file(&socket_path) {
+                    warn!(path = %socket_path.display(), error = %e, "failed to clean up watch socket");
+                }
+            } else {
+                warn!(
+                    path = %socket_path.display(),
+                    expected_dev = expected.dev,
+                    expected_ino = expected.ino,
+                    actual_dev = actual.dev,
+                    actual_ino = actual.ino,
+                    "not removing replacement socket during watch socket cleanup"
+                );
+            }
+        }
+        Ok(_) => {
+            warn!(
+                path = %socket_path.display(),
+                "not removing non-socket path during watch socket cleanup"
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(path = %socket_path.display(), error = %e, "failed to inspect watch socket during cleanup");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn private_socket_path(socket_path: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file_name = socket_path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--socket path must include a file name: {}",
+                display_text(&socket_path.display().to_string())
+            )
+        })?;
+    let parent = socket_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = parent.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve --socket parent directory: {}",
+            display_text(&parent.display().to_string())
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical_parent)?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "--socket parent is not a directory: {}",
+        display_text(&parent.display().to_string())
+    );
+
+    let mode = metadata.mode() & 0o777;
+    let current_uid = unsafe { libc::geteuid() };
+    anyhow::ensure!(
+        metadata.uid() == current_uid,
+        "refusing --socket path outside a private directory: parent {} is owned by uid {}, expected {}",
+        display_text(&canonical_parent.display().to_string()),
+        metadata.uid(),
+        current_uid
+    );
+    anyhow::ensure!(
+        mode & 0o077 == 0,
+        "refusing --socket path outside a private directory: parent {} has mode {mode:o}; use a directory writable only by the current user",
+        display_text(&canonical_parent.display().to_string())
+    );
+
+    Ok(canonical_parent.join(file_name))
+}
+
+#[cfg(unix)]
+fn socket_identity(socket_path: &Path) -> Result<SocketIdentity> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let metadata = std::fs::symlink_metadata(socket_path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_socket(),
+        "created --socket path is not a socket: {}",
+        display_text(&socket_path.display().to_string())
+    );
+    Ok(socket_identity_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn socket_identity_from_metadata(metadata: &std::fs::Metadata) -> SocketIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    SocketIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+fn render_event_lines(event: &WatchEvent, format: &OutputFormat) -> (Vec<String>, Vec<String>) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    match format {
+        OutputFormat::Ndjson => {
+            stdout.push(terminal_safe_json(event).unwrap_or_default());
+        }
+        OutputFormat::Human => match event {
+            WatchEvent::Started {
+                id,
+                task,
+                directive,
+                ..
+            } => {
+                let label = task.as_deref().unwrap_or(id);
+                stderr.push(format!(
+                    "▶ watching {} ({})",
+                    display_text(label),
+                    display_text(directive)
+                ));
+            }
+            WatchEvent::LogLine {
+                event_type,
+                text,
+                tool,
+                ..
+            } => match event_type.as_str() {
+                "assistant" => {
+                    if let Some(t) = text {
+                        for line in t.lines() {
+                            stdout.push(format!(">>> {}", display_text(line)));
+                        }
+                    }
+                }
+                "tool_use" => {
+                    let tool_name = tool.as_deref().unwrap_or("?");
+                    let input = text.as_deref().unwrap_or("");
+                    stdout.push(format!(
+                        "  [{}] {}",
+                        display_text(tool_name),
+                        display_text(input)
+                    ));
+                }
+                _ => {}
+            },
+            WatchEvent::CostThreshold {
+                id,
+                cost_usd,
+                threshold,
+            } => {
+                stderr.push(format!(
+                    "⚠ {}: cost ${cost_usd:.2} exceeds ${threshold:.2} threshold",
+                    display_text(id)
+                ));
+            }
+            WatchEvent::Completed {
+                id,
+                cost_usd,
+                pr_url,
+                ..
+            } => {
+                let cost = cost_usd
+                    .map(|c| format!("${c:.2}"))
+                    .unwrap_or_else(|| "-".to_string());
+                let pr = pr_url.as_deref().unwrap_or("no PR");
+                stderr.push(format!(
+                    "✅ {}: done ({cost}) {}",
+                    display_text(id),
+                    display_text(pr)
+                ));
+            }
+            WatchEvent::Failed { id, subtype, .. } => {
+                stderr.push(format!(
+                    "❌ {}: failed ({})",
+                    display_text(id),
+                    display_text(subtype)
+                ));
+            }
+            WatchEvent::SessionDied { id } => {
+                stderr.push(format!(
+                    "💀 {}: session died without result event",
+                    display_text(id)
+                ));
+            }
+        },
+        OutputFormat::Pretty => match event {
+            WatchEvent::Started {
+                id,
+                task,
+                directive,
+                ..
+            } => {
+                let label = task.as_deref().unwrap_or(id);
+                stderr.push(format!(
+                    "▶ {} ({})",
+                    display_text(label),
+                    display_text(directive)
+                ));
+            }
+            WatchEvent::LogLine {
+                id,
+                event_type,
+                text,
+                tool,
+                ..
+            } => match event_type.as_str() {
+                "assistant" => {
+                    if let Some(t) = text {
+                        let first = t.lines().next().unwrap_or("");
+                        stdout.push(format!(
+                            "  [{}] {}",
+                            display_text(id),
+                            truncate(&display_text(first), 120)
+                        ));
+                    }
+                }
+                "tool_use" => {
+                    let name = tool.as_deref().unwrap_or("?");
+                    let input = text.as_deref().unwrap_or("");
+                    stdout.push(format!(
+                        "  [{}] \x1b[2m[{}]\x1b[0m {}",
+                        display_text(id),
+                        display_text(name),
+                        truncate(&display_text(input), 120)
+                    ));
+                }
+                _ => {}
+            },
+            WatchEvent::CostThreshold {
+                id,
+                cost_usd,
+                threshold,
+                ..
+            } => {
+                stderr.push(format!(
+                    "  \x1b[33m{}: ⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m",
+                    display_text(id)
+                ));
+            }
+            WatchEvent::Completed {
+                id,
+                cost_usd,
+                pr_url,
+                ..
+            } => {
+                let cost = cost_usd
+                    .map(|c| format!("${c:.2}"))
+                    .unwrap_or_else(|| "-".into());
+                let pr = pr_url.as_deref().unwrap_or("");
+                stderr.push(format!(
+                    "  \x1b[32m{}: ✓ done ({cost}) {}\x1b[0m",
+                    display_text(id),
+                    display_text(pr)
+                ));
+            }
+            WatchEvent::Failed { id, subtype, .. } => {
+                stderr.push(format!(
+                    "  \x1b[31m{}: ✗ failed ({})\x1b[0m",
+                    display_text(id),
+                    display_text(subtype)
+                ));
+            }
+            WatchEvent::SessionDied { id } => {
+                stderr.push(format!(
+                    "  \x1b[31m{}: ✗ session died\x1b[0m",
+                    display_text(id)
+                ));
+            }
+        },
+    }
+
+    (stdout, stderr)
+}
+
 /// Main entry point for `atc watch`.
 pub async fn run_watch(
     config: &AtcConfig,
@@ -236,35 +625,10 @@ pub async fn run_watch(
     let (tx, _) = broadcast::channel::<String>(1024);
     let tx_clone = tx.clone();
 
-    if let Some(ref socket_path) = socket {
-        // Remove existing socket
-        let _ = std::fs::remove_file(socket_path);
-        let listener = tokio::net::UnixListener::bind(socket_path)?;
-        info!(path = %socket_path.display(), "listening on Unix socket");
-
-        let tx_socket = tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let mut rx = tx_socket.subscribe();
-                        tokio::spawn(async move {
-                            let mut stream = stream;
-                            while let Ok(line) = rx.recv().await {
-                                let data = format!("{line}\n");
-                                if stream.write_all(data.as_bytes()).await.is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "socket accept failed");
-                    }
-                }
-            }
-        });
-    }
+    let _socket_server = socket
+        .as_deref()
+        .map(|socket_path| start_socket_broadcaster(socket_path, tx.clone()))
+        .transpose()?;
 
     // Resolve dispatches to watch
     let records = if all_running {
@@ -384,137 +748,339 @@ pub async fn run_watch(
         tokio::time::sleep(poll_interval).await;
     }
 
-    // Clean up socket
-    if let Some(ref socket_path) = socket {
-        let _ = std::fs::remove_file(socket_path);
-    }
-
     Ok(())
 }
 
 fn emit_event(event: &WatchEvent, format: &OutputFormat, tx: &broadcast::Sender<String>) {
-    let json = serde_json::to_string(event).unwrap_or_default();
+    let json = terminal_safe_json(event).unwrap_or_default();
 
     // Broadcast to socket consumers
     let _ = tx.send(json.clone());
 
-    match format {
-        OutputFormat::Ndjson => {
-            println!("{json}");
+    if matches!(format, OutputFormat::Ndjson) {
+        println!("{json}");
+        return;
+    }
+
+    let (stdout, stderr) = render_event_lines(event, format);
+    for line in stdout {
+        println!("{line}");
+    }
+    for line in stderr {
+        eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use crate::test_support::MockRegistry;
+    #[cfg(unix)]
+    use tokio::io::AsyncBufReadExt;
+
+    fn joined(stdout: &[String], stderr: &[String]) -> String {
+        stdout
+            .iter()
+            .chain(stderr.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_no_raw_terminal_controls(output: &str) {
+        assert!(!output.contains('\x1b'), "raw ESC in output: {output:?}");
+        assert!(!output.contains('\x07'), "raw BEL in output: {output:?}");
+        assert!(
+            !output.contains('\u{202e}'),
+            "raw bidi control in output: {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn private_socket_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut permissions = std::fs::metadata(tempdir.path()).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(tempdir.path(), permissions).unwrap();
+        tempdir
+    }
+
+    #[test]
+    fn human_renderer_escapes_started_event_fields() {
+        let event = WatchEvent::Started {
+            id: "disp-\x1b[2J".to_string(),
+            task: Some("tasks/evil\x07\u{202e}gpj.exe".to_string()),
+            directive: "implement\x1b[31m".to_string(),
+            worktree: "/tmp/worktree".to_string(),
+        };
+
+        let (stdout, stderr) = render_event_lines(&event, &OutputFormat::Human);
+        let output = joined(&stdout, &stderr);
+
+        assert_no_raw_terminal_controls(&output);
+        assert!(output.contains("\\x1b"));
+        assert!(output.contains("\\x07"));
+        assert!(output.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn human_renderer_escapes_log_line_payloads() {
+        let assistant = WatchEvent::LogLine {
+            id: "disp".to_string(),
+            event_type: "assistant".to_string(),
+            text: Some("first\x1b[2J\nsecond\x07\u{202e}".to_string()),
+            tool: None,
+        };
+        let tool = WatchEvent::LogLine {
+            id: "disp".to_string(),
+            event_type: "tool_use".to_string(),
+            text: Some("{\"cmd\":\"rm -rf /\x1b[31m\"}".to_string()),
+            tool: Some("Bash\u{202e}".to_string()),
+        };
+
+        let (stdout_a, stderr_a) = render_event_lines(&assistant, &OutputFormat::Human);
+        let (stdout_t, stderr_t) = render_event_lines(&tool, &OutputFormat::Human);
+        let output = format!(
+            "{}\n{}",
+            joined(&stdout_a, &stderr_a),
+            joined(&stdout_t, &stderr_t)
+        );
+
+        assert_no_raw_terminal_controls(&output);
+        assert!(output.contains("\\x1b"));
+        assert!(output.contains("\\x07"));
+        assert!(output.contains("\\u{202e}"));
+    }
+
+    #[test]
+    fn ndjson_renderer_escapes_bidi_but_preserves_decoded_values() {
+        let event = WatchEvent::LogLine {
+            id: "disp-\u{202e}gpj.exe".to_string(),
+            event_type: "assistant".to_string(),
+            text: Some("hello\u{202e}gpj.exe".to_string()),
+            tool: None,
+        };
+
+        let (stdout, stderr) = render_event_lines(&event, &OutputFormat::Ndjson);
+
+        assert!(stderr.is_empty());
+        assert_eq!(stdout.len(), 1);
+        assert!(!stdout[0].contains('\u{202e}'));
+        assert!(stdout[0].contains("\\u202e"));
+
+        let decoded: serde_json::Value = serde_json::from_str(&stdout[0]).unwrap();
+        assert_eq!(decoded["id"], "disp-\u{202e}gpj.exe");
+        assert_eq!(decoded["text"], "hello\u{202e}gpj.exe");
+    }
+
+    #[test]
+    fn emit_event_broadcasts_terminal_safe_json() {
+        let event = WatchEvent::Failed {
+            id: "disp-\u{202e}gpj.exe".to_string(),
+            status: "failed".to_string(),
+            subtype: "error-\u{202e}".to_string(),
+        };
+        let (tx, mut rx) = broadcast::channel(4);
+        let _subscription = tx.subscribe();
+
+        emit_event(&event, &OutputFormat::Ndjson, &tx);
+
+        let json = rx.try_recv().unwrap();
+        assert!(!json.contains('\u{202e}'));
+        assert!(json.contains("\\u202e"));
+
+        let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded["id"], "disp-\u{202e}gpj.exe");
+        assert_eq!(decoded["subtype"], "error-\u{202e}");
+    }
+
+    #[test]
+    fn pretty_renderer_escapes_user_bidi_inside_colored_lines() {
+        let event = WatchEvent::Failed {
+            id: "disp-\u{202e}gpj.exe".to_string(),
+            status: "failed".to_string(),
+            subtype: "error-\u{202e}".to_string(),
+        };
+
+        let (stdout, stderr) = render_event_lines(&event, &OutputFormat::Pretty);
+        let output = joined(&stdout, &stderr);
+
+        assert!(!output.contains('\u{202e}'));
+        assert!(output.contains("\\u{202e}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_refuses_stale_socket_file() {
+        let tempdir = private_socket_dir();
+        let socket_path = tempdir.path().join("stale.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+        assert!(socket_path.exists());
+
+        let err = prepare_socket_path(&socket_path).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("refusing to replace existing --socket path"));
+        assert!(socket_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_refuses_regular_file() {
+        let tempdir = private_socket_dir();
+        let socket_path = tempdir.path().join("not-a-socket");
+        std::fs::write(&socket_path, "keep me").unwrap();
+
+        let err = prepare_socket_path(&socket_path).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("refusing to replace existing --socket path"));
+        assert_eq!(std::fs::read_to_string(&socket_path).unwrap(), "keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_refuses_group_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let public_dir = tempdir.path().join("public");
+        std::fs::create_dir(&public_dir).unwrap();
+        let mut permissions = std::fs::metadata(&public_dir).unwrap().permissions();
+        permissions.set_mode(0o770);
+        std::fs::set_permissions(&public_dir, permissions).unwrap();
+
+        let err = prepare_socket_path(&public_dir.join("watch.sock")).unwrap_err();
+
+        assert!(err.to_string().contains("private directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_uses_canonical_private_parent() {
+        let tempdir = private_socket_dir();
+        let link_root = private_socket_dir();
+        let link = link_root.path().join("socket-dir");
+        std::os::unix::fs::symlink(tempdir.path(), &link).unwrap();
+
+        let requested = link.join("watch.sock");
+        let prepared = prepare_socket_path(&requested).unwrap();
+
+        assert_eq!(
+            prepared,
+            tempdir.path().canonicalize().unwrap().join("watch.sock")
+        );
+        assert_ne!(prepared, requested);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_path_refuses_regular_file() {
+        let tempdir = private_socket_dir();
+        let socket_path = tempdir.path().join("not-a-socket");
+        std::fs::write(&socket_path, "keep me").unwrap();
+
+        cleanup_socket_path(&socket_path, SocketIdentity { dev: 0, ino: 0 });
+
+        assert_eq!(std::fs::read_to_string(&socket_path).unwrap(), "keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_path_refuses_replacement_socket() {
+        let tempdir = private_socket_dir();
+        let socket_path = tempdir.path().join("watch.sock");
+        let first_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let first_identity = socket_identity(&socket_path).unwrap();
+        drop(first_listener);
+        std::fs::remove_file(&socket_path).unwrap();
+
+        let _replacement_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        cleanup_socket_path(&socket_path, first_identity);
+
+        assert!(
+            socket_path.exists(),
+            "cleanup removed a socket with a different identity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_watch_socket_broadcasts_terminal_safe_json_to_connected_client() {
+        let tempdir = private_socket_dir();
+        let log_file = tempdir.path().join("dispatch.jsonl");
+        let socket_path = tempdir.path().join("watch.sock");
+        std::fs::write(&log_file, "").unwrap();
+
+        let mut record = crate::test_support::dispatch_record_fixture();
+        record.id = "disp-socket".to_string();
+        record.task_slug = Some("tasks/socket-\u{202e}gpj.exe".to_string());
+        record.status = Status::Running;
+        record.log_file = log_file.clone();
+        record.session = "missing-atc-watch-test-session".to_string();
+
+        let registry = Arc::new(MockRegistry::new(vec![record]));
+        let mut config = AtcConfig::default();
+        config.watch.poll_interval_secs = 1;
+        let socket_for_watch = socket_path.clone();
+
+        let handle = tokio::spawn(async move {
+            run_watch(
+                &config,
+                registry,
+                Some("disp-socket"),
+                false,
+                "human",
+                Some(socket_for_watch),
+            )
+            .await
+        });
+
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        OutputFormat::Human => match event {
-            WatchEvent::Started {
-                id,
-                task,
-                directive,
-                ..
-            } => {
-                let label = task.as_deref().unwrap_or(id);
-                eprintln!("▶ watching {label} ({directive})");
-            }
-            WatchEvent::LogLine {
-                event_type,
-                text,
-                tool,
-                ..
-            } => match event_type.as_str() {
-                "assistant" => {
-                    if let Some(t) = text {
-                        for line in t.lines() {
-                            println!(">>> {line}");
-                        }
-                    }
+        assert!(socket_path.exists(), "watch socket was not created");
+
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        tokio::fs::write(
+            &log_file,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u202egpj.exe"}]}}
+{"type":"result","subtype":"success","total_cost_usd":1.00,"num_turns":1,"duration_ms":1000}
+"#,
+        )
+        .await
+        .unwrap();
+
+        let mut reader = tokio::io::BufReader::new(stream);
+        let json = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await.unwrap();
+                assert!(n > 0, "socket closed before log_line event");
+                if line.contains(r#""event":"log_line""#) {
+                    break line;
                 }
-                "tool_use" => {
-                    let tool_name = tool.as_deref().unwrap_or("?");
-                    let input = text.as_deref().unwrap_or("");
-                    println!("  [{tool_name}] {input}");
-                }
-                _ => {}
-            },
-            WatchEvent::CostThreshold {
-                id,
-                cost_usd,
-                threshold,
-            } => {
-                eprintln!("⚠ {id}: cost ${cost_usd:.2} exceeds ${threshold:.2} threshold");
             }
-            WatchEvent::Completed {
-                id,
-                cost_usd,
-                pr_url,
-                ..
-            } => {
-                let cost = cost_usd
-                    .map(|c| format!("${c:.2}"))
-                    .unwrap_or_else(|| "-".to_string());
-                let pr = pr_url.as_deref().unwrap_or("no PR");
-                eprintln!("✅ {id}: done ({cost}) {pr}");
-            }
-            WatchEvent::Failed { id, subtype, .. } => {
-                eprintln!("❌ {id}: failed ({subtype})");
-            }
-            WatchEvent::SessionDied { id } => {
-                eprintln!("💀 {id}: session died without result event");
-            }
-        },
-        OutputFormat::Pretty => match event {
-            WatchEvent::Started {
-                id,
-                task,
-                directive,
-                ..
-            } => {
-                let label = task.as_deref().unwrap_or(id);
-                eprintln!("▶ {label} ({directive})");
-            }
-            WatchEvent::LogLine {
-                id,
-                event_type,
-                text,
-                tool,
-                ..
-            } => match event_type.as_str() {
-                "assistant" => {
-                    if let Some(t) = text {
-                        // First line only, truncated
-                        let first = t.lines().next().unwrap_or("");
-                        println!("  [{id}] {first}");
-                    }
-                }
-                "tool_use" => {
-                    let name = tool.as_deref().unwrap_or("?");
-                    let input = text.as_deref().unwrap_or("");
-                    println!("  [{id}] \x1b[2m[{name}]\x1b[0m {input}");
-                }
-                _ => {}
-            },
-            WatchEvent::CostThreshold {
-                id,
-                cost_usd,
-                threshold,
-                ..
-            } => {
-                eprintln!("  \x1b[33m{id}: ⚠ cost ${cost_usd:.2} > ${threshold:.2}\x1b[0m");
-            }
-            WatchEvent::Completed {
-                id,
-                cost_usd,
-                pr_url,
-                ..
-            } => {
-                let cost = cost_usd
-                    .map(|c| format!("${c:.2}"))
-                    .unwrap_or_else(|| "-".into());
-                let pr = pr_url.as_deref().unwrap_or("");
-                eprintln!("  \x1b[32m{id}: ✓ done ({cost}) {pr}\x1b[0m");
-            }
-            WatchEvent::Failed { id, subtype, .. } => {
-                eprintln!("  \x1b[31m{id}: ✗ failed ({subtype})\x1b[0m");
-            }
-            WatchEvent::SessionDied { id } => {
-                eprintln!("  \x1b[31m{id}: ✗ session died\x1b[0m");
-            }
-        },
+        })
+        .await
+        .unwrap();
+
+        assert!(!json.contains('\u{202e}'));
+        assert!(json.contains("\\u202e"));
+        let decoded: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(decoded["text"], "Hello \u{202e}gpj.exe");
+
+        handle.await.unwrap().unwrap();
+        assert!(!socket_path.exists(), "watch socket was not cleaned up");
     }
 }
