@@ -203,6 +203,28 @@ SQL
     assert_file_not_exists "$sentinel"
 }
 
+@test "sessions --json escapes bidi controls in encoded bytes while preserving decoded values" {
+    require_jq
+    setup_sessions_data
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET branch = 'branch-' || char(8238) || 'gpj.exe',
+    session = 'tmux-' || char(8238) || 'gpj.exe',
+    agent_provider = 'claude-' || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+    local decoded_branch
+    decoded_branch="$(echo "$STDOUT" | jq -r '.rows[0].branch')"
+    [[ "$decoded_branch" == *"$bidi"* ]]
+}
+
 @test "sessions --once escapes terminal control sequences in human output" {
     setup_sessions_data
     local esc=$'\033'

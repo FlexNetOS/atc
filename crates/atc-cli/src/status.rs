@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use atc_core::config::PagerConfig;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::{DispatchRecord, Status, WorkUnit};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -187,7 +187,10 @@ pub fn format_pr_list(urls: &[String]) -> String {
             if is_valid_github_pr_url(u) {
                 true
             } else {
-                tracing::debug!(url = %u, "skipping malformed PR URL in render");
+                tracing::debug!(
+                    url = %display_text(u),
+                    "skipping malformed PR URL in render"
+                );
                 false
             }
         })
@@ -219,7 +222,10 @@ fn is_valid_github_pr_url(url: &str) -> bool {
 /// Format PR URLs as compact "repo#N" references. Rejects malformed URLs.
 pub fn format_pr_url(url: &str) -> String {
     if !is_valid_github_pr_url(url) {
-        tracing::debug!(url = %url, "rejected malformed PR URL during render");
+        tracing::debug!(
+            url = %display_text(url),
+            "rejected malformed PR URL during render"
+        );
         return "(invalid)".to_string();
     }
     url.strip_prefix("https://github.com/")
@@ -514,7 +520,7 @@ pub async fn run_status(
             work_units: &work_units_filtered,
             summary,
         };
-        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        println!("{}", terminal_safe_json_pretty(&envelope)?);
         return Ok(());
     }
 

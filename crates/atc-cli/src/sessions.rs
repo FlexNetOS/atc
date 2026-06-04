@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::output_schema::SCHEMA_VERSION;
 use crate::status::{format_pr_list, DEFAULT_STATUSES};
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -301,7 +301,7 @@ pub async fn run_sessions(
     let snapshot = load_snapshot(registry.as_ref(), &filter, opts.group).await?;
 
     if opts.json {
-        println!("{}", serde_json::to_string_pretty(&snapshot.output())?);
+        println!("{}", terminal_safe_json_pretty(&snapshot.output())?);
         return Ok(());
     }
 
@@ -1619,7 +1619,7 @@ fn detail_text(row: &SessionRow) -> String {
         display_text(&row.branch),
         display_text(&row.worktree_path),
         display_text(row.log_file.as_deref().unwrap_or("-")),
-        format_pr_list(&row.pr_urls),
+        display_text(&format_pr_list(&row.pr_urls)),
         display_text(row.resume_of_dispatch_id.as_deref().unwrap_or("-")),
         action_text
     )
@@ -2177,6 +2177,30 @@ mod tests {
         assert!(rendered.contains("provider_session"));
         assert!(rendered.contains("provider does not advertise"));
         assert!(rendered.contains("log file missing or unreadable"));
+    }
+
+    #[test]
+    fn detail_text_escapes_terminal_controls_in_pr_list() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let mut hostile = record("hostile-pr", Status::NeedsHuman);
+        hostile.pr_urls =
+            vec!["https://github.com/acme/repo\x1b\x07\u{202e}gpj.exe/pull/99".to_string()];
+        let snapshot = build_snapshot(
+            vec![hostile],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Task,
+        );
+
+        let detail = detail_text(&snapshot.rows[0]);
+
+        assert!(detail.contains("repo\\x1b\\x07\\u{202e}gpj.exe#99"));
+        assert!(!detail.contains('\x1b'));
+        assert!(!detail.contains('\x07'));
+        assert!(!detail.contains('\u{202e}'));
     }
 
     #[test]

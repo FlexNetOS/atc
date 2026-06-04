@@ -2,6 +2,7 @@ use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::terminal_safe_json_pretty;
 use atc_core::types::RunOpts;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -560,7 +561,7 @@ pub async fn run(
                             "kind": "templates",
                             "data": { "templates": templates },
                         });
-                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                        println!("{}", terminal_safe_json_pretty(&payload)?);
                     } else if templates.is_empty() {
                         println!("No templates found.");
                     } else {

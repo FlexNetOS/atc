@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::{DispatchRecord, WorkUnit};
 use serde::Serialize;
 use std::sync::Arc;
@@ -128,7 +128,7 @@ pub async fn run_history(
                 work_unit: None,
                 dispatches: &empty,
             };
-            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            println!("{}", terminal_safe_json_pretty(&envelope)?);
         } else {
             println!("No work unit found for: {}", display_text(target));
         }
@@ -143,7 +143,7 @@ pub async fn run_history(
             work_unit: Some(&unit),
             dispatches: &dispatches,
         };
-        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        println!("{}", terminal_safe_json_pretty(&envelope)?);
         return Ok(());
     }
 

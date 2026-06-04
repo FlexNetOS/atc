@@ -112,6 +112,36 @@ load helpers/common
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
 }
 
+@test "status/info --json escape bidi controls in encoded bytes while preserving decoded values" {
+    require_jq
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET task_slug = 'tasks/json-' || char(8238) || 'gpj.exe',
+    branch = 'branch-' || char(8238) || 'gpj.exe',
+    session = 'session-' || char(8238) || 'gpj.exe'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+    local decoded_status_task
+    decoded_status_task="$(echo "$STDOUT" | jq -r '.records[0].task_slug')"
+    [[ "$decoded_status_task" == *"$bidi"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" == *"\\u202e"* ]]
+    local decoded_info_task
+    decoded_info_task="$(echo "$STDOUT" | jq -r '.record.task_slug')"
+    [[ "$decoded_info_task" == *"$bidi"* ]]
+}
+
 @test "info: shows correct fields for a dispatch" {
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running" "implement"
@@ -383,6 +413,28 @@ SQL
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" redirect disp-001 "hello"
     [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bel"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" == *"\\x07"* ]]
+    [[ "$STDERR" == *"\\u{202e}"* ]]
+}
+
+@test "status debug logs escape malformed hostile PR URLs" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local esc=$'\033'
+    local bel=$'\a'
+    local bidi=$'\u202e'
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET pr_urls = '["https://github.com/org/repo/pull/not-a-number\u001b\u0007\u202egpj.exe"]'
+WHERE id = 'disp-001';
+SQL
+
+    run_split env RUST_LOG=atc_cli::status=debug "$ATC_BIN" --color never --config "$TEST_TMPDIR/atc.toml" status --all --flat
+    [ "$SPLIT_STATUS" -eq 0 ]
     [[ "$STDERR" != *"$esc"* ]]
     [[ "$STDERR" != *"$bel"* ]]
     [[ "$STDERR" != *"$bidi"* ]]

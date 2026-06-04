@@ -23,7 +23,7 @@ use crate::dispatch::{
 };
 use crate::output_schema::SCHEMA_VERSION;
 use crate::shell_text::shell_display_arg;
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 
 fn agent_invocation_from_metadata(metadata: &AgentSessionMetadata) -> AgentInvocation {
     match metadata.session_id {
@@ -108,7 +108,7 @@ pub fn emit_run_error_envelope(err: &anyhow::Error) {
             message: format_error_chain(err),
         },
     };
-    match serde_json::to_string_pretty(&envelope) {
+    match terminal_safe_json_pretty(&envelope) {
         Ok(s) => println!("{s}"),
         Err(e) => {
             // Serialization is essentially infallible for these owned types;
@@ -597,7 +597,7 @@ impl<'a> DispatchPipeline<'a> {
                         dispatched_at: Utc::now(),
                     },
                 };
-                println!("{}", serde_json::to_string_pretty(&envelope)?);
+                println!("{}", terminal_safe_json_pretty(&envelope)?);
             }
 
             return Ok(DispatchOutcome {
@@ -1338,7 +1338,7 @@ impl<'a> DispatchPipeline<'a> {
                     dispatched_at: now,
                 },
             };
-            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            println!("{}", terminal_safe_json_pretty(&envelope)?);
         } else {
             print_dispatch_confirmation(
                 resolved.task_slug.as_deref(),
@@ -1638,7 +1638,7 @@ impl<'a> DispatchPipeline<'a> {
                     dispatched_at: Utc::now(),
                 },
             };
-            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            println!("{}", terminal_safe_json_pretty(&envelope)?);
             // Suppress unused-arg warnings while keeping the same arg list as
             // the human path (so future fields can flow into both branches).
             let _ = (budget, turns, providers, hint, ephemeral, policy_label);

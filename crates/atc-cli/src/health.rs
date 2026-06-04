@@ -4,7 +4,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::health::{HealthChecker, HealthResult};
 use atc_core::post_completion::{self, PostCompleteInput};
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::{Directive, DispatchRecord, RunOpts, Status, WorkUnitStatus};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -457,7 +457,7 @@ pub async fn run_health(
             schema_version: SCHEMA_VERSION,
             records: &display_records,
         };
-        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        println!("{}", terminal_safe_json_pretty(&envelope)?);
     } else if display_records.is_empty() {
         println!("No dispatch records found.");
     } else {

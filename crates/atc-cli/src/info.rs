@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
-use atc_core::terminal_text::display_text;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::DispatchRecord;
 use serde::Serialize;
 use std::sync::Arc;
@@ -134,7 +134,7 @@ pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Res
             schema_version: SCHEMA_VERSION,
             record: &record,
         };
-        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        println!("{}", terminal_safe_json_pretty(&envelope)?);
     } else {
         println!("{}", format_info(&record));
     }
