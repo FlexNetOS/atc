@@ -214,6 +214,8 @@ struct SocketServer {
     #[cfg(unix)]
     socket_path: PathBuf,
     #[cfg(unix)]
+    socket_identity: SocketIdentity,
+    #[cfg(unix)]
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -222,9 +224,16 @@ impl Drop for SocketServer {
         #[cfg(unix)]
         {
             self.handle.abort();
-            cleanup_socket_path(&self.socket_path);
+            cleanup_socket_path(&self.socket_path, self.socket_identity);
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    dev: u64,
+    ino: u64,
 }
 
 #[cfg(unix)]
@@ -235,6 +244,7 @@ fn start_socket_broadcaster(
     let socket_path = socket_path.to_path_buf();
     prepare_socket_path(&socket_path)?;
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let socket_identity = socket_identity(&socket_path)?;
     info!(path = %socket_path.display(), "listening on Unix socket");
 
     let handle = tokio::spawn(async move {
@@ -261,6 +271,7 @@ fn start_socket_broadcaster(
 
     Ok(SocketServer {
         socket_path,
+        socket_identity,
         handle,
     })
 }
@@ -278,15 +289,12 @@ fn start_socket_broadcaster(
 
 #[cfg(unix)]
 fn prepare_socket_path(socket_path: &Path) -> Result<()> {
-    use std::os::unix::fs::FileTypeExt;
+    ensure_private_socket_parent(socket_path)?;
 
     match std::fs::symlink_metadata(socket_path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            std::fs::remove_file(socket_path)?;
-        }
         Ok(_) => {
             anyhow::bail!(
-                "refusing to replace non-socket --socket path: {}",
+                "refusing to replace existing --socket path: {}",
                 display_text(&socket_path.display().to_string())
             );
         }
@@ -297,13 +305,34 @@ fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn cleanup_socket_path(socket_path: &Path) {
+fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
     use std::os::unix::fs::FileTypeExt;
+
+    if let Err(e) = ensure_private_socket_parent(socket_path) {
+        warn!(
+            path = %socket_path.display(),
+            error = %e,
+            "not removing watch socket because its parent is no longer private"
+        );
+        return;
+    }
 
     match std::fs::symlink_metadata(socket_path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
-            if let Err(e) = std::fs::remove_file(socket_path) {
-                warn!(path = %socket_path.display(), error = %e, "failed to clean up watch socket");
+            let actual = socket_identity_from_metadata(&metadata);
+            if actual == expected {
+                if let Err(e) = std::fs::remove_file(socket_path) {
+                    warn!(path = %socket_path.display(), error = %e, "failed to clean up watch socket");
+                }
+            } else {
+                warn!(
+                    path = %socket_path.display(),
+                    expected_dev = expected.dev,
+                    expected_ino = expected.ino,
+                    actual_dev = actual.dev,
+                    actual_ino = actual.ino,
+                    "not removing replacement socket during watch socket cleanup"
+                );
             }
         }
         Ok(_) => {
@@ -316,6 +345,62 @@ fn cleanup_socket_path(socket_path: &Path) {
         Err(e) => {
             warn!(path = %socket_path.display(), error = %e, "failed to inspect watch socket during cleanup");
         }
+    }
+}
+
+#[cfg(unix)]
+fn ensure_private_socket_parent(socket_path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let parent = socket_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::metadata(parent)?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "--socket parent is not a directory: {}",
+        display_text(&parent.display().to_string())
+    );
+
+    let mode = metadata.mode() & 0o777;
+    let current_uid = unsafe { libc::geteuid() };
+    anyhow::ensure!(
+        metadata.uid() == current_uid,
+        "refusing --socket path outside a private directory: parent {} is owned by uid {}, expected {}",
+        display_text(&parent.display().to_string()),
+        metadata.uid(),
+        current_uid
+    );
+    anyhow::ensure!(
+        mode & 0o077 == 0,
+        "refusing --socket path outside a private directory: parent {} has mode {mode:o}; use a directory writable only by the current user",
+        display_text(&parent.display().to_string())
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn socket_identity(socket_path: &Path) -> Result<SocketIdentity> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let metadata = std::fs::symlink_metadata(socket_path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_socket(),
+        "created --socket path is not a socket: {}",
+        display_text(&socket_path.display().to_string())
+    );
+    Ok(socket_identity_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn socket_identity_from_metadata(metadata: &std::fs::Metadata) -> SocketIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    SocketIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
     }
 }
 
@@ -695,6 +780,17 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn private_socket_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut permissions = std::fs::metadata(tempdir.path()).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(tempdir.path(), permissions).unwrap();
+        tempdir
+    }
+
     #[test]
     fn human_renderer_escapes_started_event_fields() {
         let event = WatchEvent::Started {
@@ -801,47 +897,89 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prepare_socket_path_removes_stale_socket_file() {
-        let tempdir = tempfile::tempdir().unwrap();
+    fn prepare_socket_path_refuses_stale_socket_file() {
+        let tempdir = private_socket_dir();
         let socket_path = tempdir.path().join("stale.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         drop(listener);
         assert!(socket_path.exists());
 
-        prepare_socket_path(&socket_path).unwrap();
+        let err = prepare_socket_path(&socket_path).unwrap_err();
 
-        assert!(!socket_path.exists());
+        assert!(err
+            .to_string()
+            .contains("refusing to replace existing --socket path"));
+        assert!(socket_path.exists());
     }
 
     #[cfg(unix)]
     #[test]
     fn prepare_socket_path_refuses_regular_file() {
-        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir = private_socket_dir();
         let socket_path = tempdir.path().join("not-a-socket");
         std::fs::write(&socket_path, "keep me").unwrap();
 
         let err = prepare_socket_path(&socket_path).unwrap_err();
 
-        assert!(err.to_string().contains("refusing to replace non-socket"));
+        assert!(err
+            .to_string()
+            .contains("refusing to replace existing --socket path"));
         assert_eq!(std::fs::read_to_string(&socket_path).unwrap(), "keep me");
     }
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_socket_path_refuses_regular_file() {
+    fn prepare_socket_path_refuses_group_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tempdir = tempfile::tempdir().unwrap();
+        let public_dir = tempdir.path().join("public");
+        std::fs::create_dir(&public_dir).unwrap();
+        let mut permissions = std::fs::metadata(&public_dir).unwrap().permissions();
+        permissions.set_mode(0o770);
+        std::fs::set_permissions(&public_dir, permissions).unwrap();
+
+        let err = prepare_socket_path(&public_dir.join("watch.sock")).unwrap_err();
+
+        assert!(err.to_string().contains("private directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_path_refuses_regular_file() {
+        let tempdir = private_socket_dir();
         let socket_path = tempdir.path().join("not-a-socket");
         std::fs::write(&socket_path, "keep me").unwrap();
 
-        cleanup_socket_path(&socket_path);
+        cleanup_socket_path(&socket_path, SocketIdentity { dev: 0, ino: 0 });
 
         assert_eq!(std::fs::read_to_string(&socket_path).unwrap(), "keep me");
     }
 
     #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_path_refuses_replacement_socket() {
+        let tempdir = private_socket_dir();
+        let socket_path = tempdir.path().join("watch.sock");
+        let first_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let first_identity = socket_identity(&socket_path).unwrap();
+        drop(first_listener);
+        std::fs::remove_file(&socket_path).unwrap();
+
+        let _replacement_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        cleanup_socket_path(&socket_path, first_identity);
+
+        assert!(
+            socket_path.exists(),
+            "cleanup removed a socket with a different identity"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_watch_socket_broadcasts_terminal_safe_json_to_connected_client() {
-        let tempdir = tempfile::tempdir().unwrap();
+        let tempdir = private_socket_dir();
         let log_file = tempdir.path().join("dispatch.jsonl");
         let socket_path = tempdir.path().join("watch.sock");
         std::fs::write(&log_file, "").unwrap();

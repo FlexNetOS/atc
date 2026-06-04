@@ -165,6 +165,31 @@ SQL
     echo "$STDOUT" | jq -e '.rows | map(.id) | index("disp-old-done") != null' >/dev/null
 }
 
+@test "sessions --json reflects external sqlite updates on subsequent reads" {
+    require_jq
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.rows[0].status == "running"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].cost_usd == 1.25' >/dev/null
+
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET status = 'needs-review',
+    cost_usd = 9.75,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.rows[0].id == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].status == "needs-review"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].cost_usd == 9.75' >/dev/null
+    echo "$STDOUT" | jq -e '.summary.needs_review == 1' >/dev/null
+}
+
 @test "sessions rejects zero poll interval before entering tui" {
     setup_sessions_data
 
