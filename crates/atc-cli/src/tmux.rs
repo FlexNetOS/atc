@@ -47,11 +47,31 @@ pub fn attach_command_preview(session: &str) -> Vec<String> {
 }
 
 pub async fn session_alive(session: &str) -> bool {
-    inspect_session(session).await.is_live()
+    session_alive_with_binary(TMUX_BIN, session, TMUX_INSPECT_TIMEOUT).await
 }
 
 pub async fn inspect_session(session: &str) -> TmuxInspect {
     inspect_session_with_binary(TMUX_BIN, session, TMUX_INSPECT_TIMEOUT).await
+}
+
+async fn session_alive_with_binary(
+    tmux_bin: &str,
+    session: &str,
+    timeout_duration: Duration,
+) -> bool {
+    if session.trim().is_empty() {
+        return false;
+    }
+
+    run_tmux_status(
+        tmux_bin,
+        ["has-session", "-t", session],
+        "has-session",
+        timeout_duration,
+    )
+    .await
+    .map(|status| status.success())
+    .unwrap_or(false)
 }
 
 async fn inspect_session_with_binary(
@@ -175,6 +195,53 @@ mod tests {
                 "-t".to_string(),
                 "session; touch /tmp/pwned".to_string()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_alive_rejects_blank_sessions_without_spawning_tmux() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let missing_tmux = tempdir.path().join("missing-tmux");
+
+        assert!(
+            !session_alive_with_binary(
+                missing_tmux.to_str().unwrap(),
+                "   ",
+                Duration::from_millis(50),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn session_alive_uses_only_has_session_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let marker = tempdir.path().join("list-clients-was-called");
+        let tmux = tempdir.path().join("tmux");
+        fs::write(
+            &tmux,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"has-session\" ]; then exit 0; fi\ntouch '{}'\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let alive = session_alive_with_binary(
+            tmux.to_str().unwrap(),
+            "session",
+            Duration::from_millis(250),
+        )
+        .await;
+
+        assert!(alive);
+        assert!(
+            !marker.exists(),
+            "session_alive should not call list-clients"
         );
     }
 

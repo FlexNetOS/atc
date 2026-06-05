@@ -48,7 +48,11 @@ pub fn format_info(record: &DispatchRecord) -> String {
     }
 
     add_line(&mut lines, "session", &record.session);
-    add_terminal_locator_lines(&mut lines, record, add_line);
+    add_terminal_locator_lines(
+        &mut lines,
+        crate::open_session::effective_terminal_locator(record).as_ref(),
+        add_line,
+    );
 
     add_line(&mut lines, "agent_provider", &record.agent_provider);
     if let Some(ref session_id) = record.agent_session_id {
@@ -131,10 +135,10 @@ pub fn format_info(record: &DispatchRecord) -> String {
 
 fn add_terminal_locator_lines(
     lines: &mut Vec<String>,
-    record: &DispatchRecord,
+    locator: Option<&TerminalLocator>,
     add_line: impl Fn(&mut Vec<String>, &str, &str),
 ) {
-    let Some(locator) = record.terminal_locator.as_ref() else {
+    let Some(locator) = locator else {
         return;
     };
 
@@ -290,6 +294,28 @@ mod tests {
         assert!(output.contains("atc-dispatch"));
         assert!(output.contains("terminal_confidence:"));
         assert!(output.contains("exact"));
+    }
+
+    #[test]
+    fn test_format_info_shows_inferred_legacy_terminal_locator() {
+        let mut record = full_record();
+        record.terminal_locator = None;
+        record.updated_at = DateTime::parse_from_rfc3339("2026-06-05T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let output = format_info(&record);
+
+        assert!(output.contains("terminal_backend:"));
+        assert!(output.contains("tmux"));
+        assert!(output.contains("terminal_session:"));
+        assert!(output.contains("tasks--gitkb-42@implement@1773293500"));
+        assert!(output.contains("terminal_source:"));
+        assert!(output.contains("legacy-session-field"));
+        assert!(output.contains("terminal_confidence:"));
+        assert!(output.contains("inferred"));
+        assert!(output.contains("terminal_detected_at:"));
+        assert!(output.contains("2026-06-05T01:02:03+00:00"));
     }
 
     #[test]

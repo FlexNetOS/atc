@@ -58,6 +58,7 @@ pub struct DispatchRecord {
 
 pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
 pub const ATC_SESSION_URI_PREFIX: &str = "atc://session/";
+const TMUX_TERMINAL_LOCATOR_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -112,6 +113,12 @@ impl<'de> Deserialize<'de> for TerminalLocator {
             "tmux" => {
                 let tmux =
                     TmuxTerminalLocatorWire::deserialize(value).map_err(de::Error::custom)?;
+                if tmux.version != TMUX_TERMINAL_LOCATOR_VERSION {
+                    return Err(de::Error::custom(format!(
+                        "unsupported tmux terminal locator version: {}",
+                        tmux.version
+                    )));
+                }
                 Ok(Self::Tmux(TmuxTerminalLocator {
                     version: tmux.version,
                     session: tmux.session,
@@ -136,7 +143,7 @@ impl TerminalLocator {
         detected_at: DateTime<Utc>,
     ) -> Self {
         Self::Tmux(TmuxTerminalLocator {
-            version: 1,
+            version: TMUX_TERMINAL_LOCATOR_VERSION,
             session: session.into(),
             cwd,
             detected_at,
@@ -151,7 +158,7 @@ impl TerminalLocator {
         detected_at: DateTime<Utc>,
     ) -> Self {
         Self::Tmux(TmuxTerminalLocator {
-            version: 1,
+            version: TMUX_TERMINAL_LOCATOR_VERSION,
             session: session.into(),
             cwd,
             detected_at,
@@ -1103,6 +1110,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("kind/backend mismatch"));
+    }
+
+    #[test]
+    fn test_terminal_locator_rejects_unsupported_tmux_version() {
+        let json = serde_json::json!({
+            "kind": "tmux",
+            "version": 2,
+            "session": "session",
+            "detected_at": "2026-06-05T00:00:00Z",
+            "source": "atc-dispatch",
+            "confidence": "exact"
+        });
+
+        let error = serde_json::from_value::<TerminalLocator>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported tmux terminal locator version: 2"));
     }
 
     #[test]

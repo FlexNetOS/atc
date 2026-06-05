@@ -114,6 +114,27 @@ SQL
     echo "$STDOUT" | jq -e '.data.terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
 }
 
+@test "sessions --json rejects unsupported persisted locator versions and falls back safely" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"kind":"tmux","version":2,"session":"future-session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}',
+    updated_at = '2026-06-05T01:02:03+00:00'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.source == "legacy-session-field"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
+    [[ "$STDERR" == *"unsupported tmux terminal locator version: 2"* ]]
+    [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+}
+
 @test "open-session --json resolves session URI without attaching" {
     require_jq
     setup_sessions_data

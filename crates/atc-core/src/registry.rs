@@ -46,6 +46,10 @@ fn display_metadata_error(error: impl std::fmt::Display) -> String {
     display_text(&error.to_string())
 }
 
+fn dispatch_not_found_error(id: &str) -> String {
+    format!("no dispatch record found for id: {}", display_text(id))
+}
+
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
 pub enum StatusFilter {
@@ -952,7 +956,8 @@ impl Registry for SqliteRegistry {
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -976,7 +981,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -992,7 +998,8 @@ impl Registry for SqliteRegistry {
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1011,7 +1018,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1125,7 +1133,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1145,7 +1154,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1206,7 +1216,8 @@ impl Registry for SqliteRegistry {
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1272,7 +1283,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -2179,6 +2191,26 @@ mod tests {
         let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.session, "final-session");
         assert_eq!(fetched.terminal_locator, Some(locator));
+    }
+
+    #[tokio::test]
+    async fn test_update_session_locator_missing_id_error_escapes_terminal_controls() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let error = registry
+            .update_session_locator("missing\x1b[2J\u{202e}gpj", "session", None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing\\x1b[2J\\u{202e}gpj"));
+        assert!(
+            !error.contains('\x1b'),
+            "raw escape leaked in error: {error:?}"
+        );
+        assert!(
+            !error.contains('\u{202e}'),
+            "raw bidi control leaked in error: {error:?}"
+        );
     }
 
     #[tokio::test]
