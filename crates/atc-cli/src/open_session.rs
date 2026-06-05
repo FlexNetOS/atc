@@ -177,15 +177,15 @@ async fn resolve_record(registry: &dyn Registry, target: &str) -> Result<Dispatc
         });
     }
 
-    if looks_like_uri(target) {
+    if let Some(record) = registry.get(target).await? {
+        return Ok(record);
+    }
+
+    if unsupported_uri_scheme(target).is_some() {
         bail!(
             "unsupported open-session URI scheme in target: {}",
             display_text(target)
         );
-    }
-
-    if let Some(record) = registry.get(target).await? {
-        return Ok(record);
     }
 
     let candidates: Vec<DispatchRecord> = registry
@@ -219,17 +219,14 @@ fn is_active_for_open_session(status: Status) -> bool {
     !status.is_terminal()
 }
 
-fn looks_like_uri(target: &str) -> bool {
-    let Some(scheme_end) = target.find("://") else {
-        return false;
-    };
+fn unsupported_uri_scheme(target: &str) -> Option<&str> {
+    let scheme_end = target.find(':')?;
     let scheme = &target[..scheme_end];
     let mut bytes = scheme.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    first.is_ascii_alphabetic()
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    let first = bytes.next()?;
+    (first.is_ascii_alphabetic()
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')))
+    .then_some(scheme)
 }
 
 fn status_state_label(state: TerminalStatusState) -> &'static str {
@@ -377,13 +374,27 @@ mod tests {
     async fn resolve_open_session_rejects_unsupported_uri_schemes() {
         let registry = MockRegistry::new(Vec::new());
 
+        for target in [
+            "https://example.invalid/dispatch\x1b[2J",
+            "mailto:dispatch-1",
+            "file:/tmp/dispatch-1",
+        ] {
+            let error = resolve_open_session(&registry, target)
+                .await
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                error.contains("unsupported open-session URI scheme"),
+                "{target:?} should be rejected as unsupported URI: {error}"
+            );
+            assert_no_raw_terminal_controls(&error);
+        }
+
         let error = resolve_open_session(&registry, "https://example.invalid/dispatch\x1b[2J")
             .await
             .unwrap_err()
             .to_string();
-
-        assert!(error.contains("unsupported open-session URI scheme"));
-        assert_no_raw_terminal_controls(&error);
         assert!(error.contains("\\x1b"));
     }
 
@@ -398,6 +409,23 @@ mod tests {
 
         assert!(error.contains("no active dispatch found for task slug"));
         assert!(!error.contains("unsupported open-session URI scheme"));
+    }
+
+    #[tokio::test]
+    async fn resolve_open_session_prefers_raw_dispatch_ids_over_uri_like_text() {
+        let mut record = record_with_session(AgentCapabilities::default());
+        record.id = "https://example.invalid/dispatch".to_string();
+        let registry = MockRegistry::new(vec![record]);
+
+        let result = resolve_open_session(&registry, "https://example.invalid/dispatch")
+            .await
+            .unwrap();
+
+        assert_eq!(result.dispatch_id, "https://example.invalid/dispatch");
+        assert_eq!(
+            result.uri,
+            "atc://session/https%3A%2F%2Fexample.invalid%2Fdispatch"
+        );
     }
 
     #[tokio::test]

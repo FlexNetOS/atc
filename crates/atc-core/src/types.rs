@@ -119,6 +119,9 @@ impl<'de> Deserialize<'de> for TerminalLocator {
                         tmux.version
                     )));
                 }
+                if tmux.session.trim().is_empty() {
+                    return Err(de::Error::custom("tmux terminal locator session is empty"));
+                }
                 Ok(Self::Tmux(TmuxTerminalLocator {
                     version: tmux.version,
                     session: tmux.session,
@@ -1143,6 +1146,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unsupported tmux terminal locator version: 2"));
+    }
+
+    #[test]
+    fn test_terminal_locator_rejects_empty_tmux_session() {
+        let json = serde_json::json!({
+            "kind": "tmux",
+            "version": 1,
+            "session": "  ",
+            "detected_at": "2026-06-05T00:00:00Z",
+            "source": "atc-dispatch",
+            "confidence": "exact"
+        });
+
+        let error = serde_json::from_value::<TerminalLocator>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tmux terminal locator session is empty"));
     }
 
     #[test]

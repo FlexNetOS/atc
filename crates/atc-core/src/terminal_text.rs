@@ -31,7 +31,7 @@ pub fn terminal_safe_json_pretty<T>(value: &T) -> Result<String, serde_json::Err
 where
     T: serde::Serialize + ?Sized,
 {
-    serde_json::to_string_pretty(value).map(|json| escape_json_format_controls(&json))
+    serde_json::to_string_pretty(value).map(escape_json_format_controls_owned)
 }
 
 /// Serialize compact JSON while applying the same terminal-spoofing escapes as
@@ -40,24 +40,38 @@ pub fn terminal_safe_json<T>(value: &T) -> Result<String, serde_json::Error>
 where
     T: serde::Serialize + ?Sized,
 {
-    serde_json::to_string(value).map(|json| escape_json_format_controls(&json))
+    serde_json::to_string(value).map(escape_json_format_controls_owned)
 }
 
 /// Escape dangerous raw terminal controls in already-serialized JSON.
 pub fn escape_json_format_controls(value: &str) -> String {
-    if !value.chars().any(should_escape_raw_json_terminal_char) {
-        return value.to_string();
-    }
+    escape_json_format_controls_impl(value).unwrap_or_else(|| value.to_string())
+}
 
-    let mut out = String::with_capacity(value.len());
+fn escape_json_format_controls_owned(value: String) -> String {
+    match escape_json_format_controls_impl(&value) {
+        Some(escaped) => escaped,
+        None => value,
+    }
+}
+
+fn escape_json_format_controls_impl(value: &str) -> Option<String> {
+    let mut out: Option<String> = None;
     let mut in_string = false;
     let mut escaped = false;
-    for ch in value.chars() {
+    for (index, ch) in value.char_indices() {
         if in_string && should_escape_raw_json_terminal_char(ch) {
-            push_json_unicode_escape(&mut out, ch);
+            let out = out.get_or_insert_with(|| {
+                let mut out = String::with_capacity(value.len());
+                out.push_str(&value[..index]);
+                out
+            });
+            push_json_unicode_escape(out, ch);
             escaped = false;
         } else {
-            out.push(ch);
+            if let Some(out) = out.as_mut() {
+                out.push(ch);
+            }
             if in_string {
                 if escaped {
                     escaped = false;
@@ -152,6 +166,19 @@ mod tests {
 
         let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn terminal_safe_json_pretty_leaves_safe_json_unchanged() {
+        let value = serde_json::json!({
+            "text": "plain safe text",
+            "items": ["one", "two"]
+        });
+
+        let safe = terminal_safe_json_pretty(&value).unwrap();
+
+        assert_eq!(safe, serde_json::to_string_pretty(&value).unwrap());
+        assert!(safe.contains('\n'));
     }
 
     #[test]

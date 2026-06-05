@@ -2132,6 +2132,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_blank_optional_terminal_locator_session_does_not_break_reads() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let record = sample_record("blank-terminal-locator-session");
+        registry.insert(&record).await.unwrap();
+
+        sqlx::query("UPDATE dispatches SET terminal_locator_json = ?1 WHERE id = ?2")
+            .bind(
+                r#"{"kind":"tmux","version":1,"session":"  ","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}"#,
+            )
+            .bind("blank-terminal-locator-session")
+            .execute(&registry.pool)
+            .await
+            .unwrap();
+
+        let fetched = registry
+            .get("blank-terminal-locator-session")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(fetched.terminal_locator.is_none());
+    }
+
+    #[tokio::test]
     async fn test_malformed_optional_agent_metadata_does_not_break_reads() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let record = sample_record("bad-agent-metadata");

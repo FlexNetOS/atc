@@ -135,6 +135,26 @@ SQL
     [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
 }
 
+@test "sessions --json rejects blank persisted tmux locator sessions and falls back safely" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"kind":"tmux","version":1,"session":"  ","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}',
+    updated_at = '2026-06-05T01:02:03+00:00'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.source == "legacy-session-field"' >/dev/null
+    [[ "$STDERR" == *"tmux terminal locator session is empty"* ]]
+    [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+}
+
 @test "open-session --json resolves session URI without attaching" {
     require_jq
     setup_sessions_data
@@ -166,6 +186,10 @@ SQL
     [[ "$STDERR" == *"\\x1b"* ]]
     [[ "$STDERR" != *"$esc"* ]]
 
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "mailto:disp-001" --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unsupported open-session URI scheme"* ]]
+
     run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001/extra --json
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"must be percent-encoded"* ]]
@@ -182,6 +206,18 @@ SQL
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"0x1B"* ]]
     [[ "$STDERR" != *"$esc"* ]]
+}
+
+@test "open-session --json prefers raw dispatch ids over URI-like text" {
+    require_jq
+    setup_sessions_data
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "https://example.invalid/dispatch-id" "tasks/uri-id" "running"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "https://example.invalid/dispatch-id" --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.data.dispatch_id == "https://example.invalid/dispatch-id"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.uri == "atc://session/https%3A%2F%2Fexample.invalid%2Fdispatch-id"' >/dev/null
 }
 
 @test "open-session --json disables stale or unavailable tmux locators" {
