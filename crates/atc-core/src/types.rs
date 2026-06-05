@@ -184,7 +184,6 @@ impl TerminalStatus {
                 | TerminalStatusState::Attached
                 | TerminalStatusState::Detached
                 | TerminalStatusState::Running
-                | TerminalStatusState::Unknown
         )
     }
 }
@@ -236,7 +235,7 @@ pub fn atc_session_uri(dispatch_id: &str) -> String {
 
 pub fn parse_atc_session_uri(value: &str) -> anyhow::Result<String> {
     let Some(encoded) = value.strip_prefix(ATC_SESSION_URI_PREFIX) else {
-        anyhow::bail!("unsupported atc resource URI: {value}");
+        anyhow::bail!("unsupported atc resource URI; expected atc://session/<id>");
     };
     anyhow::ensure!(!encoded.is_empty(), "atc session URI is missing an id");
     percent_decode_resource_id(encoded)
@@ -273,10 +272,9 @@ fn percent_decode_resource_id(value: &str) -> anyhow::Result<String> {
                 decoded.push(byte);
                 idx += 1;
             }
-            byte => anyhow::bail!(
-                "reserved byte in atc URI id must be percent-encoded: {}",
-                char::from(byte)
-            ),
+            byte => {
+                anyhow::bail!("reserved byte in atc URI id must be percent-encoded: 0x{byte:02X}")
+            }
         }
     }
     let decoded =
@@ -308,7 +306,7 @@ fn from_hex(value: u8) -> anyhow::Result<u8> {
         b'0'..=b'9' => Ok(value - b'0'),
         b'a'..=b'f' => Ok(value - b'a' + 10),
         b'A'..=b'F' => Ok(value - b'A' + 10),
-        other => anyhow::bail!("invalid percent escape byte: {}", char::from(other)),
+        other => anyhow::bail!("invalid percent escape byte: 0x{other:02X}"),
     }
 }
 
@@ -997,6 +995,32 @@ mod tests {
     }
 
     #[test]
+    fn test_terminal_status_openable_only_for_explicit_live_states() {
+        for state in [
+            TerminalStatusState::Focusable,
+            TerminalStatusState::Attached,
+            TerminalStatusState::Detached,
+            TerminalStatusState::Running,
+        ] {
+            assert!(
+                TerminalStatus::new(state, Some("tmux")).is_openable(),
+                "{state:?} should be openable"
+            );
+        }
+
+        for state in [
+            TerminalStatusState::Stale,
+            TerminalStatusState::Unavailable,
+            TerminalStatusState::Unknown,
+        ] {
+            assert!(
+                !TerminalStatus::new(state, Some("tmux")).is_openable(),
+                "{state:?} should not be openable"
+            );
+        }
+    }
+
+    #[test]
     fn test_atc_session_uri_percent_encodes_dispatch_id() {
         let id = "branch/with space@implement@1";
         let uri = atc_session_uri(id);
@@ -1016,5 +1040,35 @@ mod tests {
         assert!(parse_atc_session_uri("atc://session/%FF").is_err());
         assert!(parse_atc_session_uri("atc://session/%1Bbad").is_err());
         assert!(parse_atc_session_uri("atc://session/%E2%80%AEgpj.exe").is_err());
+    }
+
+    #[test]
+    fn test_atc_session_uri_errors_do_not_echo_raw_terminal_controls() {
+        for value in [
+            "atc://dispatch/id\x1b[2J",
+            "atc://session/id\x1b[2J",
+            "atc://session/%\x1b0",
+            "atc://session/id\u{202e}gpj.exe",
+        ] {
+            let error = parse_atc_session_uri(value).unwrap_err().to_string();
+            assert!(
+                !error.contains('\x1b'),
+                "raw escape leaked in error for {value:?}: {error:?}"
+            );
+            assert!(
+                !error.contains('\u{202e}'),
+                "raw bidi control leaked in error for {value:?}: {error:?}"
+            );
+        }
+
+        let reserved = parse_atc_session_uri("atc://session/id\x1b[2J")
+            .unwrap_err()
+            .to_string();
+        assert!(reserved.contains("0x1B"));
+
+        let invalid_escape = parse_atc_session_uri("atc://session/%\x1b0")
+            .unwrap_err()
+            .to_string();
+        assert!(invalid_escape.contains("0x1B"));
     }
 }

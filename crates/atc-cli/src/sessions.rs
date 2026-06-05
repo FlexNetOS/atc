@@ -443,7 +443,8 @@ fn row_from_record(
     let terminal_status = initial_terminal_status(effective_locator.as_ref());
     let open_shell =
         crate::open_session::open_shell_preview(effective_locator.as_ref(), &terminal_status);
-    let actions = action_state(&record);
+    let mut actions = action_state(&record);
+    actions.attach = availability_from_open_shell(&open_shell);
     SessionRow {
         uri: atc_session_uri(&record.id),
         id: record.id,
@@ -543,7 +544,8 @@ fn initial_terminal_status(locator: Option<&TerminalLocator>) -> TerminalStatus 
 
 fn effective_locator_for_row(row: &SessionRow) -> Option<TerminalLocator> {
     row.terminal_locator.clone().or_else(|| {
-        (row.actions.attach.enabled && !row.session.trim().is_empty()).then(|| {
+        let has_tmux_open_shell = row.open_shell.backend.as_deref() == Some("tmux");
+        (has_tmux_open_shell && !row.session.trim().is_empty()).then(|| {
             TerminalLocator::inferred_tmux(
                 row.session.clone(),
                 Some(PathBuf::from(row.worktree_path.clone())),
@@ -1955,6 +1957,26 @@ mod tests {
             no_locator_status.reason.as_deref(),
             Some("no terminal locator")
         );
+    }
+
+    #[test]
+    fn row_initial_unknown_status_disables_attach_but_remains_probeable() {
+        let filter = SessionFilter::default();
+        let snapshot = build_snapshot(
+            vec![record("running", Status::Running)],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::None,
+        );
+
+        let row = &snapshot.rows[0];
+        assert_eq!(row.terminal_status.state, TerminalStatusState::Unknown);
+        assert!(!row.open_shell.enabled);
+        assert!(!row.actions.attach.enabled);
+        assert!(matches!(
+            effective_locator_for_row(row),
+            Some(TerminalLocator::Tmux(_))
+        ));
     }
 
     #[test]

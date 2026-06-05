@@ -1498,7 +1498,21 @@ impl<'a> DispatchPipeline<'a> {
                 "failed to mark resume reservation failed"
             );
         }
+        if let Err(update_err) = self
+            .registry
+            .update_session_locator(&record.id, "", None)
+            .await
+        {
+            warn!(
+                id = %record.id,
+                reason,
+                error = %update_err,
+                "failed to clear failed resume reservation terminal locator"
+            );
+        }
         record.status = Status::Failed;
+        record.session.clear();
+        record.terminal_locator = None;
         record.updated_at = Utc::now();
     }
 

@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use atc_core::registry::Registry;
-use atc_core::terminal_text::terminal_safe_json_pretty;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::{
     atc_session_uri, parse_atc_session_uri, DispatchRecord, OpenSessionPreview, Status,
     TerminalLocator, TerminalStatus, TerminalStatusState,
@@ -46,14 +46,14 @@ pub async fn run_open_session(registry: &dyn Registry, target: &str, json: bool)
     }
 
     attach_result(&result).await?;
-    println!("attached to {}", result.session);
+    println!("attached to {}", display_text(&result.session));
     Ok(())
 }
 
 pub async fn run_open_session_action(registry: &dyn Registry, target: &str) -> Result<String> {
     let result = resolve_open_session(registry, target).await?;
     attach_result(&result).await?;
-    Ok(format!("attached to {}", result.session))
+    Ok(format!("attached to {}", display_text(&result.session)))
 }
 
 pub async fn resolve_open_session(
@@ -168,10 +168,12 @@ async fn resolve_record(registry: &dyn Registry, target: &str) -> Result<Dispatc
 
     if target.starts_with("atc://") {
         let dispatch_id = parse_atc_session_uri(target)?;
-        return registry
-            .get(&dispatch_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no dispatch record found for id: {dispatch_id}"));
+        return registry.get(&dispatch_id).await?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no dispatch record found for id: {}",
+                display_text(&dispatch_id)
+            )
+        });
     }
 
     if let Some(record) = registry.get(target).await? {
@@ -187,14 +189,20 @@ async fn resolve_record(registry: &dyn Registry, target: &str) -> Result<Dispatc
 
     match candidates.as_slice() {
         [record] => Ok(record.clone()),
-        [] => bail!("no active dispatch found for task slug: {target}"),
+        [] => bail!(
+            "no active dispatch found for task slug: {}",
+            display_text(target)
+        ),
         many => {
             let ids = many
                 .iter()
-                .map(|record| record.id.as_str())
+                .map(|record| display_text(&record.id))
                 .collect::<Vec<_>>()
                 .join(", ");
-            bail!("task slug {target} has multiple active dispatches: {ids}");
+            bail!(
+                "task slug {} has multiple active dispatches: {ids}",
+                display_text(target)
+            );
         }
     }
 }
@@ -219,6 +227,16 @@ fn status_state_label(state: TerminalStatusState) -> &'static str {
 mod tests {
     use super::*;
     use atc_core::types::{AgentCapabilities, TerminalStatus, TerminalStatusState};
+
+    use crate::test_support::MockRegistry;
+
+    fn assert_no_raw_terminal_controls(value: &str) {
+        assert!(!value.contains('\x1b'), "raw escape leaked: {value:?}");
+        assert!(
+            !value.contains('\u{202e}'),
+            "raw bidi control leaked: {value:?}"
+        );
+    }
 
     fn record_with_session(caps: AgentCapabilities) -> DispatchRecord {
         let mut record = crate::test_support::dispatch_record_fixture();
@@ -263,6 +281,17 @@ mod tests {
     }
 
     #[test]
+    fn open_shell_preview_rejects_unknown_tmux_status() {
+        let locator = TerminalLocator::inferred_tmux("not-yet-probed", None, Utc::now());
+        let status = TerminalStatus::new(TerminalStatusState::Unknown, Some("tmux"));
+        let preview = open_shell_preview(Some(&locator), &status);
+
+        assert!(!preview.enabled);
+        assert_eq!(preview.reason.as_deref(), Some("terminal is unknown"));
+        assert!(preview.attach_command.is_none());
+    }
+
+    #[test]
     fn effective_terminal_locator_requires_tmux_attach_capability_for_legacy_session() {
         let unsupported = record_with_session(AgentCapabilities::default());
         assert!(effective_terminal_locator(&unsupported).is_none());
@@ -275,5 +304,40 @@ mod tests {
             effective_terminal_locator(&supported),
             Some(TerminalLocator::Tmux(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn resolve_open_session_errors_escape_hostile_target_text() {
+        let registry = MockRegistry::new(Vec::new());
+
+        let error = resolve_open_session(&registry, "tasks/bad\x1b[2J\u{202e}gpj")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_no_raw_terminal_controls(&error);
+        assert!(error.contains("\\x1b"));
+        assert!(error.contains("\\u{202e}"));
+    }
+
+    #[tokio::test]
+    async fn resolve_open_session_ambiguous_task_errors_escape_candidate_ids() {
+        let task_slug = "tasks/bad\x1b[2J\u{202e}gpj";
+        let mut first = record_with_session(AgentCapabilities::default());
+        first.id = "first\x1b[31m".to_string();
+        first.task_slug = Some(task_slug.to_string());
+        let mut second = record_with_session(AgentCapabilities::default());
+        second.id = "second\u{202e}gpj".to_string();
+        second.task_slug = Some(task_slug.to_string());
+        let registry = MockRegistry::new(vec![first, second]);
+
+        let error = resolve_open_session(&registry, task_slug)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_no_raw_terminal_controls(&error);
+        assert!(error.contains("\\x1b"));
+        assert!(error.contains("\\u{202e}"));
     }
 }

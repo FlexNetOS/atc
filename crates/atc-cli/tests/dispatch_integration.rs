@@ -1447,6 +1447,14 @@ async fn test_dispatch_resume_spawn_failure_marks_pre_spawn_reservation_failed()
         .find(|record| record.resume_of_dispatch_id.as_deref() == Some(source.id.as_str()))
         .expect("resume reservation should remain recorded");
     assert_eq!(failed.status, Status::Failed);
+    assert!(
+        failed.session.is_empty(),
+        "failed pre-spawn resume reservation should not retain a tmux session"
+    );
+    assert!(
+        failed.terminal_locator.is_none(),
+        "failed pre-spawn resume reservation should not retain a terminal locator"
+    );
 }
 
 #[tokio::test]
