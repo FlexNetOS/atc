@@ -198,6 +198,9 @@ mod tests {
     #[cfg(unix)]
     use std::fs;
 
+    const TEST_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(2);
+    const TEST_HANG_TIMEOUT: Duration = Duration::from_secs(1);
+
     #[test]
     fn attach_command_preview_preserves_session_as_argv_data() {
         assert_eq!(
@@ -244,12 +247,9 @@ mod tests {
         .unwrap();
         fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let alive = session_alive_with_binary(
-            tmux.to_str().unwrap(),
-            "session",
-            Duration::from_millis(250),
-        )
-        .await;
+        let alive =
+            session_alive_with_binary(tmux.to_str().unwrap(), "session", TEST_SUBPROCESS_TIMEOUT)
+                .await;
 
         assert!(alive);
         assert!(
@@ -285,12 +285,8 @@ mod tests {
         fs::write(&tmux, "#!/bin/sh\nexec sleep 5\n").unwrap();
         fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let inspect = inspect_session_with_binary(
-            tmux.to_str().unwrap(),
-            "session",
-            Duration::from_millis(250),
-        )
-        .await;
+        let inspect =
+            inspect_session_with_binary(tmux.to_str().unwrap(), "session", TEST_HANG_TIMEOUT).await;
 
         assert!(matches!(
             inspect,
@@ -312,12 +308,8 @@ mod tests {
         .unwrap();
         fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let inspect = inspect_session_with_binary(
-            tmux.to_str().unwrap(),
-            "session",
-            Duration::from_millis(250),
-        )
-        .await;
+        let inspect =
+            inspect_session_with_binary(tmux.to_str().unwrap(), "session", TEST_HANG_TIMEOUT).await;
 
         assert!(matches!(
             inspect,
@@ -339,12 +331,9 @@ mod tests {
         .unwrap();
         fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let inspect = inspect_session_with_binary(
-            tmux.to_str().unwrap(),
-            "session",
-            Duration::from_millis(250),
-        )
-        .await;
+        let inspect =
+            inspect_session_with_binary(tmux.to_str().unwrap(), "session", TEST_SUBPROCESS_TIMEOUT)
+                .await;
 
         assert!(matches!(
             inspect,
