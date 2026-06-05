@@ -51,8 +51,9 @@ async fn resolve_log_path(
     }
 
     anyhow::bail!(
-        "No log file: {}",
-        display_text(&fallback.display().to_string())
+        "No log file: {}\nhint: try `atc info {}` to verify the dispatch exists.",
+        display_text(&fallback.display().to_string()),
+        shell_display_arg(arg)
     );
 }
 

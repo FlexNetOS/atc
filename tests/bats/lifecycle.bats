@@ -381,10 +381,11 @@ EOF
 
 @test "watch --socket refuses to replace existing regular files" {
     setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     local socket_path="$TEST_TMPDIR/not-a-socket"
     printf 'keep me\n' > "$socket_path"
 
-    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$socket_path" --id disp-missing
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$socket_path" --id disp-001
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"refusing to replace existing --socket path"* ]]
     [ "$(cat "$socket_path")" = "keep me" ]
@@ -392,11 +393,12 @@ EOF
 
 @test "watch --socket refuses group-writable parent directories" {
     setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     local public_dir="$TEST_TMPDIR/public-socket-dir"
     mkdir "$public_dir"
     chmod 0770 "$public_dir"
 
-    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$public_dir/watch.sock" --id disp-missing
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$public_dir/watch.sock" --id disp-001
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"private directory"* ]]
     assert_file_not_exists "$public_dir/watch.sock"
@@ -516,6 +518,16 @@ SQL
     run atc --config "$TEST_TMPDIR/atc.toml" cleanup disp-001
     assert_success
     assert_output --partial "Cleaned disp-001"
+}
+
+@test "cleanup: resolving by task slug prints resolved dispatch id" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+
+    run atc --config "$TEST_TMPDIR/atc.toml" cleanup tasks/test-1
+    assert_success
+    assert_output --partial "Cleaned disp-001"
+    refute_output --partial "Cleaned tasks/test-1"
 }
 
 @test "cleanup --done: cleans all Done dispatches" {

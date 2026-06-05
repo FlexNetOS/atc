@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS work_units (
 CREATE INDEX IF NOT EXISTS idx_work_units_task ON work_units(task_slug);
 CREATE INDEX IF NOT EXISTS idx_work_units_branch ON work_units(branch);
 CREATE INDEX IF NOT EXISTS idx_work_units_status ON work_units(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_task ON work_units(task_slug) WHERE status = 'active' AND task_slug IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_branch ON work_units(branch) WHERE status = 'active' AND branch IS NOT NULL;
 SCHEMA
 }
 

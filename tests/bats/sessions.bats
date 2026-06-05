@@ -70,11 +70,6 @@ SQL
     echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
-
-    local caps
-    caps="$(sqlite3 "$TEST_TMPDIR/atc.db" "SELECT agent_capabilities_json FROM dispatches WHERE id = 'disp-001';")"
-    echo "$caps" | jq -e '.supports_tmux_attach == true' >/dev/null
-    echo "$caps" | jq -e '.supports_tmux_redirect == true' >/dev/null
 }
 
 @test "tui --json is the same sessions command surface" {

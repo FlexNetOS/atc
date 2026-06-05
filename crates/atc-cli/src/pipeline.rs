@@ -1670,7 +1670,7 @@ impl<'a> DispatchPipeline<'a> {
                 println!("Resume:     {}", display_text(resume_of));
             }
             if let Some(session_id) = metadata.session_id {
-                println!("Agent ID:   {}", session_id);
+                println!("Agent ID:   {}", display_text(&session_id.to_string()));
             }
         }
 

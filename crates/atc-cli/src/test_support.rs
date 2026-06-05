@@ -106,7 +106,7 @@ impl Registry for MockRegistry {
 
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
         let records = self.records.lock().unwrap();
-        Ok(match filter {
+        let mut records = match filter {
             StatusFilter::All => records.clone(),
             StatusFilter::One(status) => records
                 .iter()
@@ -128,7 +128,13 @@ impl Registry for MockRegistry {
                 })
                 .cloned()
                 .collect(),
-        })
+        };
+        records.sort_by(|a, b| {
+            b.dispatched_at
+                .cmp(&a.dispatched_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(records)
     }
 
     async fn update_health(
