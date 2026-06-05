@@ -473,15 +473,41 @@ fn row_from_record(
 }
 
 async fn refresh_terminal_fields(rows: &mut [SessionRow]) {
+    let mut terminal_status_cache: HashMap<(&'static str, String), TerminalStatus> = HashMap::new();
     for row in rows {
         let effective_locator = effective_locator_for_row(row);
         row.terminal_status =
-            crate::open_session::terminal_status_for_locator(effective_locator.as_ref()).await;
+            terminal_status_with_cache(effective_locator.as_ref(), &mut terminal_status_cache)
+                .await;
         row.open_shell = crate::open_session::open_shell_preview(
             effective_locator.as_ref(),
             &row.terminal_status,
         );
         row.actions.attach = availability_from_open_shell(&row.open_shell);
+    }
+}
+
+async fn terminal_status_with_cache(
+    locator: Option<&TerminalLocator>,
+    cache: &mut HashMap<(&'static str, String), TerminalStatus>,
+) -> TerminalStatus {
+    let Some(locator) = locator else {
+        return crate::open_session::terminal_status_for_locator(None).await;
+    };
+
+    let key = terminal_status_cache_key(locator);
+    if let Some(status) = cache.get(&key) {
+        return status.clone();
+    }
+
+    let status = crate::open_session::terminal_status_for_locator(Some(locator)).await;
+    cache.insert(key, status.clone());
+    status
+}
+
+fn terminal_status_cache_key(locator: &TerminalLocator) -> (&'static str, String) {
+    match locator {
+        TerminalLocator::Tmux(tmux) => ("tmux", tmux.session.clone()),
     }
 }
 

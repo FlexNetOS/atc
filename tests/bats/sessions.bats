@@ -105,6 +105,45 @@ SQL
     echo "$STDOUT" | jq -e '.data.open_shell.action == "open-session"' >/dev/null
 }
 
+@test "open-session rejects malformed and unsupported atc URIs" {
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://dispatch/disp-001 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unsupported atc resource URI"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001/extra --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"must be percent-encoded"* ]]
+}
+
+@test "open-session --json disables stale or unavailable tmux locators" {
+    require_jq
+    setup_sessions_data
+    local missing_session="atc-missing-$BATS_TEST_NUMBER-$$"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"backend":"tmux","version":1,"session":"$missing_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.data.open_shell.enabled == false' >/dev/null
+    echo "$STDOUT" | jq -e '.data.open_shell.attach_command == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_status.state == "stale" or .data.terminal_status.state == "unavailable"' >/dev/null
+}
+
+@test "open-session refuses non-interactive attach attempts" {
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"non-interactive terminal"* ]]
+    [[ "$STDERR" == *"--json"* ]]
+}
+
 @test "open-session rejects ambiguous active task slug with candidates" {
     setup_sessions_data
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-ambiguous" "tasks/test-1" "running"

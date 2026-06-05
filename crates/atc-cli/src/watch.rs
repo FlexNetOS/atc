@@ -946,6 +946,7 @@ mod tests {
         let socket_path = tempdir.path().join("stale.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         drop(listener);
+        wait_until_socket_refuses_connections(&socket_path);
         assert!(socket_path.exists());
 
         let prepared = prepare_socket_path(&socket_path).unwrap();
@@ -1020,6 +1021,20 @@ mod tests {
             tempdir.path().canonicalize().unwrap().join("watch.sock")
         );
         assert_ne!(prepared, requested);
+    }
+
+    #[cfg(unix)]
+    fn wait_until_socket_refuses_connections(socket_path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "socket still accepted connections after listener drop: {}",
+                    socket_path.display()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]

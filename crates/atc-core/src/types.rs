@@ -269,10 +269,14 @@ fn percent_decode_resource_id(value: &str) -> anyhow::Result<String> {
                 decoded.push((hi << 4) | lo);
                 idx += 3;
             }
-            byte => {
+            byte if is_unreserved_uri_byte(byte) => {
                 decoded.push(byte);
                 idx += 1;
             }
+            byte => anyhow::bail!(
+                "reserved byte in atc URI id must be percent-encoded: {}",
+                char::from(byte)
+            ),
         }
     }
     String::from_utf8(decoded).map_err(|e| anyhow::anyhow!("atc URI id is not UTF-8: {e}"))
@@ -990,5 +994,8 @@ mod tests {
         assert!(parse_atc_session_uri("atc://session/").is_err());
         assert!(parse_atc_session_uri("atc://session/%").is_err());
         assert!(parse_atc_session_uri("atc://session/%GG").is_err());
+        assert!(parse_atc_session_uri("atc://session/id/extra").is_err());
+        assert!(parse_atc_session_uri("atc://session/id@example").is_err());
+        assert!(parse_atc_session_uri("atc://session/%FF").is_err());
     }
 }

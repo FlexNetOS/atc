@@ -141,8 +141,8 @@ async fn open_session_result(target: &str, record: DispatchRecord) -> Result<Ope
 }
 
 async fn attach_result(result: &OpenSessionResult) -> Result<()> {
-    if !std::io::stdout().is_terminal() {
-        bail!("refusing to attach from a non-interactive stdout; use --json for a preview");
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!("refusing to attach from a non-interactive terminal; use --json for a preview");
     }
 
     if !result.open_shell.enabled {
