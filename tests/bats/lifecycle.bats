@@ -112,34 +112,48 @@ load helpers/common
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
 }
 
-@test "status/info --json escape bidi controls in encoded bytes while preserving decoded values" {
+@test "status/info --json escape Unicode format controls in encoded bytes while preserving decoded values" {
     require_jq
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     local bidi=$'\u202e'
+    local line_sep=$'\u2028'
+    local paragraph_sep=$'\u2029'
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET task_slug = 'tasks/json-' || char(8238) || 'gpj.exe',
-    branch = 'branch-' || char(8238) || 'gpj.exe',
-    session = 'session-' || char(8238) || 'gpj.exe'
+SET task_slug = 'tasks/json-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe',
+    branch = 'branch-' || char(8238) || 'gpj' || char(8232) || 'line',
+    session = 'session-' || char(8238) || 'gpj' || char(8233) || 'para'
 WHERE id = 'disp-001';
 SQL
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
     [ "$SPLIT_STATUS" -eq 0 ]
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\u202e"* ]]
+    [[ "$STDOUT" == *"\\u2028"* ]]
+    [[ "$STDOUT" == *"\\u2029"* ]]
     local decoded_status_task
     decoded_status_task="$(echo "$STDOUT" | jq -r '.records[0].task_slug')"
     [[ "$decoded_status_task" == *"$bidi"* ]]
+    [[ "$decoded_status_task" == *"$line_sep"* ]]
+    [[ "$decoded_status_task" == *"$paragraph_sep"* ]]
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
     [ "$SPLIT_STATUS" -eq 0 ]
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\u202e"* ]]
+    [[ "$STDOUT" == *"\\u2028"* ]]
+    [[ "$STDOUT" == *"\\u2029"* ]]
     local decoded_info_task
     decoded_info_task="$(echo "$STDOUT" | jq -r '.record.task_slug')"
     [[ "$decoded_info_task" == *"$bidi"* ]]
+    [[ "$decoded_info_task" == *"$line_sep"* ]]
+    [[ "$decoded_info_task" == *"$paragraph_sep"* ]]
 }
 
 @test "info: shows correct fields for a dispatch" {
@@ -166,12 +180,14 @@ SQL
     local esc=$'\033'
     local bel=$'\a'
     local bidi=$'\u202e'
+    local line_sep=$'\u2028'
+    local paragraph_sep=$'\u2029'
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET task_slug = 'tasks/evil-' || char(27) || '[2J' || char(7) || char(8238) || 'gpj.exe',
-    branch = 'branch-' || char(27) || '[31m',
+SET task_slug = 'tasks/evil-' || char(27) || '[2J' || char(7) || char(8238) || char(8232) || 'gpj' || char(8233) || '.exe',
+    branch = 'branch-' || char(27) || '[31m' || char(8232),
     worktree_path = '${TEST_TMPDIR//\'/\'\'}/worktree-' || char(7),
-    session = 'session-' || char(8238),
+    session = 'session-' || char(8238) || char(8233),
     agent_provider = 'claude-' || char(27) || '[0m'
 WHERE id = 'disp-001';
 SQL
@@ -181,18 +197,26 @@ SQL
     [[ "$STDOUT" != *"$esc"* ]]
     [[ "$STDOUT" != *"$bel"* ]]
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\x1b"* ]]
     [[ "$STDOUT" == *"\\x07"* ]]
     [[ "$STDOUT" == *"\\u{202e}"* ]]
+    [[ "$STDOUT" == *"\\u{2028}"* ]]
+    [[ "$STDOUT" == *"\\u{2029}"* ]]
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001
     [ "$SPLIT_STATUS" -eq 0 ]
     [[ "$STDOUT" != *"$esc"* ]]
     [[ "$STDOUT" != *"$bel"* ]]
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\x1b"* ]]
     [[ "$STDOUT" == *"\\x07"* ]]
     [[ "$STDOUT" == *"\\u{202e}"* ]]
+    [[ "$STDOUT" == *"\\u{2028}"* ]]
+    [[ "$STDOUT" == *"\\u{2029}"* ]]
 }
 
 @test "info: resolves by task slug (latest dispatch)" {
@@ -347,11 +371,13 @@ EOF
     [[ "$STDOUT" == *"\\u{202e}"* ]]
 }
 
-@test "watch --format json escapes bidi controls in encoded bytes while preserving decoded values" {
+@test "watch --format json escapes Unicode format controls in encoded bytes while preserving decoded values" {
     require_jq
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/watch-test" "running"
     local bidi=$'\u202e'
+    local line_sep=$'\u2028'
+    local paragraph_sep=$'\u2029'
     cat >> "$TEST_TMPDIR/atc.toml" <<EOF
 
 [watch]
@@ -359,24 +385,32 @@ poll_interval_secs = 1
 EOF
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET task_slug = 'tasks/watch-' || char(8238) || 'gpj.exe'
+SET task_slug = 'tasks/watch-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe'
 WHERE id = 'disp-001';
 SQL
     cat > "$TEST_TMPDIR/disp-001.jsonl" <<'EOF'
-{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u202egpj.exe"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello \u202egpj\u2028line\u2029para.exe"}]}}
 {"type":"result","subtype":"success","total_cost_usd":2.50,"num_turns":15,"duration_ms":45000}
 EOF
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" watch --id disp-001 --format json
     [ "$SPLIT_STATUS" -eq 0 ]
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\u202e"* ]]
+    [[ "$STDOUT" == *"\\u2028"* ]]
+    [[ "$STDOUT" == *"\\u2029"* ]]
 
     local decoded_task decoded_text
     decoded_task="$(printf '%s\n' "$STDOUT" | jq -r 'select(.event == "started") | .task' | head -n1)"
     decoded_text="$(printf '%s\n' "$STDOUT" | jq -r 'select(.event == "log_line") | .text' | head -n1)"
     [[ "$decoded_task" == *"$bidi"* ]]
+    [[ "$decoded_task" == *"$line_sep"* ]]
+    [[ "$decoded_task" == *"$paragraph_sep"* ]]
     [[ "$decoded_text" == *"$bidi"* ]]
+    [[ "$decoded_text" == *"$line_sep"* ]]
+    [[ "$decoded_text" == *"$paragraph_sep"* ]]
 }
 
 @test "watch --socket refuses to replace existing regular files" {
@@ -402,6 +436,86 @@ EOF
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"private directory"* ]]
     assert_file_not_exists "$public_dir/watch.sock"
+}
+
+@test "watch --socket reclaims stale socket files" {
+    require_python_unix_socket
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "done"
+    local socket_path="$TEST_TMPDIR/stale.sock"
+    cat >> "$TEST_TMPDIR/atc.toml" <<EOF
+
+[watch]
+poll_interval_secs = 1
+EOF
+    python3 - "$socket_path" <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(sys.argv[1])
+sock.listen(1)
+sock.close()
+PY
+    [ -S "$socket_path" ]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$socket_path" --id disp-001 --format json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    [[ "$STDOUT" == *'"event":"started"'* ]]
+    assert_file_not_exists "$socket_path"
+}
+
+@test "watch --socket refuses active socket files" {
+    require_python_unix_socket
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local socket_path="$TEST_TMPDIR/active.sock"
+    local ready_file="$TEST_TMPDIR/active.ready"
+    python3 - "$socket_path" "$ready_file" <<'PY' &
+import os
+import pathlib
+import socket
+import sys
+import time
+
+path = sys.argv[1]
+ready = sys.argv[2]
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(path)
+sock.listen(1)
+pathlib.Path(ready).write_text("ready")
+try:
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        time.sleep(0.1)
+finally:
+    sock.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+PY
+    local listener_pid=$!
+    for _ in {1..50}; do
+        if [[ -f "$ready_file" && -S "$socket_path" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ ! -S "$socket_path" ]]; then
+        kill "$listener_pid" 2>/dev/null || true
+        wait "$listener_pid" 2>/dev/null || true
+        false
+    fi
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" watch --socket "$socket_path" --id disp-001
+    local watch_status="$SPLIT_STATUS"
+    local watch_stderr="$STDERR"
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
+
+    [ "$watch_status" -ne 0 ]
+    [[ "$watch_stderr" == *"refusing to replace active --socket path"* ]]
 }
 
 # ===========================================================================

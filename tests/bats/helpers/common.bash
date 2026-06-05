@@ -27,6 +27,19 @@ require_jq() {
     fi
 }
 
+require_python_unix_socket() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        skip "python3 not installed"
+    fi
+    if ! python3 - <<'PY' >/dev/null 2>&1
+import socket
+raise SystemExit(0 if hasattr(socket, "AF_UNIX") else 1)
+PY
+    then
+        skip "Python AF_UNIX socket support not available"
+    fi
+}
+
 # Run a command with stdout/stderr split into globals so JSON tests can parse
 # stdout without tracing or warning lines.
 run_split() {

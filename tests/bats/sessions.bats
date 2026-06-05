@@ -245,15 +245,17 @@ SQL
     assert_file_not_exists "$sentinel"
 }
 
-@test "sessions --json escapes bidi controls in encoded bytes while preserving decoded values" {
+@test "sessions --json escapes Unicode format controls in encoded bytes while preserving decoded values" {
     require_jq
     setup_sessions_data
     local bidi=$'\u202e'
+    local line_sep=$'\u2028'
+    local paragraph_sep=$'\u2029'
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET branch = 'branch-' || char(8238) || 'gpj.exe',
-    session = 'tmux-' || char(8238) || 'gpj.exe',
-    agent_provider = 'claude-' || char(8238) || 'gpj.exe'
+SET branch = 'branch-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe',
+    session = 'tmux-' || char(8238) || 'gpj' || char(8232) || 'line',
+    agent_provider = 'claude-' || char(8238) || 'gpj' || char(8233) || 'para.exe'
 WHERE id = 'disp-001';
 SQL
 
@@ -261,10 +263,16 @@ SQL
     [ "$SPLIT_STATUS" -eq 0 ]
 
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\u202e"* ]]
+    [[ "$STDOUT" == *"\\u2028"* ]]
+    [[ "$STDOUT" == *"\\u2029"* ]]
     local decoded_branch
     decoded_branch="$(echo "$STDOUT" | jq -r '.rows[0].branch')"
     [[ "$decoded_branch" == *"$bidi"* ]]
+    [[ "$decoded_branch" == *"$line_sep"* ]]
+    [[ "$decoded_branch" == *"$paragraph_sep"* ]]
 }
 
 @test "sessions --once escapes terminal control sequences in human output" {
@@ -292,15 +300,17 @@ SQL
     [[ "$STDOUT" == *"\\x07"* ]]
 }
 
-@test "sessions --once escapes bidi formatting controls in human output" {
+@test "sessions --once escapes Unicode format controls in human output" {
     setup_sessions_data
     local bidi=$'\u202e'
+    local line_sep=$'\u2028'
+    local paragraph_sep=$'\u2029'
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET task_slug = 'tasks/bidi-' || char(8238) || 'gpj.exe',
-    branch = 'branch-' || char(8238) || 'gpj.exe',
-    session = 'tmux-' || char(8238) || 'gpj.exe',
-    agent_provider = 'claude-' || char(8238) || 'gpj.exe'
+SET task_slug = 'tasks/bidi-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe',
+    branch = 'branch-' || char(8238) || 'gpj' || char(8232) || 'line',
+    session = 'tmux-' || char(8238) || 'gpj' || char(8233) || 'para.exe',
+    agent_provider = 'claude-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe'
 WHERE id = 'disp-001';
 SQL
 
@@ -308,5 +318,9 @@ SQL
     [ "$SPLIT_STATUS" -eq 0 ]
 
     [[ "$STDOUT" != *"$bidi"* ]]
+    [[ "$STDOUT" != *"$line_sep"* ]]
+    [[ "$STDOUT" != *"$paragraph_sep"* ]]
     [[ "$STDOUT" == *"\\u{202e}"* ]]
+    [[ "$STDOUT" == *"\\u{2028}"* ]]
+    [[ "$STDOUT" == *"\\u{2029}"* ]]
 }

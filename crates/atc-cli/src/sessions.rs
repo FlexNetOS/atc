@@ -1303,21 +1303,63 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<String>>,
 {
-    leave_tui(terminal).context("failed to restore terminal before running action")?;
+    let mut runtime = CrosstermTerminalActionRuntime { terminal };
+    run_terminal_action_with_runtime(&mut runtime, action).await
+}
+
+trait TerminalActionRuntime {
+    fn leave_tui(&mut self) -> Result<()>;
+    fn prompt_for_return(&mut self, message: &str);
+    fn enter_tui(&mut self) -> Result<()>;
+}
+
+struct CrosstermTerminalActionRuntime<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalActionRuntime for CrosstermTerminalActionRuntime<'_> {
+    fn leave_tui(&mut self) -> Result<()> {
+        leave_tui(self.terminal)
+    }
+
+    fn prompt_for_return(&mut self, message: &str) {
+        prompt_for_terminal_action_return(message);
+    }
+
+    fn enter_tui(&mut self) -> Result<()> {
+        enter_tui(self.terminal)
+    }
+}
+
+async fn run_terminal_action_with_runtime<R, F, Fut>(runtime: &mut R, action: F) -> Result<String>
+where
+    R: TerminalActionRuntime + ?Sized,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String>>,
+{
+    runtime
+        .leave_tui()
+        .context("failed to restore terminal before running action")?;
     let result = action().await;
     let message = match result {
         Ok(message) => message,
         Err(e) => format!("action failed: {e}"),
     };
-    let display_message = display_text(&message);
+    runtime.prompt_for_return(&message);
+    runtime
+        .enter_tui()
+        .context("failed to restore TUI after running action")?;
+    Ok(message)
+}
+
+fn prompt_for_terminal_action_return(message: &str) {
+    let display_message = display_text(message);
     eprintln!();
     eprintln!("{display_message}");
     eprint!("Press Enter to return to atc sessions...");
     let _ = io::stderr().flush();
     let mut line = String::new();
     let _ = io::stdin().read_line(&mut line);
-    enter_tui(terminal).context("failed to restore TUI after running action")?;
-    Ok(message)
 }
 
 fn prompt_line(label: &str) -> Result<Option<String>> {
@@ -1727,7 +1769,7 @@ mod tests {
     };
     use chrono::TimeZone;
     use ratatui::backend::TestBackend;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
 
     use crate::test_support::MockRegistry;
@@ -2125,6 +2167,80 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least 250ms"));
+    }
+
+    #[derive(Default)]
+    struct FakeTerminalActionRuntime {
+        fail_leave: bool,
+        fail_enter: bool,
+        calls: Vec<&'static str>,
+        prompts: Vec<String>,
+    }
+
+    impl TerminalActionRuntime for FakeTerminalActionRuntime {
+        fn leave_tui(&mut self) -> Result<()> {
+            self.calls.push("leave");
+            if self.fail_leave {
+                anyhow::bail!("leave failed");
+            }
+            Ok(())
+        }
+
+        fn prompt_for_return(&mut self, message: &str) {
+            self.calls.push("prompt");
+            self.prompts.push(message.to_string());
+        }
+
+        fn enter_tui(&mut self) -> Result<()> {
+            self.calls.push("enter");
+            if self.fail_enter {
+                anyhow::bail!("enter failed");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_action_propagates_leave_failure_without_running_action() {
+        let ran = Cell::new(false);
+        let mut runtime = FakeTerminalActionRuntime {
+            fail_leave: true,
+            ..Default::default()
+        };
+
+        let err = run_terminal_action_with_runtime(&mut runtime, || async {
+            ran.set(true);
+            Ok("completed".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("failed to restore terminal before running action"));
+        assert!(!ran.get());
+        assert_eq!(runtime.calls, vec!["leave"]);
+        assert!(runtime.prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_action_propagates_enter_failure_after_prompting() {
+        let mut runtime = FakeTerminalActionRuntime {
+            fail_enter: true,
+            ..Default::default()
+        };
+
+        let err = run_terminal_action_with_runtime(&mut runtime, || async {
+            Ok("completed".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("failed to restore TUI after running action"));
+        assert_eq!(runtime.calls, vec!["leave", "prompt", "enter"]);
+        assert_eq!(runtime.prompts, vec!["completed"]);
     }
 
     #[test]
