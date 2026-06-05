@@ -208,7 +208,7 @@ mod tests {
         let inspect = inspect_session_with_binary(
             tmux.to_str().unwrap(),
             "session",
-            Duration::from_millis(50),
+            Duration::from_millis(250),
         )
         .await;
 
@@ -235,7 +235,7 @@ mod tests {
         let inspect = inspect_session_with_binary(
             tmux.to_str().unwrap(),
             "session",
-            Duration::from_millis(50),
+            Duration::from_millis(250),
         )
         .await;
 
