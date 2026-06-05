@@ -338,6 +338,7 @@ EOF
     run atc --config "$TEST_TMPDIR/atc.toml" logs tasks/nonexistent
     assert_failure
     assert_output --partial "No log file"
+    assert_output --partial "atc info tasks/nonexistent"
     refute_output --partial "panicked"
 }
 

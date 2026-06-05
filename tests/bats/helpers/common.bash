@@ -27,6 +27,19 @@ require_jq() {
     fi
 }
 
+require_python_unix_socket() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        skip "python3 not installed"
+    fi
+    if ! python3 - <<'PY' >/dev/null 2>&1
+import socket
+raise SystemExit(0 if hasattr(socket, "AF_UNIX") else 1)
+PY
+    then
+        skip "Python AF_UNIX socket support not available"
+    fi
+}
+
 # Run a command with stdout/stderr split into globals so JSON tests can parse
 # stdout without tracing or warning lines.
 run_split() {
@@ -159,6 +172,8 @@ CREATE TABLE IF NOT EXISTS work_units (
 CREATE INDEX IF NOT EXISTS idx_work_units_task ON work_units(task_slug);
 CREATE INDEX IF NOT EXISTS idx_work_units_branch ON work_units(branch);
 CREATE INDEX IF NOT EXISTS idx_work_units_status ON work_units(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_task ON work_units(task_slug) WHERE status = 'active' AND task_slug IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_active_branch ON work_units(branch) WHERE status = 'active' AND branch IS NOT NULL;
 SCHEMA
 }
 

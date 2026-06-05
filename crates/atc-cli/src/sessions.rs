@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{self, Stdout, Write};
@@ -396,12 +397,7 @@ fn build_snapshot_at(
         .filter(|record| record_matches_filter(record, &work_units_by_id, filter, now))
         .map(|record| row_from_record(record, &work_units_by_id, group))
         .collect();
-    rows.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| b.dispatched_at.cmp(&a.dispatched_at))
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    sort_session_rows(&mut rows, group);
 
     let visible_ids: HashSet<String> = rows
         .iter()
@@ -456,6 +452,25 @@ fn row_from_record(
         updated_at: record.updated_at,
         actions,
     }
+}
+
+fn sort_session_rows(rows: &mut [SessionRow], group: SessionGroupBy) {
+    if group == SessionGroupBy::None {
+        rows.sort_by(session_recency_cmp);
+    } else {
+        rows.sort_by(|a, b| {
+            a.group_key
+                .cmp(&b.group_key)
+                .then_with(|| session_recency_cmp(a, b))
+        });
+    }
+}
+
+fn session_recency_cmp(a: &SessionRow, b: &SessionRow) -> Ordering {
+    b.updated_at
+        .cmp(&a.updated_at)
+        .then_with(|| b.dispatched_at.cmp(&a.dispatched_at))
+        .then_with(|| a.id.cmp(&b.id))
 }
 
 fn group_key(
@@ -985,7 +1000,7 @@ async fn handle_key(
                                     .await?;
                                 Ok(format!("stopped {}", row.id))
                             })
-                            .await
+                            .await?
                         }
                         PendingAction::Cleanup => {
                             let registry = ctx.registry.clone();
@@ -999,7 +1014,7 @@ async fn handle_key(
                                 .await?;
                                 Ok(format!("cleaned {}", row.id))
                             })
-                            .await
+                            .await?
                         }
                     };
                     app.message = Some(message);
@@ -1087,7 +1102,7 @@ async fn handle_key(
                             crate::logs::run_logs(registry, ctx.config, &row.id, false).await?;
                             Ok(format!("viewed logs for {}", row.id))
                         })
-                        .await,
+                        .await?,
                     );
                 } else {
                     app.message = row.actions.logs.reason.clone();
@@ -1103,7 +1118,7 @@ async fn handle_key(
                             crate::logs::run_logs(registry, ctx.config, &row.id, true).await?;
                             Ok(format!("followed logs for {}", row.id))
                         })
-                        .await,
+                        .await?,
                     );
                 } else {
                     app.message = row.actions.follow_logs.reason.clone();
@@ -1126,7 +1141,7 @@ async fn handle_key(
                             }
                             Ok(format!("attached to {session}"))
                         })
-                        .await,
+                        .await?,
                     );
                 } else {
                     app.message = row.actions.attach.reason.clone();
@@ -1146,7 +1161,7 @@ async fn handle_key(
                                 .await?;
                             Ok(format!("redirected message to {}", row.id))
                         })
-                        .await,
+                        .await?,
                     );
                 } else {
                     app.message = row.actions.redirect.reason.clone();
@@ -1173,7 +1188,7 @@ async fn handle_key(
                             .await?;
                             Ok(format!("resumed {} as {}", row.id, outcome.id))
                         })
-                        .await,
+                        .await?,
                     );
                     if let Ok(snapshot) =
                         load_snapshot(ctx.registry.as_ref(), &ctx.filter, ctx.group).await
@@ -1283,30 +1298,68 @@ async fn run_resume(
 async fn run_terminal_action<F, Fut>(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     action: F,
-) -> String
+) -> Result<String>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<String>>,
 {
-    if let Err(e) = leave_tui(terminal) {
-        return format!("failed to restore terminal: {e}");
+    let mut runtime = CrosstermTerminalActionRuntime { terminal };
+    run_terminal_action_with_runtime(&mut runtime, action).await
+}
+
+trait TerminalActionRuntime {
+    fn leave_tui(&mut self) -> Result<()>;
+    fn prompt_for_return(&mut self, message: &str);
+    fn enter_tui(&mut self) -> Result<()>;
+}
+
+struct CrosstermTerminalActionRuntime<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalActionRuntime for CrosstermTerminalActionRuntime<'_> {
+    fn leave_tui(&mut self) -> Result<()> {
+        leave_tui(self.terminal)
     }
+
+    fn prompt_for_return(&mut self, message: &str) {
+        prompt_for_terminal_action_return(message);
+    }
+
+    fn enter_tui(&mut self) -> Result<()> {
+        enter_tui(self.terminal)
+    }
+}
+
+async fn run_terminal_action_with_runtime<R, F, Fut>(runtime: &mut R, action: F) -> Result<String>
+where
+    R: TerminalActionRuntime + ?Sized,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String>>,
+{
+    runtime
+        .leave_tui()
+        .context("failed to restore terminal before running action")?;
     let result = action().await;
     let message = match result {
         Ok(message) => message,
         Err(e) => format!("action failed: {e}"),
     };
-    let display_message = display_text(&message);
+    runtime.prompt_for_return(&message);
+    runtime
+        .enter_tui()
+        .context("failed to restore TUI after running action")?;
+    Ok(message)
+}
+
+fn prompt_for_terminal_action_return(message: &str) {
+    let display_message = display_text(message);
     eprintln!();
     eprintln!("{display_message}");
     eprint!("Press Enter to return to atc sessions...");
     let _ = io::stderr().flush();
     let mut line = String::new();
     let _ = io::stdin().read_line(&mut line);
-    if let Err(e) = enter_tui(terminal) {
-        return format!("{message}; failed to restore TUI: {e}");
-    }
-    message
 }
 
 fn prompt_line(label: &str) -> Result<Option<String>> {
@@ -1527,14 +1580,20 @@ fn render_rows(frame: &mut Frame<'_>, app: &SessionsApp, area: Rect) {
         return;
     }
 
-    let header = Row::new(vec![
+    let grouped = app.snapshot.group != SessionGroupBy::None;
+    let mut header_cells = Vec::new();
+    if grouped {
+        header_cells.push(Cell::from("group"));
+    }
+    header_cells.extend([
         Cell::from("task/work-unit"),
         Cell::from("provider"),
         Cell::from("status"),
         Cell::from("cost"),
         Cell::from("session"),
-    ])
-    .style(
+    ]);
+
+    let header = Row::new(header_cells).style(
         Style::default()
             .fg(Color::Gray)
             .add_modifier(Modifier::BOLD),
@@ -1546,33 +1605,51 @@ fn render_rows(frame: &mut Frame<'_>, app: &SessionsApp, area: Rect) {
             display_text(row.display_task()),
             display_text(row.display_work_unit())
         );
-        Row::new(vec![
+        let mut cells = Vec::new();
+        if grouped {
+            cells.push(Cell::from(truncate_middle(
+                &display_text(&row.group_key),
+                22,
+            )));
+        }
+        cells.extend([
             Cell::from(task),
             Cell::from(display_text(&row.provider)),
             Cell::from(row.status.as_str().to_string()),
             Cell::from(format_cost(row.cost_usd)),
             Cell::from(truncate_middle(&display_text(&row.session), 42)),
-        ])
+        ]);
+        Row::new(cells)
     });
 
-    let table = Table::new(
-        rows,
-        [
+    let widths = if grouped {
+        vec![
+            Constraint::Length(24),
+            Constraint::Percentage(30),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Min(20),
+        ]
+    } else {
+        vec![
             Constraint::Percentage(38),
             Constraint::Length(12),
             Constraint::Length(14),
             Constraint::Length(10),
             Constraint::Min(20),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" sessions "))
-    .row_highlight_style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
+        ]
+    };
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(" sessions "))
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let mut state = TableState::default();
     if !app.snapshot.rows.is_empty() {
@@ -1692,7 +1769,7 @@ mod tests {
     };
     use chrono::TimeZone;
     use ratatui::backend::TestBackend;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
 
     use crate::test_support::MockRegistry;
@@ -1908,6 +1985,46 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_grouping_sorts_by_group_then_recency() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let mut zeta_new = record("zeta-new", Status::Running);
+        zeta_new.agent_provider = "zeta".to_string();
+        zeta_new.updated_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 30, 0).unwrap();
+        zeta_new.dispatched_at = zeta_new.updated_at;
+
+        let mut alpha_old = record("alpha-old", Status::Running);
+        alpha_old.agent_provider = "alpha".to_string();
+        alpha_old.updated_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap();
+        alpha_old.dispatched_at = alpha_old.updated_at;
+
+        let mut alpha_new = record("alpha-new", Status::Running);
+        alpha_new.agent_provider = "alpha".to_string();
+        alpha_new.updated_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 15, 0).unwrap();
+        alpha_new.dispatched_at = alpha_new.updated_at;
+
+        let grouped = build_snapshot(
+            vec![zeta_new.clone(), alpha_old.clone(), alpha_new.clone()],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Provider,
+        );
+        let ids: Vec<&str> = grouped.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha-new", "alpha-old", "zeta-new"]);
+
+        let ungrouped = build_snapshot(
+            vec![zeta_new, alpha_old, alpha_new],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::None,
+        );
+        let ids: Vec<&str> = ungrouped.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, vec!["zeta-new", "alpha-new", "alpha-old"]);
+    }
+
+    #[test]
     fn action_state_gates_resume_and_redirect() {
         let mut running = record("running", Status::Running);
         let running_actions = action_state(&running);
@@ -2050,6 +2167,80 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least 250ms"));
+    }
+
+    #[derive(Default)]
+    struct FakeTerminalActionRuntime {
+        fail_leave: bool,
+        fail_enter: bool,
+        calls: Vec<&'static str>,
+        prompts: Vec<String>,
+    }
+
+    impl TerminalActionRuntime for FakeTerminalActionRuntime {
+        fn leave_tui(&mut self) -> Result<()> {
+            self.calls.push("leave");
+            if self.fail_leave {
+                anyhow::bail!("leave failed");
+            }
+            Ok(())
+        }
+
+        fn prompt_for_return(&mut self, message: &str) {
+            self.calls.push("prompt");
+            self.prompts.push(message.to_string());
+        }
+
+        fn enter_tui(&mut self) -> Result<()> {
+            self.calls.push("enter");
+            if self.fail_enter {
+                anyhow::bail!("enter failed");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_action_propagates_leave_failure_without_running_action() {
+        let ran = Cell::new(false);
+        let mut runtime = FakeTerminalActionRuntime {
+            fail_leave: true,
+            ..Default::default()
+        };
+
+        let err = run_terminal_action_with_runtime(&mut runtime, || async {
+            ran.set(true);
+            Ok("completed".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("failed to restore terminal before running action"));
+        assert!(!ran.get());
+        assert_eq!(runtime.calls, vec!["leave"]);
+        assert!(runtime.prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_action_propagates_enter_failure_after_prompting() {
+        let mut runtime = FakeTerminalActionRuntime {
+            fail_enter: true,
+            ..Default::default()
+        };
+
+        let err = run_terminal_action_with_runtime(&mut runtime, || async {
+            Ok("completed".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("failed to restore TUI after running action"));
+        assert_eq!(runtime.calls, vec!["leave", "prompt", "enter"]);
+        assert_eq!(runtime.prompts, vec!["completed"]);
     }
 
     #[test]
@@ -2208,6 +2399,29 @@ mod tests {
         assert!(rendered.contains("ATC Sessions"));
         assert!(rendered.contains("tasks/harmony-794"));
         assert!(rendered.contains("session-running"));
+    }
+
+    #[test]
+    fn renderer_draws_group_column_when_grouped() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let mut grouped = record("running", Status::Running);
+        grouped.branch = "visible-group-branch".to_string();
+        let snapshot = build_snapshot(
+            vec![grouped],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Branch,
+        );
+        let app = SessionsApp::new(snapshot);
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render_app(frame, &app)).unwrap();
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("group"));
+        assert!(rendered.contains("visible-group-branch"));
     }
 
     #[test]

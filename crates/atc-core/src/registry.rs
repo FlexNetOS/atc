@@ -2502,6 +2502,16 @@ mod tests {
         let ids: Vec<&str> = records.iter().map(|record| record.id.as_str()).collect();
 
         assert_eq!(ids, vec!["done-recent", "running-old"]);
+
+        let recent_only = registry
+            .list(StatusFilter::any_or_updated_since(vec![], cutoff))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = recent_only
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["done-recent"]);
     }
 
     // --- New query method tests ---

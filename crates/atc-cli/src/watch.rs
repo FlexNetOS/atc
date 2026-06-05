@@ -16,7 +16,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -250,15 +250,9 @@ fn start_socket_broadcaster(
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let mut rx = tx.subscribe();
+                    let rx = tx.subscribe();
                     tokio::spawn(async move {
-                        let mut stream = stream;
-                        while let Ok(line) = rx.recv().await {
-                            let data = format!("{line}\n");
-                            if stream.write_all(data.as_bytes()).await.is_err() {
-                                break;
-                            }
-                        }
+                        forward_socket_events(stream, rx).await;
                     });
                 }
                 Err(e) => {
@@ -275,6 +269,30 @@ fn start_socket_broadcaster(
     })
 }
 
+#[cfg(unix)]
+async fn forward_socket_events<W>(mut stream: W, mut rx: broadcast::Receiver<String>)
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                let data = format!("{line}\n");
+                if stream.write_all(data.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(
+                    skipped,
+                    "watch socket client lagged behind broadcast buffer; continuing with newest events"
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 #[cfg(not(unix))]
 fn start_socket_broadcaster(
     socket_path: &Path,
@@ -288,9 +306,25 @@ fn start_socket_broadcaster(
 
 #[cfg(unix)]
 fn prepare_socket_path(socket_path: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+
     let socket_path = private_socket_path(socket_path)?;
 
     match std::fs::symlink_metadata(&socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+                anyhow::bail!(
+                    "refusing to replace active --socket path: {}",
+                    display_text(&socket_path.display().to_string())
+                );
+            }
+            std::fs::remove_file(&socket_path).with_context(|| {
+                format!(
+                    "failed to remove stale --socket path: {}",
+                    display_text(&socket_path.display().to_string())
+                )
+            })?;
+        }
         Ok(_) => {
             anyhow::bail!(
                 "refusing to replace existing --socket path: {}",
@@ -777,7 +811,7 @@ mod tests {
     #[cfg(unix)]
     use crate::test_support::MockRegistry;
     #[cfg(unix)]
-    use tokio::io::AsyncBufReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
     fn joined(stdout: &[String], stderr: &[String]) -> String {
         stdout
@@ -914,18 +948,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prepare_socket_path_refuses_stale_socket_file() {
+    fn prepare_socket_path_reclaims_stale_socket_file() {
         let tempdir = private_socket_dir();
         let socket_path = tempdir.path().join("stale.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         drop(listener);
         assert!(socket_path.exists());
 
+        let prepared = prepare_socket_path(&socket_path).unwrap();
+
+        assert_eq!(
+            prepared,
+            tempdir.path().canonicalize().unwrap().join("stale.sock")
+        );
+        assert!(!prepared.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_path_refuses_active_socket_file() {
+        let tempdir = private_socket_dir();
+        let socket_path = tempdir.path().join("active.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
         let err = prepare_socket_path(&socket_path).unwrap_err();
 
         assert!(err
             .to_string()
-            .contains("refusing to replace existing --socket path"));
+            .contains("refusing to replace active --socket path"));
         assert!(socket_path.exists());
     }
 
@@ -1009,6 +1059,22 @@ mod tests {
             socket_path.exists(),
             "cleanup removed a socket with a different identity"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forward_socket_events_continues_after_lagged_broadcast() {
+        let (tx, rx) = broadcast::channel(1);
+        tx.send("dropped".to_string()).unwrap();
+        tx.send("latest".to_string()).unwrap();
+        drop(tx);
+
+        let (server, mut client) = tokio::io::duplex(128);
+        forward_socket_events(server, rx).await;
+
+        let mut output = String::new();
+        client.read_to_string(&mut output).await.unwrap();
+        assert_eq!(output, "latest\n");
     }
 
     #[cfg(unix)]

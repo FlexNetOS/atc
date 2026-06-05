@@ -18,10 +18,11 @@ pub async fn run_cleanup(
     done: bool,
 ) -> Result<()> {
     if let Some(arg) = id {
-        let removed = cleanup_single(config, registry, arg).await?;
+        let result = cleanup_single(config, registry, arg).await?;
         println!(
             "Cleaned {} (worktree removed: {removed})",
-            display_text(arg)
+            display_text(&result.id),
+            removed = result.worktree_removed
         );
         Ok(())
     } else if done {
@@ -31,9 +32,18 @@ pub async fn run_cleanup(
     }
 }
 
+struct CleanupResult {
+    id: String,
+    worktree_removed: bool,
+}
+
 /// Clean up a single dispatch by ID or task slug.
-/// Returns whether the worktree was removed.
-async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) -> Result<bool> {
+/// Returns the resolved dispatch id and whether the worktree was removed.
+async fn cleanup_single(
+    config: &AtcConfig,
+    registry: &dyn Registry,
+    arg: &str,
+) -> Result<CleanupResult> {
     let record = resolve_record(registry, arg).await?;
     let id = &record.id;
 
@@ -85,7 +95,10 @@ async fn cleanup_single(config: &AtcConfig, registry: &dyn Registry, arg: &str) 
         ),
     }
 
-    Ok(removed)
+    Ok(CleanupResult {
+        id: record.id,
+        worktree_removed: removed,
+    })
 }
 
 /// Batch-clean all Done dispatches.
