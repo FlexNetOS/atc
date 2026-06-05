@@ -189,14 +189,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Check if a tmux session exists.
 async fn tmux_session_alive(session: &str) -> bool {
-    tokio::process::Command::new("tmux")
-        .args(["has-session", "-t", session])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::tmux::session_alive(session).await
 }
 
 /// Output format for the watcher.

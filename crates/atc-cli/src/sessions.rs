@@ -4,7 +4,10 @@ use anyhow::{bail, Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{DispatchRecord, RunOpts, Status, WorkUnit};
+use atc_core::types::{
+    atc_session_uri, DispatchRecord, OpenSessionPreview, RunOpts, Status, TerminalLocator,
+    TerminalStatus, TerminalStatusState, WorkUnit,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::ValueEnum;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -23,7 +26,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{self, Stdout, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -158,6 +161,7 @@ pub struct SessionActionState {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SessionRow {
     pub id: String,
+    pub uri: String,
     pub task_slug: Option<String>,
     pub work_unit_id: Option<String>,
     pub group_key: String,
@@ -176,6 +180,9 @@ pub struct SessionRow {
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
     pub duration_ms: Option<u64>,
+    pub terminal_locator: Option<TerminalLocator>,
+    pub terminal_status: TerminalStatus,
+    pub open_shell: OpenSessionPreview,
     pub dispatched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub actions: SessionActionState,
@@ -334,7 +341,9 @@ pub async fn load_snapshot(
     let records = registry.list(snapshot_status_filter(filter, now)).await?;
     let work_unit_ids = work_unit_ids_for_records(&records);
     let work_units = registry.list_work_units_by_ids(&work_unit_ids).await?;
-    Ok(build_snapshot_at(records, work_units, filter, group, now))
+    let mut snapshot = build_snapshot_at(records, work_units, filter, group, now);
+    refresh_terminal_fields(&mut snapshot.rows).await;
+    Ok(snapshot)
 }
 
 fn work_unit_ids_for_records(records: &[DispatchRecord]) -> Vec<String> {
@@ -425,8 +434,14 @@ fn row_from_record(
     let group_key = group_key(&record, work_units_by_id, group);
     let task_slug = task_slug_for_record(&record, work_units_by_id).map(str::to_string);
     let log_file = path_to_nonempty_string(&record.log_file);
+    let terminal_locator = record.terminal_locator.clone();
+    let effective_locator = crate::open_session::effective_terminal_locator(&record);
+    let terminal_status = initial_terminal_status(effective_locator.as_ref());
+    let open_shell =
+        crate::open_session::open_shell_preview(effective_locator.as_ref(), &terminal_status);
     let actions = action_state(&record);
     SessionRow {
+        uri: atc_session_uri(&record.id),
         id: record.id,
         task_slug,
         work_unit_id: record.work_unit_id,
@@ -448,9 +463,57 @@ fn row_from_record(
         cost_usd: record.cost_usd,
         num_turns: record.num_turns,
         duration_ms: record.duration_ms,
+        terminal_locator,
+        terminal_status,
+        open_shell,
         dispatched_at: record.dispatched_at,
         updated_at: record.updated_at,
         actions,
+    }
+}
+
+async fn refresh_terminal_fields(rows: &mut [SessionRow]) {
+    for row in rows {
+        let effective_locator = effective_locator_for_row(row);
+        row.terminal_status =
+            crate::open_session::terminal_status_for_locator(effective_locator.as_ref()).await;
+        row.open_shell = crate::open_session::open_shell_preview(
+            effective_locator.as_ref(),
+            &row.terminal_status,
+        );
+        row.actions.attach = availability_from_open_shell(&row.open_shell);
+    }
+}
+
+fn initial_terminal_status(locator: Option<&TerminalLocator>) -> TerminalStatus {
+    match locator {
+        Some(locator) => TerminalStatus::new(TerminalStatusState::Unknown, Some(locator.backend())),
+        None => TerminalStatus::unavailable("no terminal locator"),
+    }
+}
+
+fn effective_locator_for_row(row: &SessionRow) -> Option<TerminalLocator> {
+    row.terminal_locator.clone().or_else(|| {
+        (row.actions.attach.enabled && !row.session.trim().is_empty()).then(|| {
+            TerminalLocator::inferred_tmux(
+                row.session.clone(),
+                Some(PathBuf::from(row.worktree_path.clone())),
+                Utc::now(),
+            )
+        })
+    })
+}
+
+fn availability_from_open_shell(open_shell: &OpenSessionPreview) -> ActionAvailability {
+    if open_shell.enabled {
+        ActionAvailability::enabled()
+    } else {
+        ActionAvailability::disabled(
+            open_shell
+                .reason
+                .clone()
+                .unwrap_or_else(|| "open-session unavailable".to_string()),
+        )
     }
 }
 
@@ -1128,18 +1191,12 @@ async fn handle_key(
         KeyCode::Char('a') => {
             if let Some(row) = app.selected_row().cloned() {
                 if row.actions.attach.enabled {
-                    let session = row.session.clone();
+                    let registry = ctx.registry.clone();
+                    let target = row.uri.clone();
                     app.message = Some(
-                        run_terminal_action(terminal, || async move {
-                            let status = tokio::process::Command::new("tmux")
-                                .args(["attach", "-t", &session])
-                                .status()
+                        run_terminal_action(terminal, || async {
+                            crate::open_session::run_open_session_action(registry.as_ref(), &target)
                                 .await
-                                .context("failed to execute tmux attach")?;
-                            if !status.success() {
-                                anyhow::bail!("tmux attach exited with status {status}");
-                            }
-                            Ok(format!("attached to {session}"))
                         })
                         .await?,
                     );
@@ -1803,6 +1860,7 @@ mod tests {
             agent_transcript_cwd: Some(PathBuf::from("/tmp/worktree")),
             resume_of_dispatch_id: None,
             agent_capabilities: Some(claude_agent_capabilities()),
+            terminal_locator: None,
             dispatched_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 5, 0).unwrap(),
         }

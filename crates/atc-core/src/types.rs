@@ -49,11 +49,258 @@ pub struct DispatchRecord {
     pub resume_of_dispatch_id: Option<String>,
     /// Capability snapshot for the provider at dispatch time.
     pub agent_capabilities: Option<AgentCapabilities>,
+    /// Structured terminal locator captured for this dispatch, when ATC owns
+    /// the terminal/session lifecycle.
+    pub terminal_locator: Option<TerminalLocator>,
     pub dispatched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
+pub const ATC_SESSION_URI_PREFIX: &str = "atc://session/";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "kebab-case")]
+pub enum TerminalLocator {
+    Tmux(TmuxTerminalLocator),
+}
+
+impl TerminalLocator {
+    pub fn atc_tmux(
+        session: impl Into<String>,
+        cwd: Option<PathBuf>,
+        detected_at: DateTime<Utc>,
+    ) -> Self {
+        Self::Tmux(TmuxTerminalLocator {
+            version: 1,
+            session: session.into(),
+            cwd,
+            detected_at,
+            source: TerminalLocatorSource::AtcDispatch,
+            confidence: TerminalLocatorConfidence::Exact,
+        })
+    }
+
+    pub fn inferred_tmux(
+        session: impl Into<String>,
+        cwd: Option<PathBuf>,
+        detected_at: DateTime<Utc>,
+    ) -> Self {
+        Self::Tmux(TmuxTerminalLocator {
+            version: 1,
+            session: session.into(),
+            cwd,
+            detected_at,
+            source: TerminalLocatorSource::LegacySessionField,
+            confidence: TerminalLocatorConfidence::Inferred,
+        })
+    }
+
+    pub fn backend(&self) -> &'static str {
+        match self {
+            Self::Tmux(_) => "tmux",
+        }
+    }
+
+    pub fn tmux_session(&self) -> Option<&str> {
+        match self {
+            Self::Tmux(locator) => Some(locator.session.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxTerminalLocator {
+    pub version: u32,
+    pub session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    pub detected_at: DateTime<Utc>,
+    pub source: TerminalLocatorSource,
+    pub confidence: TerminalLocatorConfidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalLocatorSource {
+    AtcDispatch,
+    LegacySessionField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalLocatorConfidence {
+    Exact,
+    Inferred,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalStatusState {
+    Focusable,
+    Attached,
+    Detached,
+    Running,
+    Stale,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalStatus {
+    pub state: TerminalStatusState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl TerminalStatus {
+    pub fn new(state: TerminalStatusState, backend: Option<impl Into<String>>) -> Self {
+        Self {
+            state,
+            backend: backend.map(Into::into),
+            reason: None,
+        }
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            state: TerminalStatusState::Unavailable,
+            backend: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    pub fn is_openable(&self) -> bool {
+        matches!(
+            self.state,
+            TerminalStatusState::Focusable
+                | TerminalStatusState::Attached
+                | TerminalStatusState::Detached
+                | TerminalStatusState::Running
+                | TerminalStatusState::Unknown
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSessionPreview {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach_command: Option<Vec<String>>,
+}
+
+impl OpenSessionPreview {
+    pub fn enabled(
+        action: impl Into<String>,
+        backend: impl Into<String>,
+        attach_command: Vec<String>,
+    ) -> Self {
+        Self {
+            enabled: true,
+            reason: None,
+            action: action.into(),
+            backend: Some(backend.into()),
+            attach_command: Some(attach_command),
+        }
+    }
+
+    pub fn disabled(action: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            enabled: false,
+            reason: Some(reason.into()),
+            action: action.into(),
+            backend: None,
+            attach_command: None,
+        }
+    }
+}
+
+pub fn atc_session_uri(dispatch_id: &str) -> String {
+    format!(
+        "{ATC_SESSION_URI_PREFIX}{}",
+        percent_encode_resource_id(dispatch_id)
+    )
+}
+
+pub fn parse_atc_session_uri(value: &str) -> anyhow::Result<String> {
+    let Some(encoded) = value.strip_prefix(ATC_SESSION_URI_PREFIX) else {
+        anyhow::bail!("unsupported atc resource URI: {value}");
+    };
+    anyhow::ensure!(!encoded.is_empty(), "atc session URI is missing an id");
+    percent_decode_resource_id(encoded)
+}
+
+fn percent_encode_resource_id(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if is_unreserved_uri_byte(byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(hex_char(byte >> 4));
+            encoded.push(hex_char(byte & 0x0f));
+        }
+    }
+    encoded
+}
+
+fn percent_decode_resource_id(value: &str) -> anyhow::Result<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'%' => {
+                anyhow::ensure!(idx + 2 < bytes.len(), "truncated percent escape in atc URI");
+                let hi = from_hex(bytes[idx + 1])?;
+                let lo = from_hex(bytes[idx + 2])?;
+                decoded.push((hi << 4) | lo);
+                idx += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                idx += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_err(|e| anyhow::anyhow!("atc URI id is not UTF-8: {e}"))
+}
+
+fn is_unreserved_uri_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+    )
+}
+
+fn hex_char(value: u8) -> char {
+    match value {
+        0..=9 => char::from(b'0' + value),
+        10..=15 => char::from(b'A' + (value - 10)),
+        _ => unreachable!("hex nibble is always <= 15"),
+    }
+}
+
+fn from_hex(value: u8) -> anyhow::Result<u8> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        other => anyhow::bail!("invalid percent escape byte: {}", char::from(other)),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentProviderDescriptor {
@@ -704,5 +951,44 @@ mod tests {
     #[test]
     fn test_worktree_policy_default() {
         assert_eq!(WorktreePolicy::default(), WorktreePolicy::Branch);
+    }
+
+    #[test]
+    fn test_terminal_locator_tmux_json_shape() {
+        let detected_at = DateTime::parse_from_rfc3339("2026-06-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let locator = TerminalLocator::atc_tmux(
+            "session@with spaces",
+            Some(PathBuf::from("/tmp/worktree")),
+            detected_at,
+        );
+        let json = serde_json::to_value(&locator).unwrap();
+        assert_eq!(json["backend"], "tmux");
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["session"], "session@with spaces");
+        assert_eq!(json["cwd"], "/tmp/worktree");
+        assert_eq!(json["source"], "atc-dispatch");
+        assert_eq!(json["confidence"], "exact");
+
+        let round_trip: TerminalLocator = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, locator);
+    }
+
+    #[test]
+    fn test_atc_session_uri_percent_encodes_dispatch_id() {
+        let id = "branch/with space@implement@1";
+        let uri = atc_session_uri(id);
+        assert_eq!(uri, "atc://session/branch%2Fwith%20space%40implement%401");
+        assert_eq!(parse_atc_session_uri(&uri).unwrap(), id);
+    }
+
+    #[test]
+    fn test_atc_session_uri_rejects_invalid_inputs() {
+        assert!(parse_atc_session_uri("https://example.invalid/dispatch").is_err());
+        assert!(parse_atc_session_uri("atc://dispatch/id").is_err());
+        assert!(parse_atc_session_uri("atc://session/").is_err());
+        assert!(parse_atc_session_uri("atc://session/%").is_err());
+        assert!(parse_atc_session_uri("atc://session/%GG").is_err());
     }
 }

@@ -59,6 +59,7 @@ atc daemon --queue default --queue ci-fixes
 atc status
 atc sessions
 atc tui
+atc open-session <dispatch-id>
 atc health
 atc daemon status
 ```
@@ -146,6 +147,7 @@ The queue is the universal interface between selection (what to dispatch) and sc
 | `atc status` | Table view of all dispatches |
 | `atc sessions` | Keyboard switchboard for ATC dispatch sessions |
 | `atc tui` | Alias for `atc sessions` |
+| `atc open-session <id>` | Attach to an ATC tmux session by URI, dispatch ID, or unambiguous task slug |
 | `atc info <id>` | Detailed view of a single dispatch |
 | `atc logs [-f] <id>` | Tail stream-json logs (human-readable) |
 | `atc health [--auto]` | Run 6-signal health checks (`--auto` dispatches review-fix for NeedsReview) |
@@ -309,11 +311,14 @@ atc sessions --provider claude
 atc sessions --status running
 atc sessions --once
 atc sessions --json
+atc open-session <dispatch-id>
+atc open-session atc://session/<dispatch-id>
+atc open-session tasks/my-task --json
 ```
 
-Use `--once` for a non-interactive table and `--json` for the stable v1 session envelope used by automation and UI dogfooding. Interactive mode polls the embedded SQLite registry on a bounded interval, defaulting to 2 seconds, so dispatches updated by other shells or ATC commands appear while the switchboard is open. `--once` and `--json` are point-in-time snapshots.
+Use `--once` for a non-interactive table and `--json` for the stable v1 session envelope used by automation and UI dogfooding. `atc open-session --json` resolves and previews the terminal action without attaching; normal `atc open-session` attaches through the allowlisted tmux adapter. Interactive mode polls the embedded SQLite registry on a bounded interval, defaulting to 2 seconds, so dispatches updated by other shells or ATC commands appear while the switchboard is open. `--once` and `--json` are point-in-time snapshots.
 
-By default, the switchboard shows active/actionable sessions plus terminal records updated in the last 24 hours. Use `--all` to include every stored status. Interactive mode supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata and capability-gated actions, and hands off log/terminal actions through the existing ATC command logic.
+By default, the switchboard shows active/actionable sessions plus terminal records updated in the last 24 hours. Use `--all` to include every stored status. Interactive mode supports task/work-unit/branch/provider/status/search filters plus group cycling from the keyboard, shows provider session metadata, locator metadata, derived terminal status, and capability-gated actions, and hands off terminal attach through the same resolver as `atc open-session`.
 
 ## Watch Sockets
 

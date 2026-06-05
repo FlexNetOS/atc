@@ -188,6 +188,7 @@ mod tests {
             )),
             resume_of_dispatch_id: None,
             agent_capabilities: Some(claude_agent_capabilities()),
+            terminal_locator: None,
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41+00:00")
                 .unwrap()
                 .with_timezone(&Utc),

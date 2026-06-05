@@ -324,14 +324,7 @@ pub async fn write_diag_file(log_dir: &Path, dispatch_id: &str, gh_token_present
 
 /// Check if a tmux session exists.
 pub async fn tmux_session_alive(session: &str) -> bool {
-    tokio::process::Command::new("tmux")
-        .args(["has-session", "-t", session])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::tmux::session_alive(session).await
 }
 
 /// Result of meta workspace discovery.

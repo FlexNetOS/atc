@@ -18,7 +18,8 @@ SET work_unit_id = 'wu-001',
     pr_urls = '["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]',
     agent_session_id = '00000000-0000-4000-8000-000000000794',
     agent_transcript_cwd = '$TEST_TMPDIR/worktree',
-    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true,"supports_tmux_attach":true,"supports_tmux_redirect":true,"supports_stream_json_output":true,"supports_cost_and_turn_reporting":true}'
+    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true,"supports_tmux_attach":true,"supports_tmux_redirect":true,"supports_stream_json_output":true,"supports_cost_and_turn_reporting":true}',
+    terminal_locator_json = '{"backend":"tmux","version":1,"session":"disp-001","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 }
@@ -36,6 +37,14 @@ SQL
     assert_output --partial "--once"
 }
 
+@test "open-session --help documents non-attaching json preview" {
+    run atc open-session --help
+    assert_success
+    assert_output --partial "atc://session"
+    assert_output --partial "--json"
+    assert_output --partial "without attaching"
+}
+
 @test "sessions --json emits session rows and capability action state" {
     require_jq
     setup_sessions_data
@@ -45,11 +54,17 @@ SQL
 
     echo "$STDOUT" | jq -e '.schema_version == 1' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].id == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].uri == "atc://session/disp-001"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].task_slug == "tasks/test-1"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].work_unit_id == "wu-001"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].provider == "claude"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].provider_session_id == "00000000-0000-4000-8000-000000000794"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].pr_urls == ["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.backend == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_status.state | type == "string"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].open_shell.action == "open-session"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == .rows[0].open_shell.enabled' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
     echo "$STDOUT" | jq -e '.work_units[0].id == "wu-001"' >/dev/null
@@ -67,9 +82,38 @@ SQL
     run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
     [ "$SPLIT_STATUS" -eq 0 ]
 
-    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == true' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.backend == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == .rows[0].open_shell.enabled' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
+}
+
+@test "open-session --json resolves session URI without attaching" {
+    require_jq
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.schema_version == 1' >/dev/null
+    echo "$STDOUT" | jq -e '.kind == "open-session"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.dispatch_id == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.uri == "atc://session/disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_locator.backend == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_status.state | type == "string"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.open_shell.action == "open-session"' >/dev/null
+}
+
+@test "open-session rejects ambiguous active task slug with candidates" {
+    setup_sessions_data
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-ambiguous" "tasks/test-1" "running"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session tasks/test-1 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"multiple active dispatches"* ]]
+    [[ "$STDERR" == *"disp-001"* ]]
+    [[ "$STDERR" == *"disp-ambiguous"* ]]
 }
 
 @test "tui --json is the same sessions command surface" {
@@ -242,6 +286,29 @@ SQL
     echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].resume_of_dispatch_id | contains($payload)' >/dev/null
     echo "$STDOUT" | jq -e --arg payload "$command_payload" '.rows[0].pr_urls[0] | contains($payload)' >/dev/null
     echo "$STDOUT" | jq -e --arg payload "$semicolon_payload" '.rows[0].pr_urls[1] | contains($payload)' >/dev/null
+    assert_file_not_exists "$sentinel"
+}
+
+@test "sessions and open-session preview treat hostile terminal locator as inert data" {
+    require_jq
+    setup_sessions_data
+    local sentinel="$TEST_TMPDIR/terminal-locator-pwned"
+    local hostile_session="\$(touch $sentinel)"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"backend":"tmux","version":1,"session":"$hostile_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e --arg payload "$hostile_session" '.rows[0].terminal_locator.session == $payload' >/dev/null
+    assert_file_not_exists "$sentinel"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e --arg payload "$hostile_session" '.data.session == $payload' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$hostile_session" '.data.terminal_locator.session == $payload' >/dev/null
     assert_file_not_exists "$sentinel"
 }
 

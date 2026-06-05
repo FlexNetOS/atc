@@ -5,7 +5,8 @@ use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{
     claude_agent_provider, AgentCapabilities, AgentSessionMetadata, Directive, DispatchOutcome,
-    DispatchRecord, HealthChecks, RunOpts, Status, WorktreePolicy, CLAUDE_AGENT_PROVIDER,
+    DispatchRecord, HealthChecks, RunOpts, Status, TerminalLocator, WorktreePolicy,
+    CLAUDE_AGENT_PROVIDER,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -209,6 +210,7 @@ fn build_dispatch_record(
     agent_metadata: &AgentSessionMetadata,
     now: DateTime<Utc>,
 ) -> DispatchRecord {
+    let terminal_locator = dispatch_terminal_locator(opts, session_name, worktree_path, now);
     DispatchRecord {
         id: resolved.dispatch_id.clone(),
         task_slug: resolved.task_slug.clone(),
@@ -235,8 +237,26 @@ fn build_dispatch_record(
         agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
         resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
         agent_capabilities: agent_metadata.capabilities,
+        terminal_locator,
         dispatched_at: now,
         updated_at: now,
+    }
+}
+
+fn dispatch_terminal_locator(
+    opts: &RunOpts,
+    session_name: &str,
+    worktree_path: &Path,
+    detected_at: DateTime<Utc>,
+) -> Option<TerminalLocator> {
+    if opts.inline || session_name.trim().is_empty() {
+        None
+    } else {
+        Some(TerminalLocator::atc_tmux(
+            session_name,
+            Some(worktree_path.to_path_buf()),
+            detected_at,
+        ))
     }
 }
 
@@ -1223,6 +1243,8 @@ impl<'a> DispatchPipeline<'a> {
             None => Status::Running,
         };
         record.session = handle.session.clone();
+        record.terminal_locator =
+            dispatch_terminal_locator(opts, &handle.session, &worktree_path, Utc::now());
         record.status = status;
         record.updated_at = Utc::now();
 
@@ -1252,6 +1274,18 @@ impl<'a> DispatchPipeline<'a> {
             }
             if let Err(e) = self.registry.update_status(&record.id, status).await {
                 warn!(id = %resolved.dispatch_id, error = %e, "resume reservation status update failed");
+                return Err(e);
+            }
+            if let Err(e) = self
+                .registry
+                .update_session_locator(
+                    &record.id,
+                    &record.session,
+                    record.terminal_locator.as_ref(),
+                )
+                .await
+            {
+                warn!(id = %resolved.dispatch_id, error = %e, "resume reservation terminal locator update failed");
                 return Err(e);
             }
         } else {
@@ -1560,6 +1594,7 @@ impl<'a> DispatchPipeline<'a> {
             agent_transcript_cwd: None,
             resume_of_dispatch_id: None,
             agent_capabilities: None,
+            terminal_locator: None,
             dispatched_at: now,
             updated_at: now,
         }

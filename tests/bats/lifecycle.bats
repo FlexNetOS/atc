@@ -85,7 +85,7 @@ load helpers/common
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json' WHERE id = 'disp-001';"
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json', terminal_locator_json = '{not-json' WHERE id = 'disp-001';"
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
     [ "$SPLIT_STATUS" -eq 0 ]
@@ -94,10 +94,13 @@ load helpers/common
     echo "$STDOUT" | jq -e '.records[0].agent_provider == "claude"'
     echo "$STDOUT" | jq -e '.records[0].agent_session_id == null'
     echo "$STDOUT" | jq -e '.records[0].agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.records[0].terminal_locator == null'
     echo "$STDOUT" | jq -e '.records[0] | has("agent_capabilities_json") | not'
+    echo "$STDOUT" | jq -e '.records[0] | has("terminal_locator_json") | not'
     echo "$STDERR" | grep -F "dispatch_id=disp-001"
     echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
+    echo "$STDERR" | grep -F "ignoring invalid terminal_locator_json"
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
     [ "$SPLIT_STATUS" -eq 0 ]
@@ -106,10 +109,13 @@ load helpers/common
     echo "$STDOUT" | jq -e '.record.agent_provider == "claude"'
     echo "$STDOUT" | jq -e '.record.agent_session_id == null'
     echo "$STDOUT" | jq -e '.record.agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.record.terminal_locator == null'
     echo "$STDOUT" | jq -e '.record | has("agent_capabilities_json") | not'
+    echo "$STDOUT" | jq -e '.record | has("terminal_locator_json") | not'
     echo "$STDERR" | grep -F "dispatch_id=disp-001"
     echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
+    echo "$STDERR" | grep -F "ignoring invalid terminal_locator_json"
 }
 
 @test "status/info --json escape Unicode format controls in encoded bytes while preserving decoded values" {

@@ -20,6 +20,7 @@ pub mod info;
 pub mod init;
 pub mod kb;
 pub mod logs;
+pub mod open_session;
 pub mod output_schema;
 pub mod pager;
 pub mod pipeline;
@@ -34,6 +35,7 @@ pub mod status;
 pub mod stop;
 pub mod style;
 pub mod subprocess;
+pub mod tmux;
 pub mod watch;
 
 pub(crate) mod shell_text;
@@ -52,7 +54,7 @@ mod args {
         name = "atc",
         about = "Air Traffic Control — agent orchestrator",
         version,
-        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc sessions                # Keyboard switchboard for sessions\n  atc tui                     # Alias for atc sessions\n  atc run task tasks/foo      # Dispatch a task\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
+        after_help = "EXAMPLES:\n  atc status                  # Active dispatches (running, retrying, needs-*)\n  atc status --all            # Include done/failed/stopped\n  atc sessions                # Keyboard switchboard for sessions\n  atc tui                     # Alias for atc sessions\n  atc run task tasks/foo      # Dispatch a task\n  atc open-session <id>       # Attach to an ATC tmux session\n  atc info <id>               # Detailed view of one dispatch\n  atc health --auto           # Auto-fix NeedsReview dispatches\n\nGLOBAL FLAGS:\n  --no-pager       Bypass the pager even in TTY mode\n  --color <mode>   auto|always|never (default: auto)\n\nENV:\n  ATC_PAGER        Pager command (set to 'cat' to disable)\n  ATC_NO_PAGER     Bypass pager when set\n  NO_COLOR         Disable color when set (any value)\n  ATC_CI           Disable pager + force inline when set to 1/true/yes\n"
     )]
     pub struct Args {
         #[arg(long, global = true)]
@@ -257,6 +259,18 @@ mod args {
             #[arg(long)]
             once: bool,
             /// Emit stable v1 JSON and exit
+            #[arg(long)]
+            json: bool,
+        },
+        /// Attach to an ATC terminal session by URI, dispatch ID, or unambiguous task slug
+        #[command(
+            name = "open-session",
+            after_help = "EXAMPLES:\n  atc open-session <dispatch-id>\n  atc open-session atc://session/<dispatch-id>\n  atc open-session tasks/foo --json\n\nJSON OUTPUT (--json):\n  Resolves and previews the open-session action without attaching.\n"
+        )]
+        OpenSession {
+            /// ATC session URI, dispatch ID, or task slug with exactly one active dispatch
+            target: String,
+            /// Emit a stable v1 JSON preview and do not attach
             #[arg(long)]
             json: bool,
         },
@@ -778,6 +792,9 @@ pub async fn run(
                 opts,
             )
             .await
+        }
+        Commands::OpenSession { target, json } => {
+            open_session::run_open_session(registry.as_ref(), target, *json).await
         }
         Commands::Info { id, json } => {
             info::run_info(registry.clone() as Arc<dyn Registry>, id, *json).await
