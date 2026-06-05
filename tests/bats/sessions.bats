@@ -159,6 +159,13 @@ SQL
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"unsupported atc resource URI"* ]]
 
+    local esc=$'\033'
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "https://example.invalid/disp-001${esc}[2J" --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unsupported open-session URI scheme"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+
     run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001/extra --json
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"must be percent-encoded"* ]]
@@ -171,7 +178,6 @@ SQL
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"disallowed control or format character"* ]]
 
-    local esc=$'\033'
     run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "atc://session/disp-001${esc}[2J" --json
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"0x1B"* ]]
@@ -418,10 +424,11 @@ SQL
     local bidi=$'\u202e'
     local line_sep=$'\u2028'
     local paragraph_sep=$'\u2029'
+    local csi=$'\u009b'
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
 SET branch = 'branch-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe',
-    session = 'tmux-' || char(8238) || 'gpj' || char(8232) || 'line',
+    session = 'tmux-' || char(155) || '31mred' || char(8238) || 'gpj' || char(8232) || 'line',
     agent_provider = 'claude-' || char(8238) || 'gpj' || char(8233) || 'para.exe'
 WHERE id = 'disp-001';
 SQL
@@ -432,14 +439,19 @@ SQL
     [[ "$STDOUT" != *"$bidi"* ]]
     [[ "$STDOUT" != *"$line_sep"* ]]
     [[ "$STDOUT" != *"$paragraph_sep"* ]]
+    [[ "$STDOUT" != *"$csi"* ]]
     [[ "$STDOUT" == *"\\u202e"* ]]
     [[ "$STDOUT" == *"\\u2028"* ]]
     [[ "$STDOUT" == *"\\u2029"* ]]
+    [[ "$STDOUT" == *"\\u009b"* ]]
     local decoded_branch
     decoded_branch="$(echo "$STDOUT" | jq -r '.rows[0].branch')"
     [[ "$decoded_branch" == *"$bidi"* ]]
     [[ "$decoded_branch" == *"$line_sep"* ]]
     [[ "$decoded_branch" == *"$paragraph_sep"* ]]
+    local decoded_session
+    decoded_session="$(echo "$STDOUT" | jq -r '.rows[0].session')"
+    [[ "$decoded_session" == *"$csi"* ]]
 }
 
 @test "sessions --once escapes terminal control sequences in human output" {

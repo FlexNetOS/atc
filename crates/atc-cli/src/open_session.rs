@@ -97,9 +97,13 @@ pub fn open_shell_preview(
     };
 
     match locator {
-        TerminalLocator::Tmux(tmux) if tmux.session.trim().is_empty() => {
-            OpenSessionPreview::disabled(ACTION_OPEN_SESSION, "tmux locator is missing session")
-        }
+        TerminalLocator::Tmux(tmux) if tmux.session.trim().is_empty() => OpenSessionPreview {
+            enabled: false,
+            reason: Some("tmux locator is missing session".to_string()),
+            action: ACTION_OPEN_SESSION.to_string(),
+            backend: Some("tmux".to_string()),
+            attach_command: None,
+        },
         TerminalLocator::Tmux(tmux) if status.is_openable() => OpenSessionPreview::enabled(
             ACTION_OPEN_SESSION,
             "tmux",
@@ -173,6 +177,13 @@ async fn resolve_record(registry: &dyn Registry, target: &str) -> Result<Dispatc
         });
     }
 
+    if looks_like_uri(target) {
+        bail!(
+            "unsupported open-session URI scheme in target: {}",
+            display_text(target)
+        );
+    }
+
     if let Some(record) = registry.get(target).await? {
         return Ok(record);
     }
@@ -206,6 +217,19 @@ async fn resolve_record(registry: &dyn Registry, target: &str) -> Result<Dispatc
 
 fn is_active_for_open_session(status: Status) -> bool {
     !status.is_terminal()
+}
+
+fn looks_like_uri(target: &str) -> bool {
+    let Some(scheme_end) = target.find("://") else {
+        return false;
+    };
+    let scheme = &target[..scheme_end];
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
 fn status_state_label(state: TerminalStatusState) -> &'static str {
@@ -294,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn open_shell_preview_preserves_backend_for_blank_tmux_locator() {
+        let locator = TerminalLocator::inferred_tmux("  ", None, Utc::now());
+        let status = TerminalStatus::new(TerminalStatusState::Detached, Some("tmux"));
+        let preview = open_shell_preview(Some(&locator), &status);
+
+        assert!(!preview.enabled);
+        assert_eq!(
+            preview.reason.as_deref(),
+            Some("tmux locator is missing session")
+        );
+        assert_eq!(preview.backend.as_deref(), Some("tmux"));
+        assert!(preview.attach_command.is_none());
+    }
+
+    #[test]
     fn open_session_unavailable_message_escapes_terminal_controls() {
         let message = open_session_unavailable_message(Some("bad\x1b[2J\u{202e}reason"));
 
@@ -332,6 +371,33 @@ mod tests {
         assert_no_raw_terminal_controls(&error);
         assert!(error.contains("\\x1b"));
         assert!(error.contains("\\u{202e}"));
+    }
+
+    #[tokio::test]
+    async fn resolve_open_session_rejects_unsupported_uri_schemes() {
+        let registry = MockRegistry::new(Vec::new());
+
+        let error = resolve_open_session(&registry, "https://example.invalid/dispatch\x1b[2J")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unsupported open-session URI scheme"));
+        assert_no_raw_terminal_controls(&error);
+        assert!(error.contains("\\x1b"));
+    }
+
+    #[tokio::test]
+    async fn resolve_open_session_does_not_treat_non_scheme_ids_as_uris() {
+        let registry = MockRegistry::new(Vec::new());
+
+        let error = resolve_open_session(&registry, "1://not-a-uri-scheme")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("no active dispatch found for task slug"));
+        assert!(!error.contains("unsupported open-session URI scheme"));
     }
 
     #[tokio::test]

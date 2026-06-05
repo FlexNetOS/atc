@@ -23,10 +23,10 @@ pub fn display_text(value: &str) -> String {
     out
 }
 
-/// Pretty-serialize JSON while escaping Unicode format controls that can spoof
-/// terminal display. JSON control characters such as ESC and BEL are already
-/// escaped by serde_json; this post-processing covers bidi/invisible controls
-/// that serde_json is allowed to emit as raw UTF-8.
+/// Pretty-serialize JSON while escaping terminal controls and Unicode format
+/// controls that can spoof terminal display. JSON C0 controls such as ESC and
+/// BEL are already escaped by serde_json; this post-processing covers C1 and
+/// bidi/invisible controls that serde_json is allowed to emit as raw UTF-8.
 pub fn terminal_safe_json_pretty<T>(value: &T) -> Result<String, serde_json::Error>
 where
     T: serde::Serialize + ?Sized,
@@ -43,21 +43,39 @@ where
     serde_json::to_string(value).map(|json| escape_json_format_controls(&json))
 }
 
-/// Escape dangerous raw Unicode format controls in already-serialized JSON.
+/// Escape dangerous raw terminal controls in already-serialized JSON.
 pub fn escape_json_format_controls(value: &str) -> String {
-    if !value.chars().any(is_dangerous_format_control) {
+    if !value.chars().any(should_escape_raw_json_terminal_char) {
         return value.to_string();
     }
 
     let mut out = String::with_capacity(value.len());
+    let mut in_string = false;
+    let mut escaped = false;
     for ch in value.chars() {
-        if is_dangerous_format_control(ch) {
+        if in_string && should_escape_raw_json_terminal_char(ch) {
             push_json_unicode_escape(&mut out, ch);
+            escaped = false;
         } else {
             out.push(ch);
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+            } else if ch == '"' {
+                in_string = true;
+            }
         }
     }
     out
+}
+
+fn should_escape_raw_json_terminal_char(ch: char) -> bool {
+    ch.is_control() || is_dangerous_format_control(ch)
 }
 
 pub(crate) fn is_dangerous_format_control(ch: char) -> bool {
@@ -116,7 +134,7 @@ mod tests {
     fn terminal_safe_json_pretty_escapes_bidi_but_preserves_decoded_data() {
         let value = serde_json::json!({
             "text": "safe\u{202e}gpj.exe\u{2066}visible\u{2069}",
-            "control": "bell\u{7}"
+            "control": "bell\u{7}\u{9b}cursor"
         });
 
         let json = terminal_safe_json_pretty(&value).unwrap();
@@ -125,10 +143,12 @@ mod tests {
         assert!(!json.contains('\u{2066}'));
         assert!(!json.contains('\u{2069}'));
         assert!(!json.contains('\u{7}'));
+        assert!(!json.contains('\u{9b}'));
         assert!(json.contains("\\u202e"));
         assert!(json.contains("\\u2066"));
         assert!(json.contains("\\u2069"));
         assert!(json.contains("\\u0007"));
+        assert!(json.contains("\\u009b"));
 
         let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, value);
@@ -138,7 +158,7 @@ mod tests {
     fn terminal_safe_json_escapes_bidi_but_preserves_decoded_data() {
         let value = serde_json::json!({
             "text": "safe\u{202e}gpj.exe\u{2066}visible\u{2069}",
-            "control": "bell\u{7}"
+            "control": "bell\u{7}\u{9b}cursor"
         });
 
         let json = terminal_safe_json(&value).unwrap();
@@ -147,10 +167,12 @@ mod tests {
         assert!(!json.contains('\u{2066}'));
         assert!(!json.contains('\u{2069}'));
         assert!(!json.contains('\u{7}'));
+        assert!(!json.contains('\u{9b}'));
         assert!(json.contains("\\u202e"));
         assert!(json.contains("\\u2066"));
         assert!(json.contains("\\u2069"));
         assert!(json.contains("\\u0007"));
+        assert!(json.contains("\\u009b"));
 
         let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, value);
