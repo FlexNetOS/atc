@@ -1044,8 +1044,9 @@ async fn run_tui(
                 match load_snapshot(ctx.registry.as_ref(), &ctx.filter, ctx.group).await {
                     Ok(snapshot) => app.set_snapshot(snapshot),
                     Err(e) => {
-                        warn!(error = %e, "atc sessions refresh failed");
-                        app.message = Some(format!("refresh failed: {e}"));
+                        let message = display_text(&e.to_string());
+                        warn!(error = %message, "atc sessions refresh failed");
+                        app.message = Some(format!("refresh failed: {message}"));
                     }
                 }
                 last_poll = Instant::now();
@@ -1639,7 +1640,7 @@ pub fn render_app(frame: &mut Frame<'_>, app: &SessionsApp) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(if app.show_detail { 14 } else { 3 }),
+            Constraint::Length(if app.show_detail { 17 } else { 3 }),
         ])
         .split(frame.area());
 
@@ -1812,8 +1813,9 @@ fn detail_text(row: &SessionRow) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "id: {}\ntask: {}\nwork_unit: {}\nprovider: {}  provider_session: {}\nstatus: {}  directive: {}  resolver: {}\nbranch: {}\nworktree: {}\nlog: {}\nprs: {}\nresume_of: {}\nactions: {}",
+        "id: {}\nuri: {}\ntask: {}\nwork_unit: {}\nprovider: {}  provider_session: {}\nstatus: {}  directive: {}  resolver: {}\nterminal: {}\nlocator: {}\nbranch: {}\nworktree: {}\nlog: {}\nprs: {}\nresume_of: {}\nactions: {}",
         display_text(&row.id),
+        display_text(&row.uri),
         display_text(row.display_task()),
         display_text(row.display_work_unit()),
         display_text(&row.provider),
@@ -1821,6 +1823,8 @@ fn detail_text(row: &SessionRow) -> String {
         row.status,
         display_text(&row.directive),
         display_text(&row.resolver),
+        display_text(&terminal_detail(row)),
+        display_text(&locator_detail(row)),
         display_text(&row.branch),
         display_text(&row.worktree_path),
         display_text(row.log_file.as_deref().unwrap_or("-")),
@@ -1828,6 +1832,63 @@ fn detail_text(row: &SessionRow) -> String {
         display_text(row.resume_of_dispatch_id.as_deref().unwrap_or("-")),
         action_text
     )
+}
+
+fn terminal_detail(row: &SessionRow) -> String {
+    let backend = row
+        .terminal_status
+        .backend
+        .as_deref()
+        .or(row.open_shell.backend.as_deref())
+        .unwrap_or("-");
+    let open_shell = if row.open_shell.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let status_reason = row.terminal_status.reason.as_deref().unwrap_or("-");
+    let open_reason = row.open_shell.reason.as_deref().unwrap_or("-");
+    format!(
+        "state={} backend={} status_reason={} open_shell={} open_reason={}",
+        terminal_status_state_label(row.terminal_status.state),
+        backend,
+        status_reason,
+        open_shell,
+        open_reason
+    )
+}
+
+fn locator_detail(row: &SessionRow) -> String {
+    match row.terminal_locator.as_ref() {
+        Some(TerminalLocator::Tmux(tmux)) => {
+            let cwd = tmux
+                .cwd
+                .as_ref()
+                .map(|path| path.to_string_lossy())
+                .unwrap_or_else(|| "-".into());
+            format!(
+                "tmux session={} source={} confidence={} detected_at={} cwd={}",
+                tmux.session,
+                tmux.source.as_str(),
+                tmux.confidence.as_str(),
+                tmux.detected_at.to_rfc3339(),
+                cwd
+            )
+        }
+        None => "-".to_string(),
+    }
+}
+
+fn terminal_status_state_label(state: TerminalStatusState) -> &'static str {
+    match state {
+        TerminalStatusState::Focusable => "focusable",
+        TerminalStatusState::Attached => "attached",
+        TerminalStatusState::Detached => "detached",
+        TerminalStatusState::Running => "running",
+        TerminalStatusState::Stale => "stale",
+        TerminalStatusState::Unavailable => "unavailable",
+        TerminalStatusState::Unknown => "unknown",
+    }
 }
 
 fn render_confirmation(frame: &mut Frame<'_>, pending: PendingAction) {
@@ -2671,6 +2732,51 @@ mod tests {
         let detail = detail_text(&snapshot.rows[0]);
 
         assert!(detail.contains("reason\\x1b]52;c;payload\\x07\\u{202e}gpj.exe"));
+        assert!(!detail.contains('\x1b'));
+        assert!(!detail.contains('\x07'));
+        assert!(!detail.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn detail_text_shows_terminal_metadata_safely() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let mut hostile = record("hostile-terminal-detail", Status::Running);
+        hostile.terminal_locator = Some(TerminalLocator::atc_tmux(
+            "locator\x1b[2J\u{202e}gpj",
+            Some(PathBuf::from("/tmp/worktree\x07")),
+            hostile.updated_at,
+        ));
+        let mut snapshot = build_snapshot(
+            vec![hostile],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Task,
+        );
+        snapshot.rows[0].terminal_status =
+            TerminalStatus::new(TerminalStatusState::Unavailable, Some("tmux"))
+                .with_reason("reason\x1b]52;c;payload\x07\u{202e}gpj");
+        snapshot.rows[0].open_shell = crate::open_session::open_shell_preview(
+            snapshot.rows[0].terminal_locator.as_ref(),
+            &snapshot.rows[0].terminal_status,
+        );
+        snapshot.rows[0].actions.attach =
+            availability_from_open_shell(&snapshot.rows[0].open_shell);
+
+        let detail = detail_text(&snapshot.rows[0]);
+
+        assert!(detail.contains("uri:"));
+        assert!(detail.contains("terminal:"));
+        assert!(detail.contains("locator:"));
+        assert!(detail.contains("state=unavailable"));
+        assert!(detail.contains("status_reason=reason\\x1b]52;c;payload\\x07\\u{202e}gpj"));
+        assert!(detail.contains("open_shell=disabled"));
+        assert!(detail.contains("open_reason=reason\\x1b]52;c;payload\\x07\\u{202e}gpj"));
+        assert!(detail.contains("locator\\x1b[2J\\u{202e}gpj"));
+        assert!(detail.contains("/tmp/worktree\\x07"));
+        assert!(detail.contains("reason\\x1b]52;c;payload\\x07\\u{202e}gpj"));
         assert!(!detail.contains('\x1b'));
         assert!(!detail.contains('\x07'));
         assert!(!detail.contains('\u{202e}'));

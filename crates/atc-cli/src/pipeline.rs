@@ -168,20 +168,20 @@ fn validate_document_policy_slug(slug: &str) -> Result<()> {
 }
 
 fn canonicalize_existing_dir(path: &Path, source_id: &str, label: &str) -> Result<PathBuf> {
+    let source_id_display = display_text(source_id);
+    let display_path = display_text(&path.display().to_string());
     let canonical = std::fs::canonicalize(path).with_context(|| {
         format!(
             "cannot resume dispatch {}: {} '{}' is not accessible",
-            source_id,
-            label,
-            path.display()
+            source_id_display, label, display_path
         )
     })?;
     anyhow::ensure!(
         canonical.is_dir(),
         "cannot resume dispatch {}: {} '{}' is not a directory",
-        source_id,
+        source_id_display,
         label,
-        path.display()
+        display_path
     );
     Ok(canonical)
 }
@@ -915,10 +915,10 @@ impl<'a> DispatchPipeline<'a> {
             now,
         );
         info!(
-            id = %resolved.dispatch_id,
-            agent_provider = %record.agent_provider,
-            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
-            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref(),
+            id = %display_text(&resolved.dispatch_id),
+            agent_provider = %display_text(&record.agent_provider),
+            agent_session_id = record.agent_session_id.map(|id| display_text(&id.to_string())),
+            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref().map(display_text),
             agent_resume = record.resume_of_dispatch_id.is_some(),
             "registered agent session metadata"
         );
@@ -1264,16 +1264,20 @@ impl<'a> DispatchPipeline<'a> {
                     .await
                 {
                     warn!(
-                        id = %record.id,
-                        work_unit_id,
-                        error = %e,
+                        id = %display_text(&record.id),
+                        work_unit_id = %display_text(work_unit_id),
+                        error = %display_text(&e.to_string()),
                         "failed to attach work unit to resume dispatch (non-fatal)"
                     );
                     record.work_unit_id = None;
                 }
             }
             if let Err(e) = self.registry.update_status(&record.id, status).await {
-                warn!(id = %resolved.dispatch_id, error = %e, "resume reservation status update failed");
+                warn!(
+                    id = %display_text(&resolved.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "resume reservation status update failed"
+                );
                 return Err(e);
             }
             if let Err(e) = self
@@ -1285,7 +1289,11 @@ impl<'a> DispatchPipeline<'a> {
                 )
                 .await
             {
-                warn!(id = %resolved.dispatch_id, error = %e, "resume reservation terminal locator update failed");
+                warn!(
+                    id = %display_text(&resolved.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "resume reservation terminal locator update failed"
+                );
                 return Err(e);
             }
         } else {
@@ -1298,7 +1306,11 @@ impl<'a> DispatchPipeline<'a> {
             )
             .await;
             if let Err(e) = self.registry.insert(&record).await {
-                warn!(id = %resolved.dispatch_id, error = %e, "registry insert failed; killing orphan session");
+                warn!(
+                    id = %display_text(&resolved.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "registry insert failed; killing orphan session"
+                );
                 let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
                 if session_killed {
                     resolver
@@ -1306,8 +1318,8 @@ impl<'a> DispatchPipeline<'a> {
                         .await;
                 } else {
                     warn!(
-                        id = %resolved.dispatch_id,
-                        session = %handle.session,
+                        id = %display_text(&resolved.dispatch_id),
+                        session = %display_text(&handle.session),
                         "tmux kill inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
                     );
                 }
@@ -1430,33 +1442,40 @@ impl<'a> DispatchPipeline<'a> {
 
         let source = crate::resolve::resolve_record(self.registry, resume_target)
             .await
-            .with_context(|| format!("failed to resolve resume target '{resume_target}'"))?;
+            .with_context(|| {
+                format!(
+                    "failed to resolve resume target '{}'",
+                    display_text(resume_target)
+                )
+            })?;
+        let source_id = display_text(&source.id);
+        let source_provider = display_text(&source.agent_provider);
 
         anyhow::ensure!(
             source.agent_provider == CLAUDE_AGENT_PROVIDER,
             "cannot resume dispatch {}: provider '{}' is not supported by this slice",
-            source.id,
-            source.agent_provider
+            source_id,
+            source_provider
         );
 
         let capabilities = source.agent_capabilities.ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot resume dispatch {}: provider '{}' did not record capabilities",
-                source.id,
-                source.agent_provider
+                source_id,
+                source_provider
             )
         })?;
         anyhow::ensure!(
             capabilities.supports_resume_by_session_id,
             "cannot resume dispatch {}: provider '{}' does not support resume by session id",
-            source.id,
-            source.agent_provider
+            source_id,
+            source_provider
         );
 
         let session_id = source.agent_session_id.ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot resume dispatch {}: missing agent_session_id",
-                source.id
+                source_id
             )
         })?;
 
@@ -1470,10 +1489,10 @@ impl<'a> DispatchPipeline<'a> {
             {
                 anyhow::bail!(
                     "cannot resume dispatch {}: provider session {} is already active in dispatch {} (status {}). Use --force to override.",
-                    source.id,
-                    session_id,
-                    conflict.id,
-                    conflict.status
+                    source_id,
+                    display_text(&session_id.to_string()),
+                    display_text(&conflict.id),
+                    display_text(&conflict.status.to_string())
                 );
             }
         }
@@ -1492,9 +1511,9 @@ impl<'a> DispatchPipeline<'a> {
             .await
         {
             warn!(
-                id = %record.id,
-                reason,
-                error = %update_err,
+                id = %display_text(&record.id),
+                reason = %display_text(reason),
+                error = %display_text(&update_err.to_string()),
                 "failed to mark resume reservation failed"
             );
         }
@@ -1504,9 +1523,9 @@ impl<'a> DispatchPipeline<'a> {
             .await
         {
             warn!(
-                id = %record.id,
-                reason,
-                error = %update_err,
+                id = %display_text(&record.id),
+                reason = %display_text(reason),
+                error = %display_text(&update_err.to_string()),
                 "failed to clear failed resume reservation terminal locator"
             );
         }
@@ -1517,23 +1536,26 @@ impl<'a> DispatchPipeline<'a> {
     }
 
     fn validate_resume_transcript_cwd(&self, source: &DispatchRecord) -> Result<PathBuf> {
+        let source_id = display_text(&source.id);
         let stored_transcript_cwd = source.agent_transcript_cwd.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot resume dispatch {}: missing agent_transcript_cwd",
-                source.id
+                source_id
             )
         })?;
         let transcript_cwd =
             canonicalize_existing_dir(stored_transcript_cwd, &source.id, "transcript cwd")?;
         let source_worktree =
             canonicalize_existing_dir(&source.worktree_path, &source.id, "source worktree_path")?;
+        let transcript_cwd_display = display_text(&transcript_cwd.display().to_string());
+        let source_worktree_display = display_text(&source_worktree.display().to_string());
 
         anyhow::ensure!(
             transcript_cwd == source_worktree,
             "cannot resume dispatch {}: transcript cwd '{}' does not match source worktree_path '{}'",
-            source.id,
-            transcript_cwd.display(),
-            source_worktree.display()
+            source_id,
+            transcript_cwd_display,
+            source_worktree_display
         );
 
         anyhow::ensure!(
@@ -1544,8 +1566,8 @@ impl<'a> DispatchPipeline<'a> {
                     .file_name()
                     .is_some_and(|name| name != ".worktrees"),
             "cannot resume dispatch {}: unsafe transcript cwd '{}'",
-            source.id,
-            transcript_cwd.display()
+            source_id,
+            transcript_cwd_display
         );
 
         let dispatch_cfg = &self.config.dispatch;
@@ -1565,8 +1587,8 @@ impl<'a> DispatchPipeline<'a> {
         anyhow::ensure!(
             under_meta_workspace || under_worktree_base,
             "cannot resume dispatch {}: transcript cwd '{}' is not under an ATC workspace or worktree root",
-            source.id,
-            transcript_cwd.display()
+            source_id,
+            transcript_cwd_display
         );
 
         Ok(transcript_cwd)
@@ -2236,6 +2258,28 @@ mod tests {
         }
         validate_document_policy_slug("tasks/foo").unwrap();
         validate_document_policy_slug("specs/atc-agent-harness-contract").unwrap();
+    }
+
+    #[test]
+    fn test_canonicalize_existing_dir_uses_real_path_but_escapes_errors() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let weird_dir = tempdir.path().join("resume-\x1b[2J\u{202e}gpj");
+        std::fs::create_dir(&weird_dir).unwrap();
+
+        let canonical =
+            canonicalize_existing_dir(&weird_dir, "dispatch-\x1b[31m\u{202e}gpj", "transcript cwd")
+                .unwrap();
+        assert_eq!(canonical, std::fs::canonicalize(&weird_dir).unwrap());
+
+        let missing = weird_dir.join("missing");
+        let err =
+            canonicalize_existing_dir(&missing, "dispatch-\x1b[31m\u{202e}gpj", "transcript cwd")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("dispatch-\\x1b[31m\\u{202e}gpj"));
+        assert!(err.contains("resume-\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
     }
 
     #[test]

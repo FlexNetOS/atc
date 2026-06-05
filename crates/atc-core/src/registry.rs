@@ -907,7 +907,10 @@ impl Registry for SqliteRegistry {
 
             if let Some((id, status)) = conflict {
                 anyhow::bail!(
-                    "provider session {session_id} is already active in dispatch {id} (status {status})"
+                    "provider session {} is already active in dispatch {} (status {})",
+                    display_text(&session_id),
+                    display_text(&id),
+                    display_text(&status)
                 );
             }
 
@@ -2041,6 +2044,14 @@ mod tests {
         }
     }
 
+    fn assert_no_raw_terminal_controls(value: &str) {
+        assert!(!value.contains('\x1b'), "raw ESC in output: {value:?}");
+        assert!(
+            !value.contains('\u{202e}'),
+            "raw bidi control in output: {value:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_insert_and_get_round_trip() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
@@ -2203,14 +2214,7 @@ mod tests {
             .to_string();
 
         assert!(error.contains("missing\\x1b[2J\\u{202e}gpj"));
-        assert!(
-            !error.contains('\x1b'),
-            "raw escape leaked in error: {error:?}"
-        );
-        assert!(
-            !error.contains('\u{202e}'),
-            "raw bidi control leaked in error: {error:?}"
-        );
+        assert_no_raw_terminal_controls(&error);
     }
 
     #[tokio::test]
@@ -2462,7 +2466,8 @@ mod tests {
         source.status = Status::Done;
         registry.insert(&source).await.unwrap();
 
-        let mut first_resume = sample_record("resume-1");
+        let hostile_id = "resume-1\x1b[2J\u{202e}gpj";
+        let mut first_resume = sample_record(hostile_id);
         first_resume.resume_of_dispatch_id = Some(source.id.clone());
         registry
             .insert_resume_reservation(&first_resume, false)
@@ -2479,6 +2484,9 @@ mod tests {
             err.to_string().contains("already active"),
             "unexpected reservation conflict error: {err}"
         );
+        let error = err.to_string();
+        assert!(error.contains("resume-1\\x1b[2J\\u{202e}gpj"));
+        assert_no_raw_terminal_controls(&error);
 
         let mut forced_resume = sample_record("resume-3");
         forced_resume.resume_of_dispatch_id = Some(source.id);

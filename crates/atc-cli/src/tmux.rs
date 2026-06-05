@@ -107,7 +107,11 @@ async fn inspect_session_with_binary(
 
     match clients {
         Ok(output) if output.status.success() && !output.stdout.is_empty() => TmuxInspect::Attached,
-        Ok(_) => TmuxInspect::Detached,
+        Ok(output) if output.status.success() => TmuxInspect::Detached,
+        Ok(output) => TmuxInspect::Unavailable(format!(
+            "tmux list-clients exited with status {}",
+            output.status
+        )),
         Err(inspect) => inspect,
     }
 }
@@ -309,6 +313,33 @@ mod tests {
         assert!(matches!(
             inspect,
             TmuxInspect::Unavailable(reason) if reason.contains("list-clients timed out")
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn inspect_session_reports_list_clients_failure_as_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let tmux = tempdir.path().join("tmux");
+        fs::write(
+            &tmux,
+            "#!/bin/sh\nif [ \"$1\" = \"has-session\" ]; then exit 0; fi\nexit 2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let inspect = inspect_session_with_binary(
+            tmux.to_str().unwrap(),
+            "session",
+            Duration::from_millis(250),
+        )
+        .await;
+
+        assert!(matches!(
+            inspect,
+            TmuxInspect::Unavailable(reason) if reason.contains("list-clients exited")
         ));
     }
 }

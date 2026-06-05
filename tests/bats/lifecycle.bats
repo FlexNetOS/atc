@@ -261,6 +261,18 @@ SQL
     assert_output --partial "disp-002"
 }
 
+@test "info: hostile missing arg escapes terminal controls" {
+    setup_lifecycle
+    local esc=$'\033'
+    local bidi=$'\u202e'
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info "missing-${esc}[2J${bidi}gpj"
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"missing-\\x1b[2J\\u{202e}gpj"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+}
+
 # ===========================================================================
 # Post-completion: artifact extraction, status transitions
 # ===========================================================================
