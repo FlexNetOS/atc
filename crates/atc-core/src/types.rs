@@ -191,11 +191,29 @@ pub enum TerminalLocatorSource {
     LegacySessionField,
 }
 
+impl TerminalLocatorSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AtcDispatch => "atc-dispatch",
+            Self::LegacySessionField => "legacy-session-field",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TerminalLocatorConfidence {
     Exact,
     Inferred,
+}
+
+impl TerminalLocatorConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Inferred => "inferred",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,7 +5,6 @@ use atc_core::types::{
     atc_session_uri, parse_atc_session_uri, DispatchRecord, OpenSessionPreview, Status,
     TerminalLocator, TerminalStatus, TerminalStatusState,
 };
-use chrono::Utc;
 use serde::Serialize;
 use std::io::IsTerminal;
 
@@ -71,7 +70,7 @@ pub fn effective_terminal_locator(record: &DispatchRecord) -> Option<TerminalLoc
             TerminalLocator::inferred_tmux(
                 record.session.clone(),
                 Some(record.worktree_path.clone()),
-                Utc::now(),
+                record.updated_at,
             )
         })
     })
@@ -146,12 +145,10 @@ async fn attach_result(result: &OpenSessionResult) -> Result<()> {
     }
 
     if !result.open_shell.enabled {
-        let reason = result
-            .open_shell
-            .reason
-            .as_deref()
-            .unwrap_or("open-session is unavailable");
-        bail!("{reason}");
+        bail!(
+            "{}",
+            open_session_unavailable_message(result.open_shell.reason.as_deref())
+        );
     }
 
     match result.terminal_locator.as_ref() {
@@ -223,10 +220,15 @@ fn status_state_label(state: TerminalStatusState) -> &'static str {
     }
 }
 
+fn open_session_unavailable_message(reason: Option<&str>) -> String {
+    display_text(reason.unwrap_or("open-session is unavailable"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use atc_core::types::{AgentCapabilities, TerminalStatus, TerminalStatusState};
+    use chrono::Utc;
 
     use crate::test_support::MockRegistry;
 
@@ -292,18 +294,30 @@ mod tests {
     }
 
     #[test]
+    fn open_session_unavailable_message_escapes_terminal_controls() {
+        let message = open_session_unavailable_message(Some("bad\x1b[2J\u{202e}reason"));
+
+        assert_no_raw_terminal_controls(&message);
+        assert!(message.contains("\\x1b"));
+        assert!(message.contains("\\u{202e}"));
+    }
+
+    #[test]
     fn effective_terminal_locator_requires_tmux_attach_capability_for_legacy_session() {
         let unsupported = record_with_session(AgentCapabilities::default());
         assert!(effective_terminal_locator(&unsupported).is_none());
 
-        let supported = record_with_session(AgentCapabilities {
+        let mut supported = record_with_session(AgentCapabilities {
             supports_tmux_attach: true,
             ..AgentCapabilities::default()
         });
-        assert!(matches!(
-            effective_terminal_locator(&supported),
-            Some(TerminalLocator::Tmux(_))
-        ));
+        supported.updated_at = chrono::DateTime::parse_from_rfc3339("2026-06-05T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let Some(TerminalLocator::Tmux(locator)) = effective_terminal_locator(&supported) else {
+            panic!("legacy tmux-capable records should expose an inferred locator");
+        };
+        assert_eq!(locator.detected_at, supported.updated_at);
     }
 
     #[tokio::test]

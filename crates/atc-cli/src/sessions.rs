@@ -438,8 +438,8 @@ fn row_from_record(
     let group_key = group_key(&record, work_units_by_id, group);
     let task_slug = task_slug_for_record(&record, work_units_by_id).map(str::to_string);
     let log_file = path_to_nonempty_string(&record.log_file);
-    let terminal_locator = record.terminal_locator.clone();
     let effective_locator = crate::open_session::effective_terminal_locator(&record);
+    let terminal_locator = effective_locator.clone();
     let terminal_status = initial_terminal_status(effective_locator.as_ref());
     let open_shell =
         crate::open_session::open_shell_preview(effective_locator.as_ref(), &terminal_status);
@@ -549,7 +549,7 @@ fn effective_locator_for_row(row: &SessionRow) -> Option<TerminalLocator> {
             TerminalLocator::inferred_tmux(
                 row.session.clone(),
                 Some(PathBuf::from(row.worktree_path.clone())),
-                Utc::now(),
+                row.updated_at,
             )
         })
     })
@@ -1873,7 +1873,8 @@ mod tests {
     use atc_core::registry::{Registry, StatusFilter};
     use atc_core::types::{
         claude_agent_capabilities, AgentCapabilities, AgentSessionId, Directive, HealthChecks,
-        Status, WorkUnitStatus, CLAUDE_AGENT_PROVIDER,
+        Status, TerminalLocatorConfidence, TerminalLocatorSource, WorkUnitStatus,
+        CLAUDE_AGENT_PROVIDER,
     };
     use chrono::TimeZone;
     use ratatui::backend::TestBackend;
@@ -1973,6 +1974,12 @@ mod tests {
         assert_eq!(row.terminal_status.state, TerminalStatusState::Unknown);
         assert!(!row.open_shell.enabled);
         assert!(!row.actions.attach.enabled);
+        let Some(TerminalLocator::Tmux(locator)) = row.terminal_locator.as_ref() else {
+            panic!("legacy session rows should expose an inferred tmux locator");
+        };
+        assert_eq!(locator.source, TerminalLocatorSource::LegacySessionField);
+        assert_eq!(locator.confidence, TerminalLocatorConfidence::Inferred);
+        assert_eq!(locator.detected_at, row.updated_at);
         assert!(matches!(
             effective_locator_for_row(row),
             Some(TerminalLocator::Tmux(_))

@@ -88,6 +88,32 @@ SQL
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
 }
 
+@test "sessions --json emits deterministic inferred locator for legacy tmux session fields" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = NULL,
+    updated_at = '2026-06-05T01:02:03+00:00'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.source == "legacy-session-field"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.confidence == "inferred"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].open_shell.backend == "tmux"' >/dev/null
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.data.terminal_locator.source == "legacy-session-field"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
+}
+
 @test "open-session --json resolves session URI without attaching" {
     require_jq
     setup_sessions_data

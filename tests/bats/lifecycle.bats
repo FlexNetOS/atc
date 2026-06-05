@@ -215,7 +215,8 @@ SET task_slug = 'tasks/evil-' || char(27) || '[2J' || char(7) || char(8238) || c
     branch = 'branch-' || char(27) || '[31m' || char(8232),
     worktree_path = '${TEST_TMPDIR//\'/\'\'}/worktree-' || char(7),
     session = 'session-' || char(8238) || char(8233),
-    agent_provider = 'claude-' || char(27) || '[0m'
+    agent_provider = 'claude-' || char(27) || '[0m',
+    terminal_locator_json = '{"kind":"tmux","version":1,"session":"locator-\u001b[2J\u202egpj","cwd":"${TEST_TMPDIR//\'/\'\'}/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 
@@ -244,6 +245,8 @@ SQL
     [[ "$STDOUT" == *"\\u{202e}"* ]]
     [[ "$STDOUT" == *"\\u{2028}"* ]]
     [[ "$STDOUT" == *"\\u{2029}"* ]]
+    [[ "$STDOUT" == *"terminal_session:"* ]]
+    [[ "$STDOUT" == *"locator-\\x1b[2J\\u{202e}gpj"* ]]
 }
 
 @test "info: resolves by task slug (latest dispatch)" {
