@@ -42,6 +42,10 @@ fn active_task_count_query_sql() -> String {
     format!("SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND {ACTIVE_DISPATCH_STATUS_SQL}")
 }
 
+fn display_metadata_error(error: impl std::fmt::Display) -> String {
+    display_text(&error.to_string())
+}
+
 /// Filter passed to `Registry::list`.
 #[derive(Debug, Default)]
 pub enum StatusFilter {
@@ -738,7 +742,8 @@ impl SqliteRegistry {
         {
             Ok(session_id) => session_id,
             Err(e) => {
-                warn!(dispatch_id = %display_id, error = %e, "ignoring invalid agent_session_id");
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid agent_session_id");
                 None
             }
         };
@@ -750,7 +755,8 @@ impl SqliteRegistry {
         {
             Ok(capabilities) => capabilities,
             Err(e) => {
-                warn!(dispatch_id = %display_id, error = %e, "ignoring invalid agent_capabilities_json");
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid agent_capabilities_json");
                 None
             }
         };
@@ -762,7 +768,8 @@ impl SqliteRegistry {
         {
             Ok(locator) => locator,
             Err(e) => {
-                warn!(dispatch_id = %display_id, error = %e, "ignoring invalid terminal_locator_json");
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid terminal_locator_json");
                 None
             }
         };
@@ -2075,14 +2082,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unsupported_optional_terminal_locator_backend_does_not_break_reads() {
+    async fn test_unsupported_optional_terminal_locator_kind_does_not_break_reads() {
         let registry = SqliteRegistry::in_memory().await.unwrap();
         let record = sample_record("unsupported-terminal-locator");
         registry.insert(&record).await.unwrap();
 
         sqlx::query("UPDATE dispatches SET terminal_locator_json = ?1 WHERE id = ?2")
             .bind(
-                r#"{"backend":"terminal-app","version":1,"window_id":"123","detected_at":"2026-06-05T00:00:00Z"}"#,
+                r#"{"kind":"terminal-app","version":1,"window_id":"123","detected_at":"2026-06-05T00:00:00Z"}"#,
             )
             .bind("unsupported-terminal-locator")
             .execute(&registry.pool)

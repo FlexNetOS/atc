@@ -125,7 +125,7 @@ load helpers/common
     local hostile_id="disp-${esc}[2J"
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "$hostile_id" "tasks/hostile-log" "running"
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json', terminal_locator_json = '{not-json' WHERE id = 'disp-${esc}[2J';"
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json', terminal_locator_json = '{\"kind\":\"tmux\u001b[2J\",\"version\":1,\"session\":\"bad\",\"detected_at\":\"2026-06-05T00:00:00Z\",\"source\":\"atc-dispatch\",\"confidence\":\"exact\"}' WHERE id = 'disp-${esc}[2J';"
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
     [ "$SPLIT_STATUS" -eq 0 ]
@@ -135,6 +135,7 @@ load helpers/common
     [[ "$STDERR" == *"ignoring invalid agent_session_id"* ]]
     [[ "$STDERR" == *"ignoring invalid agent_capabilities_json"* ]]
     [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+    [[ "$STDERR" == *"tmux\\x1b[2J"* ]]
     [[ "$STDERR" != *"$esc"* ]]
 }
 

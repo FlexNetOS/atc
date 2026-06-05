@@ -19,7 +19,7 @@ SET work_unit_id = 'wu-001',
     agent_session_id = '00000000-0000-4000-8000-000000000794',
     agent_transcript_cwd = '$TEST_TMPDIR/worktree',
     agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true,"supports_tmux_attach":true,"supports_tmux_redirect":true,"supports_stream_json_output":true,"supports_cost_and_turn_reporting":true}',
-    terminal_locator_json = '{"backend":"tmux","version":1,"session":"disp-001","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+    terminal_locator_json = '{"kind":"tmux","version":1,"session":"disp-001","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 }
@@ -60,7 +60,7 @@ SQL
     echo "$STDOUT" | jq -e '.rows[0].provider == "claude"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].provider_session_id == "00000000-0000-4000-8000-000000000794"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].pr_urls == ["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]' >/dev/null
-    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.backend == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].terminal_status.state | type == "string"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].open_shell.action == "open-session"' >/dev/null
@@ -82,7 +82,7 @@ SQL
     run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
     [ "$SPLIT_STATUS" -eq 0 ]
 
-    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.backend == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == .rows[0].open_shell.enabled' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
@@ -100,7 +100,7 @@ SQL
     echo "$STDOUT" | jq -e '.data.dispatch_id == "disp-001"' >/dev/null
     echo "$STDOUT" | jq -e '.data.uri == "atc://session/disp-001"' >/dev/null
     echo "$STDOUT" | jq -e '.data.session == "disp-001"' >/dev/null
-    echo "$STDOUT" | jq -e '.data.terminal_locator.backend == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_locator.kind == "tmux"' >/dev/null
     echo "$STDOUT" | jq -e '.data.terminal_status.state | type == "string"' >/dev/null
     echo "$STDOUT" | jq -e '.data.open_shell.action == "open-session"' >/dev/null
 }
@@ -137,7 +137,7 @@ SQL
     local missing_session="atc-missing-$BATS_TEST_NUMBER-$$"
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET terminal_locator_json = '{"backend":"tmux","version":1,"session":"$missing_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+SET terminal_locator_json = '{"kind":"tmux","version":1,"session":"$missing_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 
@@ -349,7 +349,7 @@ SQL
     local hostile_session="\$(touch $sentinel)"
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
-SET terminal_locator_json = '{"backend":"tmux","version":1,"session":"$hostile_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+SET terminal_locator_json = '{"kind":"tmux","version":1,"session":"$hostile_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 

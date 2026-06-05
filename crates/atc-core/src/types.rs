@@ -59,10 +59,74 @@ pub struct DispatchRecord {
 pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
 pub const ATC_SESSION_URI_PREFIX: &str = "atc://session/";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "backend", rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TerminalLocator {
     Tmux(TmuxTerminalLocator),
+}
+
+impl<'de> Deserialize<'de> for TerminalLocator {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TerminalLocatorDiscriminator {
+            #[serde(default)]
+            kind: Option<String>,
+            #[serde(default)]
+            backend: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct TmuxTerminalLocatorWire {
+            version: u32,
+            session: String,
+            #[serde(default)]
+            cwd: Option<PathBuf>,
+            detected_at: DateTime<Utc>,
+            source: TerminalLocatorSource,
+            confidence: TerminalLocatorConfidence,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let wire = TerminalLocatorDiscriminator::deserialize(&value).map_err(de::Error::custom)?;
+        let discriminator = match (wire.kind.as_deref(), wire.backend.as_deref()) {
+            (Some(kind), Some(backend)) if kind != backend => {
+                return Err(de::Error::custom(format!(
+                    "terminal locator kind/backend mismatch: {} != {}",
+                    crate::terminal_text::display_text(kind),
+                    crate::terminal_text::display_text(backend)
+                )));
+            }
+            (Some(kind), _) => kind,
+            (_, Some(backend)) => backend,
+            (None, None) => {
+                return Err(de::Error::custom(
+                    "terminal locator is missing kind or backend discriminator",
+                ));
+            }
+        };
+
+        match discriminator {
+            "tmux" => {
+                let tmux =
+                    TmuxTerminalLocatorWire::deserialize(value).map_err(de::Error::custom)?;
+                Ok(Self::Tmux(TmuxTerminalLocator {
+                    version: tmux.version,
+                    session: tmux.session,
+                    cwd: tmux.cwd,
+                    detected_at: tmux.detected_at,
+                    source: tmux.source,
+                    confidence: tmux.confidence,
+                }))
+            }
+            other => Err(de::Error::custom(format!(
+                "unsupported terminal locator kind: {}",
+                crate::terminal_text::display_text(other)
+            ))),
+        }
+    }
 }
 
 impl TerminalLocator {
@@ -976,7 +1040,7 @@ mod tests {
             detected_at,
         );
         let json = serde_json::to_value(&locator).unwrap();
-        assert_eq!(json["backend"], "tmux");
+        assert_eq!(json["kind"], "tmux");
         assert_eq!(json["version"], 1);
         assert_eq!(json["session"], "session@with spaces");
         assert_eq!(json["cwd"], "/tmp/worktree");
@@ -985,6 +1049,76 @@ mod tests {
 
         let round_trip: TerminalLocator = serde_json::from_value(json).unwrap();
         assert_eq!(round_trip, locator);
+    }
+
+    #[test]
+    fn test_terminal_locator_accepts_legacy_backend_discriminator() {
+        let legacy_json = serde_json::json!({
+            "backend": "tmux",
+            "version": 1,
+            "session": "legacy-session",
+            "cwd": "/tmp/worktree",
+            "detected_at": "2026-06-05T00:00:00Z",
+            "source": "atc-dispatch",
+            "confidence": "exact"
+        });
+
+        let locator: TerminalLocator = serde_json::from_value(legacy_json).unwrap();
+        let TerminalLocator::Tmux(tmux) = locator;
+        assert_eq!(tmux.session, "legacy-session");
+        assert_eq!(tmux.cwd, Some(PathBuf::from("/tmp/worktree")));
+    }
+
+    #[test]
+    fn test_terminal_locator_rejects_conflicting_discriminators() {
+        let json = serde_json::json!({
+            "kind": "tmux",
+            "backend": "terminal-app",
+            "version": 1,
+            "session": "session",
+            "detected_at": "2026-06-05T00:00:00Z",
+            "source": "atc-dispatch",
+            "confidence": "exact"
+        });
+
+        let error = serde_json::from_value::<TerminalLocator>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("kind/backend mismatch"));
+    }
+
+    #[test]
+    fn test_terminal_locator_reports_unsupported_kind_before_tmux_fields() {
+        let json = serde_json::json!({
+            "kind": "terminal-app",
+            "version": 1,
+            "window_id": "123",
+            "detected_at": "2026-06-05T00:00:00Z"
+        });
+
+        let error = serde_json::from_value::<TerminalLocator>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported terminal locator kind: terminal-app"));
+        assert!(!error.contains("missing field `session`"));
+    }
+
+    #[test]
+    fn test_terminal_locator_errors_escape_hostile_discriminators() {
+        let json = serde_json::json!({
+            "kind": "tmux\u{1b}[2J",
+            "version": 1,
+            "session": "bad",
+            "detected_at": "2026-06-05T00:00:00Z",
+            "source": "atc-dispatch",
+            "confidence": "exact"
+        });
+
+        let error = serde_json::from_value::<TerminalLocator>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tmux\\x1b[2J"));
+        assert!(!error.contains('\u{1b}'));
     }
 
     #[test]
