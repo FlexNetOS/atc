@@ -279,7 +279,13 @@ fn percent_decode_resource_id(value: &str) -> anyhow::Result<String> {
             ),
         }
     }
-    String::from_utf8(decoded).map_err(|e| anyhow::anyhow!("atc URI id is not UTF-8: {e}"))
+    let decoded =
+        String::from_utf8(decoded).map_err(|e| anyhow::anyhow!("atc URI id is not UTF-8: {e}"))?;
+    anyhow::ensure!(
+        !decoded.chars().any(is_disallowed_uri_id_char),
+        "atc URI id contains a disallowed control or format character"
+    );
+    Ok(decoded)
 }
 
 fn is_unreserved_uri_byte(byte: u8) -> bool {
@@ -304,6 +310,17 @@ fn from_hex(value: u8) -> anyhow::Result<u8> {
         b'A'..=b'F' => Ok(value - b'A' + 10),
         other => anyhow::bail!("invalid percent escape byte: {}", char::from(other)),
     }
+}
+
+fn is_disallowed_uri_id_char(value: char) -> bool {
+    value.is_control()
+        || matches!(
+            value,
+            '\u{061c}'
+                | '\u{200e}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -997,5 +1014,7 @@ mod tests {
         assert!(parse_atc_session_uri("atc://session/id/extra").is_err());
         assert!(parse_atc_session_uri("atc://session/id@example").is_err());
         assert!(parse_atc_session_uri("atc://session/%FF").is_err());
+        assert!(parse_atc_session_uri("atc://session/%1Bbad").is_err());
+        assert!(parse_atc_session_uri("atc://session/%E2%80%AEgpj.exe").is_err());
     }
 }

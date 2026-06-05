@@ -15,6 +15,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use futures::stream::{self, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -38,6 +39,9 @@ use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_RECENT_TERMINAL_HOURS: i64 = 24;
+const TERMINAL_STATUS_PROBE_CONCURRENCY: usize = 16;
+
+type TerminalStatusCacheKey = (&'static str, String);
 
 #[derive(Debug, Clone)]
 pub struct SessionsOpts {
@@ -473,12 +477,15 @@ fn row_from_record(
 }
 
 async fn refresh_terminal_fields(rows: &mut [SessionRow]) {
-    let mut terminal_status_cache: HashMap<(&'static str, String), TerminalStatus> = HashMap::new();
-    for row in rows {
-        let effective_locator = effective_locator_for_row(row);
+    let effective_locators = rows
+        .iter()
+        .map(effective_locator_for_row)
+        .collect::<Vec<_>>();
+    let terminal_statuses = terminal_statuses_for_locators(&effective_locators).await;
+
+    for (row, effective_locator) in rows.iter_mut().zip(effective_locators.iter()) {
         row.terminal_status =
-            terminal_status_with_cache(effective_locator.as_ref(), &mut terminal_status_cache)
-                .await;
+            status_for_effective_locator(effective_locator.as_ref(), &terminal_statuses);
         row.open_shell = crate::open_session::open_shell_preview(
             effective_locator.as_ref(),
             &row.terminal_status,
@@ -487,25 +494,41 @@ async fn refresh_terminal_fields(rows: &mut [SessionRow]) {
     }
 }
 
-async fn terminal_status_with_cache(
-    locator: Option<&TerminalLocator>,
-    cache: &mut HashMap<(&'static str, String), TerminalStatus>,
-) -> TerminalStatus {
-    let Some(locator) = locator else {
-        return crate::open_session::terminal_status_for_locator(None).await;
-    };
-
-    let key = terminal_status_cache_key(locator);
-    if let Some(status) = cache.get(&key) {
-        return status.clone();
+async fn terminal_statuses_for_locators(
+    locators: &[Option<TerminalLocator>],
+) -> HashMap<TerminalStatusCacheKey, TerminalStatus> {
+    let mut unique_locators: HashMap<TerminalStatusCacheKey, TerminalLocator> = HashMap::new();
+    for locator in locators.iter().flatten() {
+        unique_locators
+            .entry(terminal_status_cache_key(locator))
+            .or_insert_with(|| locator.clone());
     }
 
-    let status = crate::open_session::terminal_status_for_locator(Some(locator)).await;
-    cache.insert(key, status.clone());
-    status
+    stream::iter(unique_locators)
+        .map(|(key, locator)| async move {
+            let status = crate::open_session::terminal_status_for_locator(Some(&locator)).await;
+            (key, status)
+        })
+        .buffer_unordered(TERMINAL_STATUS_PROBE_CONCURRENCY)
+        .collect()
+        .await
 }
 
-fn terminal_status_cache_key(locator: &TerminalLocator) -> (&'static str, String) {
+fn status_for_effective_locator(
+    locator: Option<&TerminalLocator>,
+    terminal_statuses: &HashMap<TerminalStatusCacheKey, TerminalStatus>,
+) -> TerminalStatus {
+    let Some(locator) = locator else {
+        return TerminalStatus::unavailable("no terminal locator");
+    };
+
+    terminal_statuses
+        .get(&terminal_status_cache_key(locator))
+        .cloned()
+        .unwrap_or_else(|| TerminalStatus::unavailable("terminal status unavailable"))
+}
+
+fn terminal_status_cache_key(locator: &TerminalLocator) -> TerminalStatusCacheKey {
     match locator {
         TerminalLocator::Tmux(tmux) => ("tmux", tmux.session.clone()),
     }
@@ -1903,6 +1926,35 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 5, 0).unwrap(),
         }
+    }
+
+    #[test]
+    fn status_for_effective_locator_missing_probe_result_is_unavailable() {
+        let locator = TerminalLocator::inferred_tmux("session-1", None, Utc::now());
+        let empty_statuses = HashMap::new();
+
+        let missing_status = status_for_effective_locator(Some(&locator), &empty_statuses);
+        assert_eq!(missing_status.state, TerminalStatusState::Unavailable);
+        assert_eq!(
+            missing_status.reason.as_deref(),
+            Some("terminal status unavailable")
+        );
+
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            terminal_status_cache_key(&locator),
+            TerminalStatus::new(TerminalStatusState::Detached, Some("tmux")),
+        );
+
+        let cached_status = status_for_effective_locator(Some(&locator), &statuses);
+        assert_eq!(cached_status.state, TerminalStatusState::Detached);
+
+        let no_locator_status = status_for_effective_locator(None, &statuses);
+        assert_eq!(no_locator_status.state, TerminalStatusState::Unavailable);
+        assert_eq!(
+            no_locator_status.reason.as_deref(),
+            Some("no terminal locator")
+        );
     }
 
     #[test]

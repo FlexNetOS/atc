@@ -115,6 +115,10 @@ SQL
     run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001/extra --json
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"must be percent-encoded"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/%1Bdisp-001 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"disallowed control or format character"* ]]
 }
 
 @test "open-session --json disables stale or unavailable tmux locators" {
