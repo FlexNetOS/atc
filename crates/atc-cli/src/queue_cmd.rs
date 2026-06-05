@@ -5,6 +5,7 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::queue::{DispatchQueue, Priority, QueueInputType, QueueRow};
 use atc_core::registry::Registry;
+use atc_core::terminal_text::display_text;
 use atc_core::types::RunOpts;
 use tracing::{error, info, warn};
 
@@ -171,7 +172,11 @@ pub async fn dispatch_queue_item(
         .as_ref()
         .map(|p| {
             serde_json::from_str(p).unwrap_or_else(|e| {
-                warn!(queue_id = %row.id, error = %e, "failed to parse params JSON, using empty map");
+                warn!(
+                    queue_id = %display_text(&row.id),
+                    error = %display_text(&e.to_string()),
+                    "failed to parse params JSON, using empty map"
+                );
                 std::collections::HashMap::new()
             })
         })

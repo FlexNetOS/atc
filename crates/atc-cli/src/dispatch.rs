@@ -129,14 +129,17 @@ pub async fn extract_pr_head_branch(pr_url: &str) -> Result<String> {
         anyhow::bail!(
             "gh pr view --json headRefName failed (exit {:?}):\n{}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
     let branch = String::from_utf8(output.stdout)?;
     let branch = branch.trim().to_string();
     if branch.is_empty() {
-        anyhow::bail!("gh pr view returned empty headRefName for {}", pr_url);
+        anyhow::bail!(
+            "gh pr view returned empty headRefName for {}",
+            display_text(pr_url)
+        );
     }
     Ok(branch)
 }
@@ -160,7 +163,10 @@ fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<St
                 )
             })
         {
-            warn!(path = %rel.display(), "skipping unsafe meta project path");
+            warn!(
+                path = %display_text(&rel.display().to_string()),
+                "skipping unsafe meta project path"
+            );
             continue;
         }
 
@@ -324,7 +330,10 @@ pub async fn write_diag_file(log_dir: &Path, dispatch_id: &str, gh_token_present
     }
 
     if let Err(e) = tokio::fs::write(&diag_path, &content).await {
-        warn!(error = %e, "failed to write .diag file");
+        warn!(
+            error = %display_text(&e.to_string()),
+            "failed to write .diag file"
+        );
     }
 }
 
@@ -378,7 +387,11 @@ pub async fn discover_meta(cwd: &Path) -> Option<MetaDiscovery> {
 
     match repo {
         Some(repo) => {
-            debug!(repo = %repo, root = %workspace_root.display(), "meta workspace discovered");
+            debug!(
+                repo = %display_text(&repo),
+                root = %display_text(&workspace_root.display().to_string()),
+                "meta workspace discovered"
+            );
             Some(MetaDiscovery {
                 repo,
                 workspace_root,
@@ -401,18 +414,29 @@ async fn check_worktree_collision(
         if alive && !force {
             anyhow::bail!(
                 "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
-                worktree_path.display(),
-                r.id,
-                r.session,
+                display_text(&worktree_path.display().to_string()),
+                display_text(&r.id),
+                display_text(&r.session),
             );
         }
         if !alive {
-            info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
+            info!(
+                id = %display_text(&r.id),
+                "marking stale Running record as Failed (dead tmux session)"
+            );
             if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+                warn!(
+                    id = %display_text(&r.id),
+                    error = %display_text(&e.to_string()),
+                    "failed to mark stale record as Failed"
+                );
             }
         } else if force {
-            info!(id = %r.id, session = %r.session, "force-overriding live dispatch; killing session and marking as Failed");
+            info!(
+                id = %display_text(&r.id),
+                session = %display_text(&r.session),
+                "force-overriding live dispatch; killing session and marking as Failed"
+            );
             let _ = tokio::process::Command::new("tmux")
                 .args(["kill-session", "-t", &r.session])
                 .stdout(std::process::Stdio::null())
@@ -420,7 +444,11 @@ async fn check_worktree_collision(
                 .status()
                 .await;
             if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                warn!(id = %r.id, error = %e, "failed to mark force-overridden record as Failed");
+                warn!(
+                    id = %display_text(&r.id),
+                    error = %display_text(&e.to_string()),
+                    "failed to mark force-overridden record as Failed"
+                );
             }
         }
     }
@@ -672,7 +700,11 @@ pub fn find_worktree_for_branch(
 
 /// Auto-checkout a document to the main KB workspace.
 pub async fn auto_checkout_to_main(slug: &str, kb_root: &Path) -> Result<()> {
-    info!(slug, kb_root = %kb_root.display(), "auto-checking out document to main workspace");
+    info!(
+        slug = %display_text(slug),
+        kb_root = %display_text(&kb_root.display().to_string()),
+        "auto-checking out document to main workspace"
+    );
     let child = tokio::process::Command::new("git-kb")
         .args(["checkout", slug])
         .env("GITKB_ROOT", kb_root)
@@ -691,8 +723,8 @@ pub async fn auto_checkout_to_main(slug: &str, kb_root: &Path) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         warn!(
-            slug,
-            stderr = %stderr,
+            slug = %display_text(slug),
+            stderr = %display_text(stderr.trim()),
             "git-kb checkout failed for document (non-fatal)"
         );
     }
@@ -824,7 +856,7 @@ pub async fn ensure_worktree(
             anyhow::bail!(
                 "meta git worktree create failed (exit {:?}):\n{}",
                 output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
     } else {
@@ -855,7 +887,7 @@ pub async fn ensure_worktree(
             anyhow::bail!(
                 "git worktree add failed (exit {:?}):\n{}",
                 output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
     }

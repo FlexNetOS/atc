@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use atc_core::config::AtcConfig;
 use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
+use atc_core::terminal_text::display_text;
 use atc_core::types::{Directive, DispatchRecord, RunOpts};
 
 use crate::dispatch::{build_dispatch_id, derive_branch};
@@ -256,7 +257,7 @@ impl TaskResolver {
             .map_err(|_| {
                 anyhow::anyhow!(
                     "git-kb show --json {} timed out after {:?}",
-                    slug,
+                    display_text(slug),
                     KB_TIMEOUT
                 )
             })??;
@@ -264,8 +265,8 @@ impl TaskResolver {
         if !output.status.success() {
             anyhow::bail!(
                 "git kb show --json {} failed: {}",
-                slug,
-                String::from_utf8_lossy(&output.stderr)
+                display_text(slug),
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
 
@@ -340,7 +341,11 @@ impl TaskResolver {
         let output = tokio::time::timeout(KB_TIMEOUT, child.wait_with_output())
             .await
             .map_err(|_| {
-                anyhow::anyhow!("git-kb assign {} timed out after {:?}", slug, KB_TIMEOUT)
+                anyhow::anyhow!(
+                    "git-kb assign {} timed out after {:?}",
+                    display_text(slug),
+                    KB_TIMEOUT
+                )
             })??;
 
         if !output.status.success() {
@@ -348,12 +353,12 @@ impl TaskResolver {
             let msg = if stderr.contains("already assigned") || stderr.contains("already claimed") {
                 format!(
                     "task {} is already claimed; use `atc status` to check",
-                    slug
+                    display_text(slug)
                 )
             } else {
-                format!("failed to claim task {}", slug)
+                format!("failed to claim task {}", display_text(slug))
             };
-            anyhow::bail!("{}\n{}", msg, stderr.trim());
+            anyhow::bail!("{}\n{}", msg, display_text(stderr.trim()));
         }
 
         Ok(())
@@ -370,16 +375,27 @@ impl TaskResolver {
 
         match status {
             Ok(Some(s)) if !s.success() => {
-                warn!(slug, exit_code = ?s.code(), "git kb unassign exited with error");
+                warn!(
+                    slug = %display_text(slug),
+                    exit_code = ?s.code(),
+                    "git kb unassign exited with error"
+                );
             }
             Ok(None) => {
-                warn!(slug, "git kb unassign timed out (non-fatal)");
+                warn!(
+                    slug = %display_text(slug),
+                    "git kb unassign timed out (non-fatal)"
+                );
             }
             Err(e) => {
-                warn!(slug, error = %e, "git kb unassign failed");
+                warn!(
+                    slug = %display_text(slug),
+                    error = %display_text(&e.to_string()),
+                    "git kb unassign failed"
+                );
             }
             _ => {
-                debug!(slug, "unassign succeeded");
+                debug!(slug = %display_text(slug), "unassign succeeded");
             }
         }
     }
@@ -450,7 +466,11 @@ impl InputResolver for TaskResolver {
         let branch = derive_branch(slug);
         let resolved_directive =
             Self::resolve_directive(opts.directive.clone(), slug, &kb_root, Some(&branch)).await?;
-        info!(%slug, directive = %resolved_directive.as_str(), "directive resolved");
+        info!(
+            slug = %display_text(slug),
+            directive = %resolved_directive.as_str(),
+            "directive resolved"
+        );
 
         // 2. Build dispatch ID
         let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
@@ -524,15 +544,19 @@ impl InputResolver for TaskResolver {
                             .any(|r| r.id != record.id && !r.status.is_terminal());
                         if has_other_live {
                             debug!(
-                                slug,
-                                id = %record.id,
+                                slug = %display_text(slug),
+                                id = %display_text(&record.id),
                                 "skipping unassign: another live dispatch exists for this slug"
                             );
                             return;
                         }
                     }
                     Err(e) => {
-                        warn!(slug, error = %e, "failed to check for sibling dispatches; skipping unassign for safety");
+                        warn!(
+                            slug = %display_text(slug),
+                            error = %display_text(&e.to_string()),
+                            "failed to check for sibling dispatches; skipping unassign for safety"
+                        );
                         return;
                     }
                 }

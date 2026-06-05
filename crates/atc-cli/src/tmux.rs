@@ -122,7 +122,7 @@ async fn run_tmux_status<const N: usize>(
     action: &str,
     timeout_duration: Duration,
 ) -> Result<std::process::ExitStatus, TmuxInspect> {
-    let mut command = Command::new(tmux_bin);
+    let mut command = tmux_probe_command(tmux_bin);
     command
         .args(args)
         .stdout(Stdio::null())
@@ -142,7 +142,7 @@ async fn run_tmux_output<const N: usize>(
     action: &str,
     timeout_duration: Duration,
 ) -> Result<std::process::Output, TmuxInspect> {
-    let mut command = Command::new(tmux_bin);
+    let mut command = tmux_probe_command(tmux_bin);
     command
         .args(args)
         .stdout(Stdio::piped())
@@ -154,6 +154,15 @@ async fn run_tmux_output<const N: usize>(
         Ok(Err(e)) => Err(tmux_io_error(action, e)),
         Err(_) => Err(tmux_timeout(action, timeout_duration)),
     }
+}
+
+fn tmux_probe_command(tmux_bin: &str) -> Command {
+    let mut command = Command::new(tmux_bin);
+    let stable_cwd = std::env::temp_dir();
+    if stable_cwd.is_dir() {
+        command.current_dir(stable_cwd);
+    }
+    command
 }
 
 fn tmux_io_error(action: &str, error: io::Error) -> TmuxInspect {

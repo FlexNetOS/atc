@@ -199,7 +199,7 @@ async fn fetch_pr_metadata(pr_url: &str) -> anyhow::Result<Value> {
     if !output.status.success() {
         anyhow::bail!(
             "gh pr view failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
@@ -225,7 +225,7 @@ async fn fetch_review_comments(owner: &str, repo: &str, pr_number: u64) -> anyho
     if !output.status.success() {
         anyhow::bail!(
             "gh api comments failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
@@ -251,7 +251,7 @@ async fn fetch_reviews(owner: &str, repo: &str, pr_number: u64) -> anyhow::Resul
     if !output.status.success() {
         anyhow::bail!(
             "gh api reviews failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
@@ -328,7 +328,7 @@ async fn fetch_review_threads(owner: &str, repo: &str, pr_number: u64) -> anyhow
         if !output.status.success() {
             anyhow::bail!(
                 "gh api graphql failed: {}",
-                String::from_utf8_lossy(&output.stderr)
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
 

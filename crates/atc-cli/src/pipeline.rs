@@ -295,7 +295,11 @@ impl<'a> DispatchPipeline<'a> {
             // Auto-derive PR URL from comment URL
             if !effective_params.contains_key("pr") || effective_params["pr"].is_empty() {
                 if let Some(pr_url) = derive_pr_url_from_comment(&comment_url) {
-                    info!(comment_url = %comment_url, pr_url = %pr_url, "auto-derived PR URL from comment URL");
+                    info!(
+                        comment_url = %display_text(&comment_url),
+                        pr_url = %display_text(&pr_url),
+                        "auto-derived PR URL from comment URL"
+                    );
                     effective_params.insert("pr".to_string(), pr_url);
                 }
             }
@@ -527,7 +531,11 @@ impl<'a> DispatchPipeline<'a> {
                             }
                             Ok(None) => process_cwd.clone(),
                             Err(e) => {
-                                warn!(slug, error = %e, "ephemeral document workspace resolution failed, using CWD");
+                                warn!(
+                                    slug = %display_text(slug),
+                                    error = %display_text(&e.to_string()),
+                                    "ephemeral document workspace resolution failed, using CWD"
+                                );
                                 process_cwd.clone()
                             }
                         }
@@ -716,9 +724,9 @@ impl<'a> DispatchPipeline<'a> {
                                         doc_ws.workspace_branch.clone(),
                                     );
                                     info!(
-                                        slug,
-                                        cwd = %doc_ws.cwd.display(),
-                                        workspace_branch = %doc_ws.workspace_branch,
+                                        slug = %display_text(slug),
+                                        cwd = %display_text(&doc_ws.cwd.display().to_string()),
+                                        workspace_branch = %display_text(&doc_ws.workspace_branch),
                                         "document policy: resolved workspace"
                                     );
                                     (doc_ws.cwd, false, is_meta, base_repos.clone())
@@ -726,7 +734,11 @@ impl<'a> DispatchPipeline<'a> {
                                 Ok(None) => {
                                     // Auto-checkout to main, use workspace_root
                                     if let Err(e) = auto_checkout_to_main(slug, kb_root).await {
-                                        warn!(slug, error = %e, "auto-checkout failed (non-fatal)");
+                                        warn!(
+                                            slug = %display_text(slug),
+                                            error = %display_text(&e.to_string()),
+                                            "auto-checkout failed (non-fatal)"
+                                        );
                                     }
                                     resolved
                                         .env_overrides
@@ -821,13 +833,13 @@ impl<'a> DispatchPipeline<'a> {
                     resolver.on_cleanup(&tmp_record, self.config, None).await;
                     return Err(anyhow::anyhow!(
                         ".dispatch/env path escapes worktree: {}",
-                        env_canon.display()
+                        display_text(&env_canon.display().to_string())
                     ));
                 }
                 match atc_core::project_env::parse_env_file(&env_canon) {
                     Ok(penv) => {
                         tracing::debug!(
-                            path = %env_path.display(),
+                            path = %display_text(&env_path.display().to_string()),
                             count = penv.len(),
                             "loaded project env"
                         );
@@ -964,7 +976,10 @@ impl<'a> DispatchPipeline<'a> {
                     env.insert("GH_TOKEN".to_string(), token);
                 }
                 Err(e) => {
-                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+                    warn!(
+                        error = %display_text(&e.to_string()),
+                        "could not resolve GH_TOKEN (non-fatal)"
+                    );
                 }
             }
         }
@@ -1036,7 +1051,7 @@ impl<'a> DispatchPipeline<'a> {
                         .any(|c| matches!(c, std::path::Component::ParentDir))
                 {
                     warn!(
-                        path = %rel_path.display(),
+                        path = %display_text(&rel_path.display().to_string()),
                         "skipping provider output file with unsafe path"
                     );
                     continue;
@@ -1047,8 +1062,8 @@ impl<'a> DispatchPipeline<'a> {
                 }
                 if let Err(e) = tokio::fs::write(&abs_path, content).await {
                     warn!(
-                        path = %abs_path.display(),
-                        error = %e,
+                        path = %display_text(&abs_path.display().to_string()),
+                        error = %display_text(&e.to_string()),
                         "failed to write provider output file (non-fatal)"
                     );
                 }
@@ -1857,7 +1872,10 @@ async fn resolve_base_repos(
     if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
         let env_repo = env_repo.trim();
         if !env_repo.is_empty() {
-            info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
+            info!(
+                repo = %display_text(env_repo),
+                "using DISPATCH_WORKTREE_REPO env var"
+            );
             return vec![env_repo.to_string()];
         }
         // Blank env var behaves like "unset" so fallback chain continues.
@@ -1865,19 +1883,23 @@ async fn resolve_base_repos(
     if let Some(pr_url) = effective_pr_url {
         match resolve_pr_repo_path(pr_url, workspace_root).await {
             Ok(Some(r)) => {
-                info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
+                info!(
+                    pr_url = %display_text(pr_url),
+                    repo = %display_text(&r),
+                    "resolved PR repo to local path"
+                );
                 return vec![r];
             }
             Ok(None) => {
                 info!(
-                    pr_url = %pr_url,
+                    pr_url = %display_text(pr_url),
                     "could not resolve PR repo to local path, using config/discovery fallback"
                 );
             }
             Err(e) => {
                 warn!(
-                    pr_url = %pr_url,
-                    error = %e,
+                    pr_url = %display_text(pr_url),
+                    error = %display_text(&e.to_string()),
                     "PR repo resolution failed, using config/discovery fallback"
                 );
             }
@@ -2034,10 +2056,17 @@ async fn post_pr_comment(pr_url: &str, body: &str) {
         .await;
     match result {
         Ok(s) if !s.success() => {
-            warn!(pr_url, "gh pr comment failed (non-fatal)");
+            warn!(
+                pr_url = %display_text(pr_url),
+                "gh pr comment failed (non-fatal)"
+            );
         }
         Err(e) => {
-            warn!(pr_url, error = %e, "gh pr comment failed (non-fatal)");
+            warn!(
+                pr_url = %display_text(pr_url),
+                error = %display_text(&e.to_string()),
+                "gh pr comment failed (non-fatal)"
+            );
         }
         _ => {}
     }
@@ -2119,7 +2148,10 @@ async fn resolve_dispatch_work_unit(
     let work_unit_id = match &work_unit {
         Ok(wu) => Some(wu.id.clone()),
         Err(e) => {
-            warn!(error = %e, "work unit resolution failed (non-fatal)");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "work unit resolution failed (non-fatal)"
+            );
             None
         }
     };
@@ -2128,7 +2160,10 @@ async fn resolve_dispatch_work_unit(
         for repo in repos {
             if !wu.repos.contains(repo) {
                 if let Err(e) = registry.add_work_unit_repo(&wu.id, repo).await {
-                    warn!(error = %e, "failed to add repo to work unit (non-fatal)");
+                    warn!(
+                        error = %display_text(&e.to_string()),
+                        "failed to add repo to work unit (non-fatal)"
+                    );
                 }
             }
         }
@@ -2168,20 +2203,21 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
         Ok(mut child) => match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) if !status.success() => {
                 warn!(
-                    worktree = %worktree_path.display(),
+                    worktree = %display_text(&worktree_path.display().to_string()),
                     "rollback worktree remove exited with {status}"
                 );
             }
             Ok(Err(e)) => {
                 warn!(
-                    worktree = %worktree_path.display(),
-                    "rollback worktree remove failed: {e}"
+                    worktree = %display_text(&worktree_path.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "rollback worktree remove failed"
                 );
             }
             Err(_) => {
                 let _ = child.kill().await;
                 warn!(
-                    worktree = %worktree_path.display(),
+                    worktree = %display_text(&worktree_path.display().to_string()),
                     "rollback worktree remove timed out"
                 );
             }
@@ -2189,8 +2225,9 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
         },
         Err(e) => {
             warn!(
-                worktree = %worktree_path.display(),
-                "failed to spawn worktree remove: {e}"
+                worktree = %display_text(&worktree_path.display().to_string()),
+                error = %display_text(&e.to_string()),
+                "failed to spawn worktree remove"
             );
         }
     }

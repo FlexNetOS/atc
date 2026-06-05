@@ -62,7 +62,10 @@ pub async fn run_daemon(
         .daemon
         .resolved_pid_file(config.config_dir.as_deref());
     acquire_pid_file(&pid_file)?;
-    info!(pid_file = %pid_file.display(), "daemon starting");
+    info!(
+        pid_file = %display_text(&pid_file.display().to_string()),
+        "daemon starting"
+    );
 
     // Recover stale queue items
     let queues = if opts.queues.is_empty() {
@@ -132,7 +135,10 @@ pub async fn run_daemon(
         {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "failed to read active dispatch count, skipping drain cycle");
+                warn!(
+                    error = %display_text(&e.to_string()),
+                    "failed to read active dispatch count, skipping drain cycle"
+                );
                 tokio::select! {
                     _ = tokio::time::sleep(drain_interval) => {}
                     _ = state.shutdown_notify.notified() => {}
@@ -152,7 +158,11 @@ pub async fn run_daemon(
                 let items = match queue.queue_peek(queue_name, remaining_slots).await {
                     Ok(items) => items,
                     Err(e) => {
-                        warn!(queue = %queue_name, error = %e, "failed to peek queue");
+                        warn!(
+                            queue = %display_text(queue_name),
+                            error = %display_text(&e.to_string()),
+                            "failed to peek queue"
+                        );
                         continue;
                     }
                 };
@@ -170,7 +180,10 @@ pub async fn run_daemon(
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            warn!(error = %e, "failed to recheck active count, breaking drain loop");
+                            warn!(
+                                error = %display_text(&e.to_string()),
+                                "failed to recheck active count, breaking drain loop"
+                            );
                             break;
                         }
                     };
@@ -182,7 +195,11 @@ pub async fn run_daemon(
                         Ok(Some(token)) => token,
                         Ok(None) => continue,
                         Err(e) => {
-                            warn!(queue_id = %item.id, error = %e, "failed to claim queue item");
+                            warn!(
+                                queue_id = %display_text(&item.id),
+                                error = %display_text(&e.to_string()),
+                                "failed to claim queue item"
+                            );
                             break;
                         }
                     };
@@ -205,8 +222,8 @@ pub async fn run_daemon(
                                 .await
                             {
                                 warn!(
-                                    queue_id = %item.id,
-                                    error = %e,
+                                    queue_id = %display_text(&item.id),
+                                    error = %display_text(&e.to_string()),
                                     "failed to persist dispatch_id for crash recovery"
                                 );
                             }
@@ -215,15 +232,15 @@ pub async fn run_daemon(
                                 .await
                             {
                                 error!(
-                                    queue_id = %item.id,
-                                    error = %e,
+                                    queue_id = %display_text(&item.id),
+                                    error = %display_text(&e.to_string()),
                                     "failed to mark dispatched"
                                 );
                             }
                             info!(
-                                queue_id = %item.id,
-                                dispatch_id = %dispatch_id,
-                                input = %label,
+                                queue_id = %display_text(&item.id),
+                                dispatch_id = %display_text(&dispatch_id),
+                                input = %display_text(&label),
                                 "dispatched from daemon"
                             );
                         }
@@ -234,15 +251,15 @@ pub async fn run_daemon(
                                 .await
                             {
                                 warn!(
-                                    queue_id = %item.id,
-                                    error = %mark_err,
+                                    queue_id = %display_text(&item.id),
+                                    error = %display_text(&mark_err.to_string()),
                                     "failed to mark queue item failed"
                                 );
                             }
                             warn!(
-                                queue_id = %item.id,
-                                input = %label,
-                                error = %err_msg,
+                                queue_id = %display_text(&item.id),
+                                input = %display_text(&label),
+                                error = %display_text(&err_msg),
                                 "daemon dispatch failed"
                             );
                         }
@@ -358,7 +375,7 @@ async fn start_sources(
 
         let shutdown_notify = shutdown_notify.clone();
         let handle = tokio::spawn(async move {
-            info!(source = %name, "source started");
+            info!(source = %display_text(&name), "source started");
             let mut last_poll_start: Option<std::time::Instant> = None;
             while !shutdown.load(Ordering::SeqCst) {
                 // For events sources, compute --since from actual elapsed time
@@ -379,7 +396,11 @@ async fn start_sources(
                 )
                 .await
                 {
-                    warn!(source = %name, error = %e, "source iteration failed");
+                    warn!(
+                        source = %display_text(&name),
+                        error = %display_text(&e.to_string()),
+                        "source iteration failed"
+                    );
                 }
                 if shutdown.load(Ordering::SeqCst) {
                     break;
@@ -390,7 +411,7 @@ async fn start_sources(
                     _ = shutdown_notify.notified() => {}
                 }
             }
-            info!(source = %name, "source stopped");
+            info!(source = %display_text(&name), "source stopped");
         });
         handles.push(handle);
     }
@@ -423,7 +444,7 @@ async fn run_source_iteration(
             if !output.status.success() {
                 anyhow::bail!(
                     "git kb ready failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    display_text(String::from_utf8_lossy(&output.stderr).trim())
                 );
             }
 
@@ -440,7 +461,11 @@ async fn run_source_iteration(
                     enqueued_by: Some(format!("source:{}", name)),
                 };
                 if let Err(e) = queue.enqueue(item).await {
-                    warn!(source = %name, error = %e, "failed to enqueue item");
+                    warn!(
+                        source = %display_text(name),
+                        error = %display_text(&e.to_string()),
+                        "failed to enqueue item"
+                    );
                 }
             }
         }
@@ -492,7 +517,7 @@ async fn run_source_iteration(
             if !output.status.success() {
                 anyhow::bail!(
                     "board source failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    display_text(String::from_utf8_lossy(&output.stderr).trim())
                 );
             }
 
@@ -509,7 +534,11 @@ async fn run_source_iteration(
                     enqueued_by: Some(format!("source:{}", name)),
                 };
                 if let Err(e) = queue.enqueue(item).await {
-                    warn!(source = %name, error = %e, "failed to enqueue item");
+                    warn!(
+                        source = %display_text(name),
+                        error = %display_text(&e.to_string()),
+                        "failed to enqueue item"
+                    );
                 }
             }
         }
@@ -532,7 +561,7 @@ async fn run_source_iteration(
             if !output.status.success() {
                 anyhow::bail!(
                     "events source failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    display_text(String::from_utf8_lossy(&output.stderr).trim())
                 );
             }
 
@@ -554,7 +583,11 @@ async fn run_source_iteration(
                                 enqueued_by: Some(format!("source:{}", name)),
                             };
                             if let Err(e) = queue.enqueue(item).await {
-                                warn!(source = %name, error = %e, "failed to enqueue item");
+                                warn!(
+                                    source = %display_text(name),
+                                    error = %display_text(&e.to_string()),
+                                    "failed to enqueue item"
+                                );
                             }
                         }
                     }
@@ -576,7 +609,7 @@ async fn run_source_iteration(
             if !output.status.success() {
                 anyhow::bail!(
                     "script source failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    display_text(String::from_utf8_lossy(&output.stderr).trim())
                 );
             }
 
@@ -605,7 +638,11 @@ async fn run_source_iteration(
                     enqueued_by: Some(format!("source:{}", name)),
                 };
                 if let Err(e) = queue.enqueue(item).await {
-                    warn!(source = %name, error = %e, "failed to enqueue item");
+                    warn!(
+                        source = %display_text(name),
+                        error = %display_text(&e.to_string()),
+                        "failed to enqueue item"
+                    );
                 }
             }
         }

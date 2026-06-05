@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::terminal_text::display_text;
+
 use super::{ContextOutput, ContextProvider, DispatchContext};
 
 /// Timeout for individual git-kb subprocess calls.
@@ -36,7 +38,10 @@ impl ContextProvider for KbContextProvider {
             }
         };
 
-        info!(task_slug = %task_slug, "kb-context: fetching related docs");
+        info!(
+            task_slug = %display_text(&task_slug),
+            "kb-context: fetching related docs"
+        );
 
         let mut output = ContextOutput::default();
         let kb_root = &ctx.kb_root;
@@ -83,9 +88,9 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf, branch: &str)
 
     if !output.status.success() {
         warn!(
-            task_slug = %task_slug,
+            task_slug = %display_text(task_slug),
             "git kb graph failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
         return None;
     }
@@ -131,7 +136,7 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf, branch: &str)
         {
             Ok(result) => result.ok(),
             Err(_) => {
-                warn!(slug = %slug, "git-kb show timed out");
+                warn!(slug = %display_text(slug), "git-kb show timed out");
                 None
             }
         };

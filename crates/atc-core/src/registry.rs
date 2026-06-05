@@ -924,7 +924,10 @@ impl Registry for SqliteRegistry {
             if result.is_ok() {
                 return Err(e.into());
             }
-            warn!(error = %e, "failed to roll back resume reservation transaction");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "failed to roll back resume reservation transaction"
+            );
         }
 
         result

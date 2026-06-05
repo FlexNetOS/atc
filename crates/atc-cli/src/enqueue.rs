@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use atc_core::queue::{DispatchQueue, EnqueueItem, EnqueueResult, Priority, QueueInputType};
+use atc_core::terminal_text::display_text;
 use std::io::BufRead;
 
 /// Timeout for git subprocess calls.
@@ -243,7 +244,7 @@ async fn kb_ready_slugs(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git kb ready failed: {}", stderr.trim());
+        anyhow::bail!("git kb ready failed: {}", display_text(stderr.trim()));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -278,7 +279,7 @@ async fn board_query_slugs(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git kb list failed: {}", stderr.trim());
+        anyhow::bail!("git kb list failed: {}", display_text(stderr.trim()));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -302,7 +303,7 @@ async fn view_query_slugs(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git kb list --view failed: {}", stderr.trim());
+        anyhow::bail!("git kb list --view failed: {}", display_text(stderr.trim()));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

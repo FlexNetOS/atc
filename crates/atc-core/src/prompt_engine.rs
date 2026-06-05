@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{expand_tilde, AtcConfig};
+use crate::terminal_text::display_text;
 use crate::types::{Directive, WorktreePolicy};
 
 /// Result of rendering a template: the rendered body and a list of directive/component names.
@@ -460,7 +461,11 @@ async fn register_partials_from_dir(
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
-            tracing::warn!(dir = %dir.display(), error = %e, "cannot read partials directory");
+            tracing::warn!(
+                dir = %display_text(&dir.display().to_string()),
+                error = %display_text(&e.to_string()),
+                "cannot read partials directory"
+            );
             return;
         }
     };
@@ -470,7 +475,11 @@ async fn register_partials_from_dir(
             Ok(Some(e)) => e,
             Ok(None) => break,
             Err(e) => {
-                tracing::warn!(dir = %dir.display(), error = %e, "error iterating partials directory");
+                tracing::warn!(
+                    dir = %display_text(&dir.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "error iterating partials directory"
+                );
                 continue;
             }
         };
@@ -485,7 +494,11 @@ async fn register_partials_from_dir(
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to read partial");
+                tracing::warn!(
+                    path = %display_text(&path.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "failed to read partial"
+                );
                 continue;
             }
         };

@@ -584,7 +584,7 @@ pub async fn run(
                     } else {
                         println!("Available templates:");
                         for name in &templates {
-                            println!("  {name}");
+                            println!("  {}", display_text(name));
                         }
                     }
                     return Ok(());
@@ -927,7 +927,7 @@ pub async fn run(
                 } else {
                     println!("Available templates:");
                     for name in &templates {
-                        println!("  {name}");
+                        println!("  {}", display_text(name));
                     }
                 }
                 return Ok(());

@@ -7,6 +7,7 @@
 use crate::config::AtcConfig;
 use crate::registry::Registry;
 use crate::stream_json::{self, Artifacts};
+use crate::terminal_text::display_text;
 use crate::types::{Directive, Status};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -102,7 +103,11 @@ pub async fn run_post_completion(
                 .update_cost(&input.dispatch_id, cost, turns, duration)
                 .await
             {
-                warn!(id = %input.dispatch_id, error = %e, "failed to update cost");
+                warn!(
+                    id = %display_text(&input.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "failed to update cost"
+                );
             }
         }
     }
@@ -137,11 +142,12 @@ pub async fn run_post_completion(
     let threshold = config.watch.cost_threshold;
     if let Some(cost) = artifacts.result.as_ref().and_then(|r| r.total_cost_usd) {
         if cost > threshold {
+            let id = display_text(&input.dispatch_id);
             warn!(
-                id = %input.dispatch_id,
+                id = %id,
                 cost_usd = cost,
                 "⚠ Dispatch {} cost ${:.2} (exceeds ${:.2} threshold)",
-                input.dispatch_id,
+                id,
                 cost,
                 threshold
             );
@@ -155,7 +161,11 @@ pub async fn run_post_completion(
     ) {
         if let Some(log_dir) = log_file.parent() {
             if let Err(e) = save_review_artifact(log_dir, &input.dispatch_id, &artifacts) {
-                warn!(id = %input.dispatch_id, error = %e, "failed to save review artifact");
+                warn!(
+                    id = %display_text(&input.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "failed to save review artifact"
+                );
             }
         }
     }
@@ -428,7 +438,11 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
         {
             Ok(c) => c,
             Err(e) => {
-                warn!(path = %path_str, error = %e, "failed to spawn git worktree remove");
+                warn!(
+                    path = %display_text(&path_str),
+                    error = %display_text(&e.to_string()),
+                    "failed to spawn git worktree remove"
+                );
                 return;
             }
         };
@@ -436,20 +450,30 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         match tokio::time::timeout(TIMEOUT, child.wait()).await {
             Ok(Ok(exit_status)) if exit_status.success() => {
-                info!(path = %path_str, "removed worktree");
+                info!(path = %display_text(&path_str), "removed worktree");
                 // Remove empty parent dir
                 if let Some(parent) = canonical.parent() {
                     let _ = std::fs::remove_dir(parent); // only succeeds if empty
                 }
             }
             Ok(Ok(_)) => {
-                warn!(path = %path_str, "git worktree remove failed (non-zero exit)");
+                warn!(
+                    path = %display_text(&path_str),
+                    "git worktree remove failed (non-zero exit)"
+                );
             }
             Ok(Err(e)) => {
-                warn!(path = %path_str, error = %e, "git worktree remove I/O error");
+                warn!(
+                    path = %display_text(&path_str),
+                    error = %display_text(&e.to_string()),
+                    "git worktree remove I/O error"
+                );
             }
             Err(_) => {
-                warn!(path = %path_str, "git worktree remove timed out after 30s, killing");
+                warn!(
+                    path = %display_text(&path_str),
+                    "git worktree remove timed out after 30s, killing"
+                );
                 let _ = child.kill().await;
             }
         }

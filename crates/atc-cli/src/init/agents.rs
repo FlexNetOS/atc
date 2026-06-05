@@ -280,12 +280,15 @@ pub fn run_init_all_agents(base: &Path, opts: AgentOpts) -> Result<()> {
     println!("\n--- atc init --all-agents summary ---");
     println!("  wired:   {wired}");
     if !skipped.is_empty() {
-        println!("  skipped: {} (parent dir missing)", skipped.join(", "));
+        println!(
+            "  skipped: {} (parent dir missing)",
+            display_text(&skipped.join(", "))
+        );
     }
     if !failed.is_empty() {
         println!("  failed:");
         for (name, msg) in &failed {
-            println!("    {name}: {msg}");
+            println!("    {}: {}", display_text(name), display_text(msg));
         }
         bail!("{} agent(s) failed to wire", failed.len());
     }

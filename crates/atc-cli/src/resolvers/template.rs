@@ -8,6 +8,7 @@ use tracing::{debug, info};
 use atc_core::config::AtcConfig;
 use atc_core::prompt_engine;
 use atc_core::resolver::{InputResolver, ResolvedInput};
+use atc_core::terminal_text::display_text;
 use atc_core::types::{Directive, DispatchRecord, RunOpts, WorktreePolicy};
 
 use crate::dispatch::build_dispatch_id;
@@ -151,7 +152,10 @@ impl InputResolver for TemplateResolver {
         let template_name = format!("{input}.md");
         let template_path = Self::templates_dir(config).join(&template_name);
 
-        debug!(template = %template_path.display(), "rendering template");
+        debug!(
+            template = %display_text(&template_path.display().to_string()),
+            "rendering template"
+        );
 
         // Build params from CLI --param key=value pairs
         let mut params = BTreeMap::new();
@@ -192,7 +196,11 @@ impl InputResolver for TemplateResolver {
         if let Some(ref required) = quick_fm.required_params {
             for param in required {
                 if params.get(param.as_str()).is_none_or(|v| v.is_empty()) {
-                    anyhow::bail!("template '{}' requires --param {}=<value>", input, param);
+                    anyhow::bail!(
+                        "template '{}' requires --param {}=<value>",
+                        display_text(input),
+                        display_text(param)
+                    );
                 }
             }
         }
@@ -237,7 +245,7 @@ impl InputResolver for TemplateResolver {
         };
 
         info!(
-            template = input,
+            template = %display_text(input),
             directive = %resolved_directive.as_str(),
             worktree = worktree_policy.as_str(),
             "template resolved"
@@ -263,7 +271,10 @@ impl InputResolver for TemplateResolver {
                 let branch = get_current_branch_any().await.context(
                     "worktree: current requires running inside a git checkout on a named branch",
                 )?;
-                info!(branch = %branch, "using current git branch for current-policy dispatch");
+                info!(
+                    branch = %display_text(&branch),
+                    "using current git branch for current-policy dispatch"
+                );
                 branch
             }
             WorktreePolicy::Document => {
@@ -293,11 +304,19 @@ impl InputResolver for TemplateResolver {
                 if let Some(pr_url) = pr_for_branch {
                     match crate::dispatch::extract_pr_head_branch(pr_url).await {
                         Ok(b) => {
-                            info!(pr_url, branch = %b, "using PR head branch");
+                            info!(
+                                pr_url = %display_text(pr_url),
+                                branch = %display_text(&b),
+                                "using PR head branch"
+                            );
                             b
                         }
                         Err(e) => {
-                            debug!(pr_url, error = %e, "failed to extract PR head branch, falling back to synthetic");
+                            debug!(
+                                pr_url = %display_text(pr_url),
+                                error = %display_text(&e.to_string()),
+                                "failed to extract PR head branch, falling back to synthetic"
+                            );
                             let ts = chrono::Utc::now().timestamp_millis();
                             let seq = TPL_SEQ.fetch_add(1, Ordering::Relaxed);
                             let pid = std::process::id();
@@ -310,7 +329,10 @@ impl InputResolver for TemplateResolver {
                     let current = get_current_branch().await;
                     match current {
                         Some(b) => {
-                            info!(branch = %b, "using current git branch for template dispatch");
+                            info!(
+                                branch = %display_text(&b),
+                                "using current git branch for template dispatch"
+                            );
                             b
                         }
                         None => {

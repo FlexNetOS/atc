@@ -345,7 +345,12 @@ pub async fn run_health(
                     // A non-terminal dispatch is still attached — skip transition
                 }
                 Err(e) => {
-                    warn!(work_unit = %wu.id, error = %e, "failed to transition work unit to {}", new_status.as_str());
+                    warn!(
+                        work_unit = %display_text(&wu.id),
+                        error = %display_text(&e.to_string()),
+                        "failed to transition work unit to {}",
+                        new_status.as_str()
+                    );
                 }
             }
         }
@@ -356,7 +361,10 @@ pub async fn run_health(
         let candidates = collect_auto_review_candidates(&results);
         for record in &candidates {
             let Some(task_slug) = record.task_slug.clone() else {
-                warn!(id = %record.id, "skipping auto review-fix: missing task_slug");
+                warn!(
+                    id = %display_text(&record.id),
+                    "skipping auto review-fix: missing task_slug"
+                );
                 continue;
             };
             let pr_url = record.pr_urls.first().cloned();
@@ -406,7 +414,11 @@ pub async fn run_health(
                     );
                 }
                 Err(e) => {
-                    warn!(task = %task_slug, error = %e, "auto review-fix dispatch failed");
+                    warn!(
+                        task = %display_text(&task_slug),
+                        error = %display_text(&e.to_string()),
+                        "auto review-fix dispatch failed"
+                    );
                     emit(
                         json,
                         &format!(
