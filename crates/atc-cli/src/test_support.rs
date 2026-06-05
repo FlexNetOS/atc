@@ -198,6 +198,20 @@ impl Registry for MockRegistry {
             record.dispatched_at = new_dispatched_at;
             record.updated_at = new_dispatched_at;
             record.status = Status::Running;
+            record.checks = HealthChecks::default();
+            record.pr_urls.clear();
+            record.cost_usd = None;
+            record.num_turns = None;
+            record.duration_ms = None;
+            record.terminal_locator = if new_session.trim().is_empty() {
+                None
+            } else {
+                Some(TerminalLocator::atc_tmux(
+                    new_session,
+                    Some(record.worktree_path.clone()),
+                    new_dispatched_at,
+                ))
+            };
         })
     }
 

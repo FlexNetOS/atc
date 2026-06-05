@@ -120,6 +120,10 @@ SQL
     [ "$SPLIT_STATUS" -ne 0 ]
     [[ "$STDERR" == *"disallowed control or format character"* ]]
 
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/%E2%80%8Bdisp-001 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"disallowed control or format character"* ]]
+
     local esc=$'\033'
     run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "atc://session/disp-001${esc}[2J" --json
     [ "$SPLIT_STATUS" -ne 0 ]

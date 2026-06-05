@@ -1,6 +1,7 @@
 use crate::queue::{
     DispatchQueue, EnqueueItem, EnqueueResult, QueueInputType, QueueItemStatus, QueueRow,
 };
+use crate::terminal_text::display_text;
 use crate::types::{
     claude_agent_capabilities, AgentCapabilities, AgentSessionId, DispatchRecord, HealthChecks,
     Status, TerminalLocator, CLAUDE_AGENT_PROVIDER,
@@ -728,6 +729,7 @@ impl SqliteRegistry {
         let worktree_str: String = row.get("worktree_path");
         let log_file_str: String = row.get("log_file");
         let id: String = row.get("id");
+        let display_id = display_text(&id);
         let agent_session_id = match row
             .get::<Option<String>, _>("agent_session_id")
             .as_deref()
@@ -736,7 +738,7 @@ impl SqliteRegistry {
         {
             Ok(session_id) => session_id,
             Err(e) => {
-                warn!(dispatch_id = %id, error = %e, "ignoring invalid agent_session_id");
+                warn!(dispatch_id = %display_id, error = %e, "ignoring invalid agent_session_id");
                 None
             }
         };
@@ -748,7 +750,7 @@ impl SqliteRegistry {
         {
             Ok(capabilities) => capabilities,
             Err(e) => {
-                warn!(dispatch_id = %id, error = %e, "ignoring invalid agent_capabilities_json");
+                warn!(dispatch_id = %display_id, error = %e, "ignoring invalid agent_capabilities_json");
                 None
             }
         };
@@ -760,7 +762,7 @@ impl SqliteRegistry {
         {
             Ok(locator) => locator,
             Err(e) => {
-                warn!(dispatch_id = %id, error = %e, "ignoring invalid terminal_locator_json");
+                warn!(dispatch_id = %display_id, error = %e, "ignoring invalid terminal_locator_json");
                 None
             }
         };
@@ -3195,6 +3197,13 @@ mod tests {
         assert_eq!(fetched.retries, 1);
         assert_eq!(fetched.status, Status::Running);
         assert_eq!(fetched.session, "new-session");
+        let locator = fetched
+            .terminal_locator
+            .as_ref()
+            .expect("retry should persist a terminal locator");
+        let TerminalLocator::Tmux(tmux) = locator;
+        assert_eq!(tmux.session, "new-session");
+        assert_eq!(tmux.cwd.as_deref(), Some(Path::new("/tmp/test-worktree")));
         assert!(!fetched.checks.agent_exited_clean);
         assert!(fetched.pr_urls.is_empty());
         assert_eq!(fetched.cost_usd, None);

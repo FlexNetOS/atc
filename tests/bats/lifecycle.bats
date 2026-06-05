@@ -118,6 +118,26 @@ load helpers/common
     echo "$STDERR" | grep -F "ignoring invalid terminal_locator_json"
 }
 
+@test "registry malformed metadata warnings escape hostile dispatch ids" {
+    require_jq
+    setup_lifecycle
+    local esc=$'\033'
+    local hostile_id="disp-${esc}[2J"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "$hostile_id" "tasks/hostile-log" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json', terminal_locator_json = '{not-json' WHERE id = 'disp-${esc}[2J';"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.schema_version == 1'
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDERR" == *"dispatch_id=disp-\\x1b[2J"* ]]
+    [[ "$STDERR" == *"ignoring invalid agent_session_id"* ]]
+    [[ "$STDERR" == *"ignoring invalid agent_capabilities_json"* ]]
+    [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+}
+
 @test "status/info --json escape Unicode format controls in encoded bytes while preserving decoded values" {
     require_jq
     setup_lifecycle

@@ -311,14 +311,7 @@ fn from_hex(value: u8) -> anyhow::Result<u8> {
 }
 
 fn is_disallowed_uri_id_char(value: char) -> bool {
-    value.is_control()
-        || matches!(
-            value,
-            '\u{061c}'
-                | '\u{200e}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
+    value.is_control() || crate::terminal_text::is_dangerous_format_control(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1040,6 +1033,10 @@ mod tests {
         assert!(parse_atc_session_uri("atc://session/%FF").is_err());
         assert!(parse_atc_session_uri("atc://session/%1Bbad").is_err());
         assert!(parse_atc_session_uri("atc://session/%E2%80%AEgpj.exe").is_err());
+        assert!(parse_atc_session_uri("atc://session/%E2%80%8Bhidden").is_err());
+        assert!(parse_atc_session_uri("atc://session/%E2%81%A0hidden").is_err());
+        assert!(parse_atc_session_uri("atc://session/%EF%BB%BFhidden").is_err());
+        assert!(parse_atc_session_uri("atc://session/%E2%80%A8hidden").is_err());
     }
 
     #[test]

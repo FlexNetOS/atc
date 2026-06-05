@@ -1805,7 +1805,7 @@ fn detail_text(row: &SessionRow) -> String {
                 format!(
                     "{}({})",
                     name,
-                    state.reason.as_deref().unwrap_or("disabled")
+                    display_text(state.reason.as_deref().unwrap_or("disabled"))
                 )
             }
         })
@@ -2640,6 +2640,30 @@ mod tests {
         let detail = detail_text(&snapshot.rows[0]);
 
         assert!(detail.contains("repo\\x1b\\x07\\u{202e}gpj.exe#99"));
+        assert!(!detail.contains('\x1b'));
+        assert!(!detail.contains('\x07'));
+        assert!(!detail.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn detail_text_escapes_terminal_controls_in_action_reasons() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let hostile = record("hostile-action-reason", Status::NeedsHuman);
+        let mut snapshot = build_snapshot(
+            vec![hostile],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Task,
+        );
+        snapshot.rows[0].actions.resume =
+            ActionAvailability::disabled("reason\x1b]52;c;payload\x07\u{202e}gpj.exe");
+
+        let detail = detail_text(&snapshot.rows[0]);
+
+        assert!(detail.contains("reason\\x1b]52;c;payload\\x07\\u{202e}gpj.exe"));
         assert!(!detail.contains('\x1b'));
         assert!(!detail.contains('\x07'));
         assert!(!detail.contains('\u{202e}'));

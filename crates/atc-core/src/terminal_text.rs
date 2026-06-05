@@ -60,7 +60,7 @@ pub fn escape_json_format_controls(value: &str) -> String {
     out
 }
 
-fn is_dangerous_format_control(ch: char) -> bool {
+pub(crate) fn is_dangerous_format_control(ch: char) -> bool {
     matches!(
         ch,
         '\u{061c}'
