@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{expand_tilde, AtcConfig};
+use crate::terminal_text::display_text;
 use crate::types::{Directive, WorktreePolicy};
 
 /// Result of rendering a template: the rendered body and a list of directive/component names.
@@ -37,12 +38,14 @@ pub async fn assemble_system_prompt(
     let directive_config = config
         .directives
         .get(directive_key)
-        .with_context(|| format!("no directive config for '{directive_key}'"))?;
+        .with_context(|| format!("no directive config for '{}'", display_text(directive_key)))?;
 
-    let components = directive_config
-        .components
-        .as_ref()
-        .with_context(|| format!("directive '{directive_key}' has no components list"))?;
+    let components = directive_config.components.as_ref().with_context(|| {
+        format!(
+            "directive '{}' has no components list",
+            display_text(directive_key)
+        )
+    })?;
 
     let components_dir = resolve_dir(&config.prompt.components_dir, config.config_dir.as_deref());
 
@@ -50,7 +53,11 @@ pub async fn assemble_system_prompt(
     for name in components {
         let path = components_dir.join(format!("{name}.md"));
         let content = tokio::fs::read_to_string(&path).await.with_context(|| {
-            format!("failed to read component '{name}' at '{}'", path.display())
+            format!(
+                "failed to read component '{}' at '{}'",
+                display_text(name),
+                display_text(&path.display().to_string())
+            )
         })?;
         // Strip `# Agent: ...` header for consistency with partial rendering
         parts.push(strip_agent_header_line(&content));
@@ -73,7 +80,10 @@ pub async fn assemble_system_prompt(
         data[&var] = serde_json::Value::String(deferred_placeholder(&var));
     }
     let mut rendered = hbs.render_template(&assembled, &data).with_context(|| {
-        format!("failed to expand partials in assembled prompt for directive '{directive_key}'")
+        format!(
+            "failed to expand partials in assembled prompt for directive '{}'",
+            display_text(directive_key)
+        )
     })?;
 
     // Append the directive only if not already present — either inlined via
@@ -151,7 +161,12 @@ pub async fn render_template_with_deferred(
     };
     let raw = tokio::fs::read_to_string(&resolved)
         .await
-        .with_context(|| format!("failed to read template file '{}'", resolved.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to read template file '{}'",
+                display_text(&resolved.display().to_string())
+            )
+        })?;
 
     let (frontmatter, body) = split_frontmatter(&raw)?;
 
@@ -168,7 +183,12 @@ pub async fn render_template_with_deferred(
     let hbs = build_registry(config, worktree_path).await?;
     let rendered = hbs
         .render_template(body, &effective_params)
-        .with_context(|| format!("failed to render template '{}'", template_path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to render template '{}'",
+                display_text(&template_path.display().to_string())
+            )
+        })?;
 
     Ok(TemplateOutput {
         body: rendered,
@@ -209,7 +229,7 @@ pub async fn render_prompt(
         if let Some(ref path_str) = directive_config.template_path {
             if directive_config.template_inline.is_some() {
                 tracing::warn!(
-                    directive = directive_key,
+                    directive = %display_text(directive_key),
                     "both template_path and template_inline set; using template_path"
                 );
             }
@@ -228,8 +248,8 @@ pub async fn render_prompt(
                 .with_context(|| {
                     format!(
                         "failed to read template file '{}' for directive '{}'",
-                        expanded.display(),
-                        directive_key,
+                        display_text(&expanded.display().to_string()),
+                        display_text(directive_key),
                     )
                 })?;
             return Ok(apply_legacy_tokens(&content, slug, directive_text));
@@ -245,8 +265,8 @@ pub async fn render_prompt(
 
     anyhow::bail!(
         "no template configured for directive '{}': set [directives.{}] components, template_path, or template_inline in atc.toml",
-        directive_key,
-        directive_key,
+        display_text(directive_key),
+        display_text(directive_key),
     )
 }
 
@@ -460,7 +480,11 @@ async fn register_partials_from_dir(
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
-            tracing::warn!(dir = %dir.display(), error = %e, "cannot read partials directory");
+            tracing::warn!(
+                dir = %display_text(&dir.display().to_string()),
+                error = %display_text(&e.to_string()),
+                "cannot read partials directory"
+            );
             return;
         }
     };
@@ -470,7 +494,11 @@ async fn register_partials_from_dir(
             Ok(Some(e)) => e,
             Ok(None) => break,
             Err(e) => {
-                tracing::warn!(dir = %dir.display(), error = %e, "error iterating partials directory");
+                tracing::warn!(
+                    dir = %display_text(&dir.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "error iterating partials directory"
+                );
                 continue;
             }
         };
@@ -485,7 +513,11 @@ async fn register_partials_from_dir(
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to read partial");
+                tracing::warn!(
+                    path = %display_text(&path.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "failed to read partial"
+                );
                 continue;
             }
         };
@@ -496,10 +528,10 @@ async fn register_partials_from_dir(
         };
         if let Err(e) = hbs.register_partial(&name, &content) {
             tracing::warn!(
-                name = %name,
-                path = %path.display(),
-                error = %e,
-                "failed to register partial; templates referencing {{{{> {name}}}}} will fail at render time",
+                name = %display_text(&name),
+                path = %display_text(&path.display().to_string()),
+                error = %display_text(&e.to_string()),
+                "failed to register partial; templates referencing this partial will fail at render time",
             );
         }
     }
@@ -1309,6 +1341,26 @@ Working on PR: {{pr}}
                 .contains("no template configured for directive"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_render_template_missing_path_escapes_terminal_controls() {
+        let config = AtcConfig::default();
+        let params = BTreeMap::new();
+        let err = render_template_with_deferred(
+            Path::new("missing\x1b[2J\u{202e}gpj.md"),
+            &params,
+            &[],
+            &config,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("missing\\x1b[2J\\u{202e}gpj.md"), "got: {err}");
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
     }
 
     // --- Partial resolution priority tests ---

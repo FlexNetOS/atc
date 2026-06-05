@@ -3,7 +3,7 @@
 use anyhow::Result;
 use atc_core::registry::Registry;
 use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
-use atc_core::types::DispatchRecord;
+use atc_core::types::{atc_session_uri, DispatchRecord, TerminalLocator};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -33,6 +33,7 @@ pub fn format_info(record: &DispatchRecord) -> String {
     };
 
     add_line(&mut lines, "id", &record.id);
+    add_line(&mut lines, "uri", &atc_session_uri(&record.id));
     if let Some(ref slug) = record.task_slug {
         add_line(&mut lines, "task_slug", slug);
     }
@@ -47,6 +48,11 @@ pub fn format_info(record: &DispatchRecord) -> String {
     }
 
     add_line(&mut lines, "session", &record.session);
+    add_terminal_locator_lines(
+        &mut lines,
+        crate::open_session::effective_terminal_locator(record).as_ref(),
+        add_line,
+    );
 
     add_line(&mut lines, "agent_provider", &record.agent_provider);
     if let Some(ref session_id) = record.agent_session_id {
@@ -127,6 +133,33 @@ pub fn format_info(record: &DispatchRecord) -> String {
     lines.join("\n")
 }
 
+fn add_terminal_locator_lines(
+    lines: &mut Vec<String>,
+    locator: Option<&TerminalLocator>,
+    add_line: impl Fn(&mut Vec<String>, &str, &str),
+) {
+    let Some(locator) = locator else {
+        return;
+    };
+
+    match locator {
+        TerminalLocator::Tmux(tmux) => {
+            add_line(lines, "terminal_backend", "tmux");
+            add_line(lines, "terminal_session", &tmux.session);
+            if let Some(cwd) = tmux.cwd.as_ref() {
+                add_line(lines, "terminal_cwd", &cwd.to_string_lossy());
+            }
+            add_line(lines, "terminal_source", tmux.source.as_str());
+            add_line(lines, "terminal_confidence", tmux.confidence.as_str());
+            add_line(
+                lines,
+                "terminal_detected_at",
+                &tmux.detected_at.to_rfc3339(),
+            );
+        }
+    }
+}
+
 pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Result<()> {
     let record = resolve_record(registry.as_ref(), arg).await?;
     if json {
@@ -145,7 +178,7 @@ pub async fn run_info(registry: Arc<dyn Registry>, arg: &str, json: bool) -> Res
 mod tests {
     use super::*;
     use atc_core::types::{
-        claude_agent_capabilities, AgentSessionId, Directive, HealthChecks, Status,
+        claude_agent_capabilities, AgentSessionId, Directive, HealthChecks, Status, TerminalLocator,
     };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
@@ -188,6 +221,7 @@ mod tests {
             )),
             resume_of_dispatch_id: None,
             agent_capabilities: Some(claude_agent_capabilities()),
+            terminal_locator: None,
             dispatched_at: DateTime::parse_from_rfc3339("2026-03-12T05:31:41+00:00")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -212,6 +246,8 @@ mod tests {
         record.resume_of_dispatch_id = Some("source-dispatch-id".to_string());
         let output = format_info(&record);
         assert!(output.contains("id:"));
+        assert!(output.contains("uri:"));
+        assert!(output.contains("atc://session/tasks--gitkb-42%40implement%401773293500"));
         assert!(output.contains("task_slug:"));
         assert!(output.contains("tasks/gitkb-42"));
         assert!(output.contains("status:"));
@@ -234,6 +270,52 @@ mod tests {
         assert!(output.contains("$8.59"));
         assert!(output.contains("checks:"));
         assert!(output.contains("\u{2713}")); // check mark
+    }
+
+    #[test]
+    fn test_format_info_shows_terminal_locator_safely() {
+        let mut record = full_record();
+        record.terminal_locator = Some(TerminalLocator::atc_tmux(
+            "session\x1b[2J\u{202e}gpj",
+            Some(PathBuf::from("/tmp/worktree")),
+            record.dispatched_at,
+        ));
+
+        let output = format_info(&record);
+
+        assert_no_raw_terminal_controls(&output);
+        assert!(output.contains("terminal_backend:"));
+        assert!(output.contains("tmux"));
+        assert!(output.contains("terminal_session:"));
+        assert!(output.contains("session\\x1b[2J\\u{202e}gpj"));
+        assert!(output.contains("terminal_cwd:"));
+        assert!(output.contains("/tmp/worktree"));
+        assert!(output.contains("terminal_source:"));
+        assert!(output.contains("atc-dispatch"));
+        assert!(output.contains("terminal_confidence:"));
+        assert!(output.contains("exact"));
+    }
+
+    #[test]
+    fn test_format_info_shows_inferred_legacy_terminal_locator() {
+        let mut record = full_record();
+        record.terminal_locator = None;
+        record.updated_at = DateTime::parse_from_rfc3339("2026-06-05T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let output = format_info(&record);
+
+        assert!(output.contains("terminal_backend:"));
+        assert!(output.contains("tmux"));
+        assert!(output.contains("terminal_session:"));
+        assert!(output.contains("tasks--gitkb-42@implement@1773293500"));
+        assert!(output.contains("terminal_source:"));
+        assert!(output.contains("legacy-session-field"));
+        assert!(output.contains("terminal_confidence:"));
+        assert!(output.contains("inferred"));
+        assert!(output.contains("terminal_detected_at:"));
+        assert!(output.contains("2026-06-05T01:02:03+00:00"));
     }
 
     #[test]

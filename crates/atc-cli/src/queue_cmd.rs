@@ -5,6 +5,7 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::queue::{DispatchQueue, Priority, QueueInputType, QueueRow};
 use atc_core::registry::Registry;
+use atc_core::terminal_text::display_text;
 use atc_core::types::RunOpts;
 use tracing::{error, info, warn};
 
@@ -12,13 +13,13 @@ use tracing::{error, info, warn};
 pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Result<()> {
     let items = queue.queue_list(queue_name).await?;
     if items.is_empty() {
-        println!("Queue '{}' is empty.", queue_name);
+        println!("Queue '{}' is empty.", display_text(queue_name));
         return Ok(());
     }
 
     println!(
         "Queue '{}' — {} pending item(s):\n",
-        queue_name,
+        display_text(queue_name),
         items.len()
     );
     println!(
@@ -31,17 +32,10 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
             .map(|p| p.as_str())
             .unwrap_or("unknown");
         // Truncate long input for display
-        let input_display = if item.input_value.chars().count() > 40 {
-            format!(
-                "{}...",
-                item.input_value.chars().take(37).collect::<String>()
-            )
-        } else {
-            item.input_value.clone()
-        };
+        let input_display = queue_input_display(&item.input_value);
         println!(
             "{:<24} {:<10} {:<10} {:<8} {}",
-            &item.id[..item.id.len().min(24)],
+            display_text(&item.id.chars().take(24).collect::<String>()),
             item.input_type.as_str(),
             priority_str,
             item.status.as_str(),
@@ -51,12 +45,22 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
     Ok(())
 }
 
+fn queue_input_display(input: &str) -> String {
+    let safe_input = display_text(input);
+    if safe_input.chars().count() > 40 {
+        format!("{}...", safe_input.chars().take(37).collect::<String>())
+    } else {
+        safe_input
+    }
+}
+
 /// Clear all pending items from a queue.
 pub async fn run_queue_clear(queue: &dyn DispatchQueue, queue_name: &str) -> Result<()> {
     let count = queue.queue_clear(queue_name).await?;
     println!(
         "Cleared {} pending item(s) from queue '{}'.",
-        count, queue_name
+        count,
+        display_text(queue_name)
     );
     Ok(())
 }
@@ -105,8 +109,8 @@ pub async fn run_queue_drain(
                         .await
                     {
                         warn!(
-                            queue_id = %item.id,
-                            error = %e,
+                            queue_id = %display_text(&item.id),
+                            error = %display_text(&e.to_string()),
                             "failed to persist dispatch_id for crash recovery"
                         );
                     }
@@ -115,16 +119,16 @@ pub async fn run_queue_drain(
                         .await
                     {
                         error!(
-                            queue_id = %item.id,
-                            error = %e,
+                            queue_id = %display_text(&item.id),
+                            error = %display_text(&e.to_string()),
                             "failed to mark dispatched"
                         );
                     }
                     dispatched += 1;
                     info!(
-                        queue_id = %item.id,
-                        dispatch_id = %dispatch_id,
-                        input = %label,
+                        queue_id = %display_text(&item.id),
+                        dispatch_id = %display_text(&dispatch_id),
+                        input = %display_text(&label),
                         "dispatched from queue"
                     );
                 }
@@ -135,16 +139,16 @@ pub async fn run_queue_drain(
                         .await
                     {
                         warn!(
-                            queue_id = %item.id,
-                            error = %mark_err,
+                            queue_id = %display_text(&item.id),
+                            error = %display_text(&mark_err.to_string()),
                             "failed to mark item as failed in queue"
                         );
                     }
                     failed += 1;
                     warn!(
-                        queue_id = %item.id,
-                        input = %label,
-                        error = %err_msg,
+                        queue_id = %display_text(&item.id),
+                        input = %display_text(&label),
+                        error = %display_text(&err_msg),
                         "queue dispatch failed"
                     );
                 }
@@ -171,7 +175,11 @@ pub async fn dispatch_queue_item(
         .as_ref()
         .map(|p| {
             serde_json::from_str(p).unwrap_or_else(|e| {
-                warn!(queue_id = %row.id, error = %e, "failed to parse params JSON, using empty map");
+                warn!(
+                    queue_id = %display_text(&row.id),
+                    error = %display_text(&e.to_string()),
+                    "failed to parse params JSON, using empty map"
+                );
                 std::collections::HashMap::new()
             })
         })
@@ -189,7 +197,11 @@ pub async fn dispatch_queue_item(
             Some(m) => match m.parse() {
                 Ok(d) => Some(d),
                 Err(_) => {
-                    warn!(queue_id = %row.id, mode = %m, "invalid directive/mode, ignoring");
+                    warn!(
+                        queue_id = %display_text(&row.id),
+                        mode = %display_text(m),
+                        "invalid directive/mode, ignoring"
+                    );
                     None
                 }
             },
@@ -237,4 +249,31 @@ pub async fn dispatch_queue_item(
 
     let outcome = pipeline.execute(&raw_input, &opts).await?;
     Ok(outcome.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_input_display_escapes_terminal_controls_before_truncating() {
+        let input = format!("task\x1b[2J\u{202e}gpj{}", "x".repeat(80));
+        let display = queue_input_display(&input);
+
+        assert!(!display.contains('\x1b'), "raw escape leaked: {display:?}");
+        assert!(
+            !display.contains('\u{202e}'),
+            "raw bidi control leaked: {display:?}"
+        );
+        assert!(
+            display.contains("\\x1b"),
+            "escaped ESC missing: {display:?}"
+        );
+        assert!(
+            display.contains("\\u{202e}"),
+            "escaped bidi missing: {display:?}"
+        );
+        assert!(display.ends_with("..."), "long input was not truncated");
+        assert_eq!(display.chars().count(), 40);
+    }
 }

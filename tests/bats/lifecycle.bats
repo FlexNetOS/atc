@@ -85,7 +85,7 @@ load helpers/common
     setup_lifecycle
     insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
     sqlite3 "$TEST_TMPDIR/atc.db" \
-        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json' WHERE id = 'disp-001';"
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json', terminal_locator_json = '{not-json' WHERE id = 'disp-001';"
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
     [ "$SPLIT_STATUS" -eq 0 ]
@@ -94,10 +94,13 @@ load helpers/common
     echo "$STDOUT" | jq -e '.records[0].agent_provider == "claude"'
     echo "$STDOUT" | jq -e '.records[0].agent_session_id == null'
     echo "$STDOUT" | jq -e '.records[0].agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.records[0].terminal_locator == null'
     echo "$STDOUT" | jq -e '.records[0] | has("agent_capabilities_json") | not'
+    echo "$STDOUT" | jq -e '.records[0] | has("terminal_locator_json") | not'
     echo "$STDERR" | grep -F "dispatch_id=disp-001"
     echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
+    echo "$STDERR" | grep -F "ignoring invalid terminal_locator_json"
 
     run_split atc --config "$TEST_TMPDIR/atc.toml" info disp-001 --json
     [ "$SPLIT_STATUS" -eq 0 ]
@@ -106,10 +109,57 @@ load helpers/common
     echo "$STDOUT" | jq -e '.record.agent_provider == "claude"'
     echo "$STDOUT" | jq -e '.record.agent_session_id == null'
     echo "$STDOUT" | jq -e '.record.agent_capabilities == null'
+    echo "$STDOUT" | jq -e '.record.terminal_locator == null'
     echo "$STDOUT" | jq -e '.record | has("agent_capabilities_json") | not'
+    echo "$STDOUT" | jq -e '.record | has("terminal_locator_json") | not'
     echo "$STDERR" | grep -F "dispatch_id=disp-001"
     echo "$STDERR" | grep -F "ignoring invalid agent_session_id"
     echo "$STDERR" | grep -F "ignoring invalid agent_capabilities_json"
+    echo "$STDERR" | grep -F "ignoring invalid terminal_locator_json"
+}
+
+@test "status --json escapes malformed required enum values" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local esc=$'\033'
+    local bidi=$'\u202e'
+
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET status = 'running' || char(27) || '[2J' || char(8238) || 'gpj' WHERE id = 'disp-001';"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unknown status: running\\x1b[2J\\u{202e}gpj"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET status = 'running', directive = 'implement' || char(27) || '[2J' || char(8238) || 'gpj' WHERE id = 'disp-001';"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unknown directive: implement\\x1b[2J\\u{202e}gpj"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+}
+
+@test "registry malformed metadata warnings escape hostile dispatch ids" {
+    require_jq
+    setup_lifecycle
+    local esc=$'\033'
+    local hostile_id="disp-${esc}[2J"
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "$hostile_id" "tasks/hostile-log" "running"
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET agent_session_id = 'not-a-uuid', agent_capabilities_json = '{not-json', terminal_locator_json = '{\"kind\":\"tmux\u001b[2J\",\"version\":1,\"session\":\"bad\",\"detected_at\":\"2026-06-05T00:00:00Z\",\"source\":\"atc-dispatch\",\"confidence\":\"exact\"}' WHERE id = 'disp-${esc}[2J';"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.schema_version == 1'
+    [[ "$STDOUT" != *"$esc"* ]]
+    [[ "$STDERR" == *"dispatch_id=disp-\\x1b[2J"* ]]
+    [[ "$STDERR" == *"ignoring invalid agent_session_id"* ]]
+    [[ "$STDERR" == *"ignoring invalid agent_capabilities_json"* ]]
+    [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+    [[ "$STDERR" == *"tmux\\x1b[2J"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
 }
 
 @test "status/info --json escape Unicode format controls in encoded bytes while preserving decoded values" {
@@ -188,7 +238,8 @@ SET task_slug = 'tasks/evil-' || char(27) || '[2J' || char(7) || char(8238) || c
     branch = 'branch-' || char(27) || '[31m' || char(8232),
     worktree_path = '${TEST_TMPDIR//\'/\'\'}/worktree-' || char(7),
     session = 'session-' || char(8238) || char(8233),
-    agent_provider = 'claude-' || char(27) || '[0m'
+    agent_provider = 'claude-' || char(27) || '[0m',
+    terminal_locator_json = '{"kind":"tmux","version":1,"session":"locator-\u001b[2J\u202egpj","cwd":"${TEST_TMPDIR//\'/\'\'}/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 
@@ -217,6 +268,8 @@ SQL
     [[ "$STDOUT" == *"\\u{202e}"* ]]
     [[ "$STDOUT" == *"\\u{2028}"* ]]
     [[ "$STDOUT" == *"\\u{2029}"* ]]
+    [[ "$STDOUT" == *"terminal_session:"* ]]
+    [[ "$STDOUT" == *"locator-\\x1b[2J\\u{202e}gpj"* ]]
 }
 
 @test "info: resolves by task slug (latest dispatch)" {
@@ -229,6 +282,18 @@ SQL
     run atc --config "$TEST_TMPDIR/atc.toml" info tasks/test-1
     assert_success
     assert_output --partial "disp-002"
+}
+
+@test "info: hostile missing arg escapes terminal controls" {
+    setup_lifecycle
+    local esc=$'\033'
+    local bidi=$'\u202e'
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" info "missing-${esc}[2J${bidi}gpj"
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"missing-\\x1b[2J\\u{202e}gpj"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
 }
 
 # ===========================================================================

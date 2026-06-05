@@ -50,6 +50,9 @@ atc status --flat                    # one row per dispatch
 atc status --flat --json             # machine-readable
 atc logs <slug-or-id>                # tail agent log
 atc logs <slug-or-id> -f             # follow (like tail -f)
+atc sessions --json                  # session rows with locator/status/open-shell
+atc open-session <slug-or-id>        # attach to tmux-backed session
+atc open-session <slug-or-id> --json # preview open-session without attaching
 atc watch --id "<dispatch-id>"       # live event stream
 atc watch --id "<id>" --pretty       # formatted stream
 atc watch --all-running --pretty     # watch all active agents

@@ -4,7 +4,8 @@ use atc_core::executor::{AgentExecutor, AgentHandle, AgentInvocation, AgentOpts}
 use atc_core::registry::{Registry, SqliteRegistry, StatusFilter};
 use atc_core::types::{
     claude_agent_capabilities, AgentCapabilities, AgentSessionId, Directive, DispatchRecord,
-    HealthChecks, RunOpts, Status, CLAUDE_AGENT_PROVIDER,
+    HealthChecks, RunOpts, Status, TerminalLocator, TerminalLocatorConfidence,
+    TerminalLocatorSource, CLAUDE_AGENT_PROVIDER,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -463,6 +464,7 @@ fn dispatch_record_fixture(
         agent_transcript_cwd: Some(transcript_cwd),
         resume_of_dispatch_id: None,
         agent_capabilities: capabilities,
+        terminal_locator: None,
         dispatched_at: now,
         updated_at: now,
     }
@@ -557,6 +559,53 @@ async fn test_dispatch_inline_inserts_registry_record() {
             .map(|capabilities| capabilities.supports_resume_by_session_id),
         Some(true)
     );
+    assert!(
+        record.terminal_locator.is_none(),
+        "inline dispatch should not fabricate a terminal locator"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatch_non_inline_persists_tmux_terminal_locator() {
+    let _guard = PATH_MUTEX.lock().await;
+
+    let fix = TestFixture::new();
+    write_stub_git_script(&fix.bin_dir());
+    write_stub_git_bin(&fix.bin_dir());
+    write_stub_meta_script(&fix.bin_dir(), &fix.worktree_base());
+
+    let registry = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+    let executor = Arc::new(StubExecutor { exit_code: 0 });
+
+    let mut opts = default_run_opts("tasks/gitkb-locator", Directive::Implement);
+    opts.inline = false;
+    let outcome = dispatch_via_pipeline(
+        &fix.config,
+        registry.as_ref(),
+        executor.as_ref(),
+        "tasks/gitkb-locator",
+        &opts,
+    )
+    .await
+    .expect("dispatch failed");
+
+    let record = registry
+        .get(&outcome.id)
+        .await
+        .unwrap()
+        .expect("registry record should exist");
+    let locator = record
+        .terminal_locator
+        .expect("non-inline dispatch should persist terminal locator");
+
+    match locator {
+        TerminalLocator::Tmux(tmux) => {
+            assert_eq!(tmux.session, record.session);
+            assert_eq!(tmux.cwd.as_deref(), Some(record.worktree_path.as_path()));
+            assert_eq!(tmux.source, TerminalLocatorSource::AtcDispatch);
+            assert_eq!(tmux.confidence, TerminalLocatorConfidence::Exact);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1398,6 +1447,14 @@ async fn test_dispatch_resume_spawn_failure_marks_pre_spawn_reservation_failed()
         .find(|record| record.resume_of_dispatch_id.as_deref() == Some(source.id.as_str()))
         .expect("resume reservation should remain recorded");
     assert_eq!(failed.status, Status::Failed);
+    assert!(
+        failed.session.is_empty(),
+        "failed pre-spawn resume reservation should not retain a tmux session"
+    );
+    assert!(
+        failed.terminal_locator.is_none(),
+        "failed pre-spawn resume reservation should not retain a terminal locator"
+    );
 }
 
 #[tokio::test]

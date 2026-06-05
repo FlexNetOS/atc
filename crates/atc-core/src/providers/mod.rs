@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::AtcConfig;
+use crate::terminal_text::display_text;
 use crate::types::Directive;
 
 /// Input context available to providers during dispatch preparation.
@@ -94,7 +95,10 @@ pub fn providers_for_directive(
         .filter_map(|name| {
             let provider = make_provider(name);
             if provider.is_none() {
-                tracing::warn!(provider = %name, "unknown provider in directive config, skipping");
+                tracing::warn!(
+                    provider = %display_text(name),
+                    "unknown provider in directive config, skipping"
+                );
             }
             provider
         })

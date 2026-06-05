@@ -4,7 +4,10 @@ use anyhow::{bail, Context, Result};
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{DispatchRecord, RunOpts, Status, WorkUnit};
+use atc_core::types::{
+    atc_session_uri, DispatchRecord, OpenSessionPreview, RunOpts, Status, TerminalLocator,
+    TerminalStatus, TerminalStatusState, WorkUnit,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::ValueEnum;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -12,6 +15,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use futures::stream::{self, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -35,6 +39,9 @@ use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_RECENT_TERMINAL_HOURS: i64 = 24;
+const TERMINAL_STATUS_PROBE_CONCURRENCY: usize = 16;
+
+type TerminalStatusCacheKey = (&'static str, String);
 
 #[derive(Debug, Clone)]
 pub struct SessionsOpts {
@@ -158,6 +165,7 @@ pub struct SessionActionState {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SessionRow {
     pub id: String,
+    pub uri: String,
     pub task_slug: Option<String>,
     pub work_unit_id: Option<String>,
     pub group_key: String,
@@ -176,6 +184,9 @@ pub struct SessionRow {
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
     pub duration_ms: Option<u64>,
+    pub terminal_locator: Option<TerminalLocator>,
+    pub terminal_status: TerminalStatus,
+    pub open_shell: OpenSessionPreview,
     pub dispatched_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub actions: SessionActionState,
@@ -334,7 +345,9 @@ pub async fn load_snapshot(
     let records = registry.list(snapshot_status_filter(filter, now)).await?;
     let work_unit_ids = work_unit_ids_for_records(&records);
     let work_units = registry.list_work_units_by_ids(&work_unit_ids).await?;
-    Ok(build_snapshot_at(records, work_units, filter, group, now))
+    let mut snapshot = build_snapshot_at(records, work_units, filter, group, now);
+    refresh_terminal_fields(&mut snapshot.rows).await;
+    Ok(snapshot)
 }
 
 fn work_unit_ids_for_records(records: &[DispatchRecord]) -> Vec<String> {
@@ -425,8 +438,15 @@ fn row_from_record(
     let group_key = group_key(&record, work_units_by_id, group);
     let task_slug = task_slug_for_record(&record, work_units_by_id).map(str::to_string);
     let log_file = path_to_nonempty_string(&record.log_file);
-    let actions = action_state(&record);
+    let effective_locator = crate::open_session::effective_terminal_locator(&record);
+    let terminal_locator = effective_locator.clone();
+    let terminal_status = initial_terminal_status(effective_locator.as_ref());
+    let open_shell =
+        crate::open_session::open_shell_preview(effective_locator.as_ref(), &terminal_status);
+    let mut actions = action_state(&record);
+    actions.attach = availability_from_open_shell(&open_shell);
     SessionRow {
+        uri: atc_session_uri(&record.id),
         id: record.id,
         task_slug,
         work_unit_id: record.work_unit_id,
@@ -448,9 +468,94 @@ fn row_from_record(
         cost_usd: record.cost_usd,
         num_turns: record.num_turns,
         duration_ms: record.duration_ms,
+        terminal_locator,
+        terminal_status,
+        open_shell,
         dispatched_at: record.dispatched_at,
         updated_at: record.updated_at,
         actions,
+    }
+}
+
+async fn refresh_terminal_fields(rows: &mut [SessionRow]) {
+    let effective_locators = rows
+        .iter()
+        .map(effective_locator_for_row)
+        .collect::<Vec<_>>();
+    let terminal_statuses = terminal_statuses_for_locators(&effective_locators).await;
+
+    for (row, effective_locator) in rows.iter_mut().zip(effective_locators.iter()) {
+        row.terminal_status =
+            status_for_effective_locator(effective_locator.as_ref(), &terminal_statuses);
+        row.open_shell = crate::open_session::open_shell_preview(
+            effective_locator.as_ref(),
+            &row.terminal_status,
+        );
+        row.actions.attach = availability_from_open_shell(&row.open_shell);
+    }
+}
+
+async fn terminal_statuses_for_locators(
+    locators: &[Option<TerminalLocator>],
+) -> HashMap<TerminalStatusCacheKey, TerminalStatus> {
+    let mut unique_locators: HashMap<TerminalStatusCacheKey, TerminalLocator> = HashMap::new();
+    for locator in locators.iter().flatten() {
+        unique_locators
+            .entry(terminal_status_cache_key(locator))
+            .or_insert_with(|| locator.clone());
+    }
+
+    stream::iter(unique_locators)
+        .map(|(key, locator)| async move {
+            let status = crate::open_session::terminal_status_for_locator(Some(&locator)).await;
+            (key, status)
+        })
+        .buffer_unordered(TERMINAL_STATUS_PROBE_CONCURRENCY)
+        .collect()
+        .await
+}
+
+fn status_for_effective_locator(
+    locator: Option<&TerminalLocator>,
+    terminal_statuses: &HashMap<TerminalStatusCacheKey, TerminalStatus>,
+) -> TerminalStatus {
+    let Some(locator) = locator else {
+        return TerminalStatus::unavailable("no terminal locator");
+    };
+
+    terminal_statuses
+        .get(&terminal_status_cache_key(locator))
+        .cloned()
+        .unwrap_or_else(|| TerminalStatus::unavailable("terminal status unavailable"))
+}
+
+fn terminal_status_cache_key(locator: &TerminalLocator) -> TerminalStatusCacheKey {
+    match locator {
+        TerminalLocator::Tmux(tmux) => ("tmux", tmux.session.clone()),
+    }
+}
+
+fn initial_terminal_status(locator: Option<&TerminalLocator>) -> TerminalStatus {
+    match locator {
+        Some(locator) => TerminalStatus::new(TerminalStatusState::Unknown, Some(locator.backend())),
+        None => TerminalStatus::unavailable("no terminal locator"),
+    }
+}
+
+fn effective_locator_for_row(row: &SessionRow) -> Option<TerminalLocator> {
+    row.terminal_locator.clone()
+}
+
+fn availability_from_open_shell(open_shell: &OpenSessionPreview) -> ActionAvailability {
+    if open_shell.enabled {
+        ActionAvailability::enabled()
+    } else {
+        ActionAvailability::disabled(
+            open_shell
+                .reason
+                .clone()
+                .unwrap_or_else(|| "open-session unavailable".to_string()),
+        )
     }
 }
 
@@ -930,8 +1035,9 @@ async fn run_tui(
                 match load_snapshot(ctx.registry.as_ref(), &ctx.filter, ctx.group).await {
                     Ok(snapshot) => app.set_snapshot(snapshot),
                     Err(e) => {
-                        warn!(error = %e, "atc sessions refresh failed");
-                        app.message = Some(format!("refresh failed: {e}"));
+                        let message = display_text(&e.to_string());
+                        warn!(error = %message, "atc sessions refresh failed");
+                        app.message = Some(format!("refresh failed: {message}"));
                     }
                 }
                 last_poll = Instant::now();
@@ -1128,18 +1234,12 @@ async fn handle_key(
         KeyCode::Char('a') => {
             if let Some(row) = app.selected_row().cloned() {
                 if row.actions.attach.enabled {
-                    let session = row.session.clone();
+                    let registry = ctx.registry.clone();
+                    let target = row.uri.clone();
                     app.message = Some(
-                        run_terminal_action(terminal, || async move {
-                            let status = tokio::process::Command::new("tmux")
-                                .args(["attach", "-t", &session])
-                                .status()
+                        run_terminal_action(terminal, || async {
+                            crate::open_session::run_open_session_action(registry.as_ref(), &target)
                                 .await
-                                .context("failed to execute tmux attach")?;
-                            if !status.success() {
-                                anyhow::bail!("tmux attach exited with status {status}");
-                            }
-                            Ok(format!("attached to {session}"))
                         })
                         .await?,
                     );
@@ -1245,7 +1345,7 @@ fn apply_filter_edit(filter: &mut SessionFilter, edit: FilterEdit) -> Result<Str
         FilterField::Status => filter.status.as_ref().map(Status::as_str),
     };
     Ok(match value {
-        Some(value) => format!("{label} filter set to {value}"),
+        Some(value) => format!("{label} filter set to {}", display_text(value)),
         None => format!("{label} filter cleared"),
     })
 }
@@ -1513,7 +1613,7 @@ fn enter_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
 fn parse_poll_interval(value: Option<&str>) -> Result<Duration> {
     let interval = match value {
         Some(value) => humantime::parse_duration(value)
-            .with_context(|| format!("invalid --poll-interval value '{value}'"))?,
+            .with_context(|| format!("invalid --poll-interval value '{}'", display_text(value)))?,
         None => DEFAULT_POLL_INTERVAL,
     };
     if interval < MIN_POLL_INTERVAL {
@@ -1531,7 +1631,7 @@ pub fn render_app(frame: &mut Frame<'_>, app: &SessionsApp) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(if app.show_detail { 14 } else { 3 }),
+            Constraint::Length(if app.show_detail { 17 } else { 3 }),
         ])
         .split(frame.area());
 
@@ -1697,15 +1797,16 @@ fn detail_text(row: &SessionRow) -> String {
                 format!(
                     "{}({})",
                     name,
-                    state.reason.as_deref().unwrap_or("disabled")
+                    display_text(state.reason.as_deref().unwrap_or("disabled"))
                 )
             }
         })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "id: {}\ntask: {}\nwork_unit: {}\nprovider: {}  provider_session: {}\nstatus: {}  directive: {}  resolver: {}\nbranch: {}\nworktree: {}\nlog: {}\nprs: {}\nresume_of: {}\nactions: {}",
+        "id: {}\nuri: {}\ntask: {}\nwork_unit: {}\nprovider: {}  provider_session: {}\nstatus: {}  directive: {}  resolver: {}\nterminal: {}\nlocator: {}\nbranch: {}\nworktree: {}\nlog: {}\nprs: {}\nresume_of: {}\nactions: {}",
         display_text(&row.id),
+        display_text(&row.uri),
         display_text(row.display_task()),
         display_text(row.display_work_unit()),
         display_text(&row.provider),
@@ -1713,6 +1814,8 @@ fn detail_text(row: &SessionRow) -> String {
         row.status,
         display_text(&row.directive),
         display_text(&row.resolver),
+        display_text(&terminal_detail(row)),
+        display_text(&locator_detail(row)),
         display_text(&row.branch),
         display_text(&row.worktree_path),
         display_text(row.log_file.as_deref().unwrap_or("-")),
@@ -1720,6 +1823,63 @@ fn detail_text(row: &SessionRow) -> String {
         display_text(row.resume_of_dispatch_id.as_deref().unwrap_or("-")),
         action_text
     )
+}
+
+fn terminal_detail(row: &SessionRow) -> String {
+    let backend = row
+        .terminal_status
+        .backend
+        .as_deref()
+        .or(row.open_shell.backend.as_deref())
+        .unwrap_or("-");
+    let open_shell = if row.open_shell.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let status_reason = row.terminal_status.reason.as_deref().unwrap_or("-");
+    let open_reason = row.open_shell.reason.as_deref().unwrap_or("-");
+    format!(
+        "state={} backend={} status_reason={} open_shell={} open_reason={}",
+        terminal_status_state_label(row.terminal_status.state),
+        backend,
+        status_reason,
+        open_shell,
+        open_reason
+    )
+}
+
+fn locator_detail(row: &SessionRow) -> String {
+    match row.terminal_locator.as_ref() {
+        Some(TerminalLocator::Tmux(tmux)) => {
+            let cwd = tmux
+                .cwd
+                .as_ref()
+                .map(|path| path.to_string_lossy())
+                .unwrap_or_else(|| "-".into());
+            format!(
+                "tmux session={} source={} confidence={} detected_at={} cwd={}",
+                tmux.session,
+                tmux.source.as_str(),
+                tmux.confidence.as_str(),
+                tmux.detected_at.to_rfc3339(),
+                cwd
+            )
+        }
+        None => "-".to_string(),
+    }
+}
+
+fn terminal_status_state_label(state: TerminalStatusState) -> &'static str {
+    match state {
+        TerminalStatusState::Focusable => "focusable",
+        TerminalStatusState::Attached => "attached",
+        TerminalStatusState::Detached => "detached",
+        TerminalStatusState::Running => "running",
+        TerminalStatusState::Stale => "stale",
+        TerminalStatusState::Unavailable => "unavailable",
+        TerminalStatusState::Unknown => "unknown",
+    }
 }
 
 fn render_confirmation(frame: &mut Frame<'_>, pending: PendingAction) {
@@ -1765,7 +1925,8 @@ mod tests {
     use atc_core::registry::{Registry, StatusFilter};
     use atc_core::types::{
         claude_agent_capabilities, AgentCapabilities, AgentSessionId, Directive, HealthChecks,
-        Status, WorkUnitStatus, CLAUDE_AGENT_PROVIDER,
+        Status, TerminalLocatorConfidence, TerminalLocatorSource, WorkUnitStatus,
+        CLAUDE_AGENT_PROVIDER,
     };
     use chrono::TimeZone;
     use ratatui::backend::TestBackend;
@@ -1803,6 +1964,7 @@ mod tests {
             agent_transcript_cwd: Some(PathBuf::from("/tmp/worktree")),
             resume_of_dispatch_id: None,
             agent_capabilities: Some(claude_agent_capabilities()),
+            terminal_locator: None,
             dispatched_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 5, 0).unwrap(),
         }
@@ -1819,6 +1981,88 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 6, 3, 12, 5, 0).unwrap(),
         }
+    }
+
+    #[test]
+    fn status_for_effective_locator_missing_probe_result_is_unavailable() {
+        let locator = TerminalLocator::inferred_tmux("session-1", None, Utc::now());
+        let empty_statuses = HashMap::new();
+
+        let missing_status = status_for_effective_locator(Some(&locator), &empty_statuses);
+        assert_eq!(missing_status.state, TerminalStatusState::Unavailable);
+        assert_eq!(
+            missing_status.reason.as_deref(),
+            Some("terminal status unavailable")
+        );
+
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            terminal_status_cache_key(&locator),
+            TerminalStatus::new(TerminalStatusState::Detached, Some("tmux")),
+        );
+
+        let cached_status = status_for_effective_locator(Some(&locator), &statuses);
+        assert_eq!(cached_status.state, TerminalStatusState::Detached);
+
+        let no_locator_status = status_for_effective_locator(None, &statuses);
+        assert_eq!(no_locator_status.state, TerminalStatusState::Unavailable);
+        assert_eq!(
+            no_locator_status.reason.as_deref(),
+            Some("no terminal locator")
+        );
+    }
+
+    #[test]
+    fn row_initial_unknown_status_disables_attach_but_remains_probeable() {
+        let filter = SessionFilter::default();
+        let snapshot = build_snapshot(
+            vec![record("running", Status::Running)],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::None,
+        );
+
+        let row = &snapshot.rows[0];
+        assert_eq!(row.terminal_status.state, TerminalStatusState::Unknown);
+        assert!(!row.open_shell.enabled);
+        assert!(!row.actions.attach.enabled);
+        let Some(TerminalLocator::Tmux(locator)) = row.terminal_locator.as_ref() else {
+            panic!("legacy session rows should expose an inferred tmux locator");
+        };
+        assert_eq!(locator.source, TerminalLocatorSource::LegacySessionField);
+        assert_eq!(locator.confidence, TerminalLocatorConfidence::Inferred);
+        assert_eq!(locator.detected_at, row.updated_at);
+        assert!(matches!(
+            effective_locator_for_row(row),
+            Some(TerminalLocator::Tmux(_))
+        ));
+    }
+
+    #[test]
+    fn effective_locator_for_row_does_not_infer_from_action_preview() {
+        let filter = SessionFilter::default();
+        let snapshot = build_snapshot(
+            vec![record("running", Status::Running)],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::None,
+        );
+        let mut row = snapshot.rows[0].clone();
+        row.terminal_locator = None;
+        row.open_shell = OpenSessionPreview {
+            enabled: true,
+            reason: None,
+            action: "open-session".to_string(),
+            backend: Some("tmux".to_string()),
+            attach_command: Some(vec![
+                "tmux".to_string(),
+                "attach".to_string(),
+                "-t".to_string(),
+                row.session.clone(),
+            ]),
+        };
+
+        assert!(effective_locator_for_row(&row).is_none());
     }
 
     #[test]
@@ -2101,6 +2345,19 @@ mod tests {
         let message = apply_filter_edit(
             &mut filter,
             FilterEdit {
+                field: FilterField::Search,
+                value: " task\x1b[2J\u{202e}gpj ".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(message, "search filter set to task\\x1b[2J\\u{202e}gpj");
+        assert!(!message.contains('\x1b'));
+        assert!(!message.contains('\u{202e}'));
+        assert_eq!(filter.search.as_deref(), Some("task\x1b[2J\u{202e}gpj"));
+
+        let message = apply_filter_edit(
+            &mut filter,
+            FilterEdit {
                 field: FilterField::Provider,
                 value: " ".to_string(),
             },
@@ -2167,6 +2424,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least 250ms"));
+        let hostile_error = parse_poll_interval(Some("bad\x1b[2J\u{202e}gpj"))
+            .unwrap_err()
+            .to_string();
+        assert!(hostile_error.contains("bad\\x1b[2J\\u{202e}gpj"));
+        assert!(!hostile_error.contains('\x1b'));
+        assert!(!hostile_error.contains('\u{202e}'));
     }
 
     #[derive(Default)]
@@ -2482,6 +2745,75 @@ mod tests {
         let detail = detail_text(&snapshot.rows[0]);
 
         assert!(detail.contains("repo\\x1b\\x07\\u{202e}gpj.exe#99"));
+        assert!(!detail.contains('\x1b'));
+        assert!(!detail.contains('\x07'));
+        assert!(!detail.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn detail_text_escapes_terminal_controls_in_action_reasons() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let hostile = record("hostile-action-reason", Status::NeedsHuman);
+        let mut snapshot = build_snapshot(
+            vec![hostile],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Task,
+        );
+        snapshot.rows[0].actions.resume =
+            ActionAvailability::disabled("reason\x1b]52;c;payload\x07\u{202e}gpj.exe");
+
+        let detail = detail_text(&snapshot.rows[0]);
+
+        assert!(detail.contains("reason\\x1b]52;c;payload\\x07\\u{202e}gpj.exe"));
+        assert!(!detail.contains('\x1b'));
+        assert!(!detail.contains('\x07'));
+        assert!(!detail.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn detail_text_shows_terminal_metadata_safely() {
+        let filter = SessionFilter {
+            all: true,
+            ..SessionFilter::default()
+        };
+        let mut hostile = record("hostile-terminal-detail", Status::Running);
+        hostile.terminal_locator = Some(TerminalLocator::atc_tmux(
+            "locator\x1b[2J\u{202e}gpj",
+            Some(PathBuf::from("/tmp/worktree\x07")),
+            hostile.updated_at,
+        ));
+        let mut snapshot = build_snapshot(
+            vec![hostile],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::Task,
+        );
+        snapshot.rows[0].terminal_status =
+            TerminalStatus::new(TerminalStatusState::Unavailable, Some("tmux"))
+                .with_reason("reason\x1b]52;c;payload\x07\u{202e}gpj");
+        snapshot.rows[0].open_shell = crate::open_session::open_shell_preview(
+            snapshot.rows[0].terminal_locator.as_ref(),
+            &snapshot.rows[0].terminal_status,
+        );
+        snapshot.rows[0].actions.attach =
+            availability_from_open_shell(&snapshot.rows[0].open_shell);
+
+        let detail = detail_text(&snapshot.rows[0]);
+
+        assert!(detail.contains("uri:"));
+        assert!(detail.contains("terminal:"));
+        assert!(detail.contains("locator:"));
+        assert!(detail.contains("state=unavailable"));
+        assert!(detail.contains("status_reason=reason\\x1b]52;c;payload\\x07\\u{202e}gpj"));
+        assert!(detail.contains("open_shell=disabled"));
+        assert!(detail.contains("open_reason=reason\\x1b]52;c;payload\\x07\\u{202e}gpj"));
+        assert!(detail.contains("locator\\x1b[2J\\u{202e}gpj"));
+        assert!(detail.contains("/tmp/worktree\\x07"));
+        assert!(detail.contains("reason\\x1b]52;c;payload\\x07\\u{202e}gpj"));
         assert!(!detail.contains('\x1b'));
         assert!(!detail.contains('\x07'));
         assert!(!detail.contains('\u{202e}'));

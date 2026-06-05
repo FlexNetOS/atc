@@ -5,7 +5,8 @@ use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
 use atc_core::types::{
     claude_agent_provider, AgentCapabilities, AgentSessionMetadata, Directive, DispatchOutcome,
-    DispatchRecord, HealthChecks, RunOpts, Status, WorktreePolicy, CLAUDE_AGENT_PROVIDER,
+    DispatchRecord, HealthChecks, RunOpts, Status, TerminalLocator, WorktreePolicy,
+    CLAUDE_AGENT_PROVIDER,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -161,26 +162,26 @@ fn validate_document_policy_slug(slug: &str) -> Result<()> {
     anyhow::ensure!(
         !unsafe_slug,
         "invalid slug for document policy: unsafe path '{}'",
-        slug
+        display_text(slug)
     );
     Ok(())
 }
 
 fn canonicalize_existing_dir(path: &Path, source_id: &str, label: &str) -> Result<PathBuf> {
+    let source_id_display = display_text(source_id);
+    let display_path = display_text(&path.display().to_string());
     let canonical = std::fs::canonicalize(path).with_context(|| {
         format!(
             "cannot resume dispatch {}: {} '{}' is not accessible",
-            source_id,
-            label,
-            path.display()
+            source_id_display, label, display_path
         )
     })?;
     anyhow::ensure!(
         canonical.is_dir(),
         "cannot resume dispatch {}: {} '{}' is not a directory",
-        source_id,
+        source_id_display,
         label,
-        path.display()
+        display_path
     );
     Ok(canonical)
 }
@@ -209,6 +210,7 @@ fn build_dispatch_record(
     agent_metadata: &AgentSessionMetadata,
     now: DateTime<Utc>,
 ) -> DispatchRecord {
+    let terminal_locator = dispatch_terminal_locator(opts, session_name, worktree_path, now);
     DispatchRecord {
         id: resolved.dispatch_id.clone(),
         task_slug: resolved.task_slug.clone(),
@@ -235,8 +237,26 @@ fn build_dispatch_record(
         agent_transcript_cwd: agent_metadata.transcript_cwd.clone(),
         resume_of_dispatch_id: agent_metadata.resume_of_dispatch_id.clone(),
         agent_capabilities: agent_metadata.capabilities,
+        terminal_locator,
         dispatched_at: now,
         updated_at: now,
+    }
+}
+
+fn dispatch_terminal_locator(
+    opts: &RunOpts,
+    session_name: &str,
+    worktree_path: &Path,
+    detected_at: DateTime<Utc>,
+) -> Option<TerminalLocator> {
+    if opts.inline || session_name.trim().is_empty() {
+        None
+    } else {
+        Some(TerminalLocator::atc_tmux(
+            session_name,
+            Some(worktree_path.to_path_buf()),
+            detected_at,
+        ))
     }
 }
 
@@ -275,7 +295,11 @@ impl<'a> DispatchPipeline<'a> {
             // Auto-derive PR URL from comment URL
             if !effective_params.contains_key("pr") || effective_params["pr"].is_empty() {
                 if let Some(pr_url) = derive_pr_url_from_comment(&comment_url) {
-                    info!(comment_url = %comment_url, pr_url = %pr_url, "auto-derived PR URL from comment URL");
+                    info!(
+                        comment_url = %display_text(&comment_url),
+                        pr_url = %display_text(&pr_url),
+                        "auto-derived PR URL from comment URL"
+                    );
                     effective_params.insert("pr".to_string(), pr_url);
                 }
             }
@@ -507,7 +531,11 @@ impl<'a> DispatchPipeline<'a> {
                             }
                             Ok(None) => process_cwd.clone(),
                             Err(e) => {
-                                warn!(slug, error = %e, "ephemeral document workspace resolution failed, using CWD");
+                                warn!(
+                                    slug = %display_text(slug),
+                                    error = %display_text(&e.to_string()),
+                                    "ephemeral document workspace resolution failed, using CWD"
+                                );
                                 process_cwd.clone()
                             }
                         }
@@ -696,9 +724,9 @@ impl<'a> DispatchPipeline<'a> {
                                         doc_ws.workspace_branch.clone(),
                                     );
                                     info!(
-                                        slug,
-                                        cwd = %doc_ws.cwd.display(),
-                                        workspace_branch = %doc_ws.workspace_branch,
+                                        slug = %display_text(slug),
+                                        cwd = %display_text(&doc_ws.cwd.display().to_string()),
+                                        workspace_branch = %display_text(&doc_ws.workspace_branch),
                                         "document policy: resolved workspace"
                                     );
                                     (doc_ws.cwd, false, is_meta, base_repos.clone())
@@ -706,7 +734,11 @@ impl<'a> DispatchPipeline<'a> {
                                 Ok(None) => {
                                     // Auto-checkout to main, use workspace_root
                                     if let Err(e) = auto_checkout_to_main(slug, kb_root).await {
-                                        warn!(slug, error = %e, "auto-checkout failed (non-fatal)");
+                                        warn!(
+                                            slug = %display_text(slug),
+                                            error = %display_text(&e.to_string()),
+                                            "auto-checkout failed (non-fatal)"
+                                        );
                                     }
                                     resolved
                                         .env_overrides
@@ -801,13 +833,13 @@ impl<'a> DispatchPipeline<'a> {
                     resolver.on_cleanup(&tmp_record, self.config, None).await;
                     return Err(anyhow::anyhow!(
                         ".dispatch/env path escapes worktree: {}",
-                        env_canon.display()
+                        display_text(&env_canon.display().to_string())
                     ));
                 }
                 match atc_core::project_env::parse_env_file(&env_canon) {
                     Ok(penv) => {
                         tracing::debug!(
-                            path = %env_path.display(),
+                            path = %display_text(&env_path.display().to_string()),
                             count = penv.len(),
                             "loaded project env"
                         );
@@ -895,10 +927,10 @@ impl<'a> DispatchPipeline<'a> {
             now,
         );
         info!(
-            id = %resolved.dispatch_id,
-            agent_provider = %record.agent_provider,
-            agent_session_id = record.agent_session_id.map(|id| id.to_string()),
-            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref(),
+            id = %display_text(&resolved.dispatch_id),
+            agent_provider = %display_text(&record.agent_provider),
+            agent_session_id = record.agent_session_id.map(|id| display_text(&id.to_string())),
+            resume_of_dispatch_id = record.resume_of_dispatch_id.as_deref().map(display_text),
             agent_resume = record.resume_of_dispatch_id.is_some(),
             "registered agent session metadata"
         );
@@ -944,7 +976,10 @@ impl<'a> DispatchPipeline<'a> {
                     env.insert("GH_TOKEN".to_string(), token);
                 }
                 Err(e) => {
-                    warn!(error = %e, "could not resolve GH_TOKEN (non-fatal)");
+                    warn!(
+                        error = %display_text(&e.to_string()),
+                        "could not resolve GH_TOKEN (non-fatal)"
+                    );
                 }
             }
         }
@@ -1016,7 +1051,7 @@ impl<'a> DispatchPipeline<'a> {
                         .any(|c| matches!(c, std::path::Component::ParentDir))
                 {
                     warn!(
-                        path = %rel_path.display(),
+                        path = %display_text(&rel_path.display().to_string()),
                         "skipping provider output file with unsafe path"
                     );
                     continue;
@@ -1027,8 +1062,8 @@ impl<'a> DispatchPipeline<'a> {
                 }
                 if let Err(e) = tokio::fs::write(&abs_path, content).await {
                     warn!(
-                        path = %abs_path.display(),
-                        error = %e,
+                        path = %display_text(&abs_path.display().to_string()),
+                        error = %display_text(&e.to_string()),
                         "failed to write provider output file (non-fatal)"
                     );
                 }
@@ -1223,6 +1258,8 @@ impl<'a> DispatchPipeline<'a> {
             None => Status::Running,
         };
         record.session = handle.session.clone();
+        record.terminal_locator =
+            dispatch_terminal_locator(opts, &handle.session, &worktree_path, Utc::now());
         record.status = status;
         record.updated_at = Utc::now();
 
@@ -1242,16 +1279,36 @@ impl<'a> DispatchPipeline<'a> {
                     .await
                 {
                     warn!(
-                        id = %record.id,
-                        work_unit_id,
-                        error = %e,
+                        id = %display_text(&record.id),
+                        work_unit_id = %display_text(work_unit_id),
+                        error = %display_text(&e.to_string()),
                         "failed to attach work unit to resume dispatch (non-fatal)"
                     );
                     record.work_unit_id = None;
                 }
             }
             if let Err(e) = self.registry.update_status(&record.id, status).await {
-                warn!(id = %resolved.dispatch_id, error = %e, "resume reservation status update failed");
+                warn!(
+                    id = %display_text(&resolved.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "resume reservation status update failed"
+                );
+                return Err(e);
+            }
+            if let Err(e) = self
+                .registry
+                .update_session_locator(
+                    &record.id,
+                    &record.session,
+                    record.terminal_locator.as_ref(),
+                )
+                .await
+            {
+                warn!(
+                    id = %display_text(&resolved.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "resume reservation terminal locator update failed"
+                );
                 return Err(e);
             }
         } else {
@@ -1264,7 +1321,11 @@ impl<'a> DispatchPipeline<'a> {
             )
             .await;
             if let Err(e) = self.registry.insert(&record).await {
-                warn!(id = %resolved.dispatch_id, error = %e, "registry insert failed; killing orphan session");
+                warn!(
+                    id = %display_text(&resolved.dispatch_id),
+                    error = %display_text(&e.to_string()),
+                    "registry insert failed; killing orphan session"
+                );
                 let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
                 if session_killed {
                     resolver
@@ -1272,8 +1333,8 @@ impl<'a> DispatchPipeline<'a> {
                         .await;
                 } else {
                     warn!(
-                        id = %resolved.dispatch_id,
-                        session = %handle.session,
+                        id = %display_text(&resolved.dispatch_id),
+                        session = %display_text(&handle.session),
                         "tmux kill inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
                     );
                 }
@@ -1396,33 +1457,40 @@ impl<'a> DispatchPipeline<'a> {
 
         let source = crate::resolve::resolve_record(self.registry, resume_target)
             .await
-            .with_context(|| format!("failed to resolve resume target '{resume_target}'"))?;
+            .with_context(|| {
+                format!(
+                    "failed to resolve resume target '{}'",
+                    display_text(resume_target)
+                )
+            })?;
+        let source_id = display_text(&source.id);
+        let source_provider = display_text(&source.agent_provider);
 
         anyhow::ensure!(
             source.agent_provider == CLAUDE_AGENT_PROVIDER,
             "cannot resume dispatch {}: provider '{}' is not supported by this slice",
-            source.id,
-            source.agent_provider
+            source_id,
+            source_provider
         );
 
         let capabilities = source.agent_capabilities.ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot resume dispatch {}: provider '{}' did not record capabilities",
-                source.id,
-                source.agent_provider
+                source_id,
+                source_provider
             )
         })?;
         anyhow::ensure!(
             capabilities.supports_resume_by_session_id,
             "cannot resume dispatch {}: provider '{}' does not support resume by session id",
-            source.id,
-            source.agent_provider
+            source_id,
+            source_provider
         );
 
         let session_id = source.agent_session_id.ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot resume dispatch {}: missing agent_session_id",
-                source.id
+                source_id
             )
         })?;
 
@@ -1436,10 +1504,10 @@ impl<'a> DispatchPipeline<'a> {
             {
                 anyhow::bail!(
                     "cannot resume dispatch {}: provider session {} is already active in dispatch {} (status {}). Use --force to override.",
-                    source.id,
-                    session_id,
-                    conflict.id,
-                    conflict.status
+                    source_id,
+                    display_text(&session_id.to_string()),
+                    display_text(&conflict.id),
+                    display_text(&conflict.status.to_string())
                 );
             }
         }
@@ -1458,34 +1526,51 @@ impl<'a> DispatchPipeline<'a> {
             .await
         {
             warn!(
-                id = %record.id,
-                reason,
-                error = %update_err,
+                id = %display_text(&record.id),
+                reason = %display_text(reason),
+                error = %display_text(&update_err.to_string()),
                 "failed to mark resume reservation failed"
             );
         }
+        if let Err(update_err) = self
+            .registry
+            .update_session_locator(&record.id, "", None)
+            .await
+        {
+            warn!(
+                id = %display_text(&record.id),
+                reason = %display_text(reason),
+                error = %display_text(&update_err.to_string()),
+                "failed to clear failed resume reservation terminal locator"
+            );
+        }
         record.status = Status::Failed;
+        record.session.clear();
+        record.terminal_locator = None;
         record.updated_at = Utc::now();
     }
 
     fn validate_resume_transcript_cwd(&self, source: &DispatchRecord) -> Result<PathBuf> {
+        let source_id = display_text(&source.id);
         let stored_transcript_cwd = source.agent_transcript_cwd.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot resume dispatch {}: missing agent_transcript_cwd",
-                source.id
+                source_id
             )
         })?;
         let transcript_cwd =
             canonicalize_existing_dir(stored_transcript_cwd, &source.id, "transcript cwd")?;
         let source_worktree =
             canonicalize_existing_dir(&source.worktree_path, &source.id, "source worktree_path")?;
+        let transcript_cwd_display = display_text(&transcript_cwd.display().to_string());
+        let source_worktree_display = display_text(&source_worktree.display().to_string());
 
         anyhow::ensure!(
             transcript_cwd == source_worktree,
             "cannot resume dispatch {}: transcript cwd '{}' does not match source worktree_path '{}'",
-            source.id,
-            transcript_cwd.display(),
-            source_worktree.display()
+            source_id,
+            transcript_cwd_display,
+            source_worktree_display
         );
 
         anyhow::ensure!(
@@ -1496,8 +1581,8 @@ impl<'a> DispatchPipeline<'a> {
                     .file_name()
                     .is_some_and(|name| name != ".worktrees"),
             "cannot resume dispatch {}: unsafe transcript cwd '{}'",
-            source.id,
-            transcript_cwd.display()
+            source_id,
+            transcript_cwd_display
         );
 
         let dispatch_cfg = &self.config.dispatch;
@@ -1517,8 +1602,8 @@ impl<'a> DispatchPipeline<'a> {
         anyhow::ensure!(
             under_meta_workspace || under_worktree_base,
             "cannot resume dispatch {}: transcript cwd '{}' is not under an ATC workspace or worktree root",
-            source.id,
-            transcript_cwd.display()
+            source_id,
+            transcript_cwd_display
         );
 
         Ok(transcript_cwd)
@@ -1560,6 +1645,7 @@ impl<'a> DispatchPipeline<'a> {
             agent_transcript_cwd: None,
             resume_of_dispatch_id: None,
             agent_capabilities: None,
+            terminal_locator: None,
             dispatched_at: now,
             updated_at: now,
         }
@@ -1786,7 +1872,10 @@ async fn resolve_base_repos(
     if let Ok(env_repo) = std::env::var("DISPATCH_WORKTREE_REPO") {
         let env_repo = env_repo.trim();
         if !env_repo.is_empty() {
-            info!(repo = %env_repo, "using DISPATCH_WORKTREE_REPO env var");
+            info!(
+                repo = %display_text(env_repo),
+                "using DISPATCH_WORKTREE_REPO env var"
+            );
             return vec![env_repo.to_string()];
         }
         // Blank env var behaves like "unset" so fallback chain continues.
@@ -1794,19 +1883,23 @@ async fn resolve_base_repos(
     if let Some(pr_url) = effective_pr_url {
         match resolve_pr_repo_path(pr_url, workspace_root).await {
             Ok(Some(r)) => {
-                info!(pr_url = %pr_url, repo = %r, "resolved PR repo to local path");
+                info!(
+                    pr_url = %display_text(pr_url),
+                    repo = %display_text(&r),
+                    "resolved PR repo to local path"
+                );
                 return vec![r];
             }
             Ok(None) => {
                 info!(
-                    pr_url = %pr_url,
+                    pr_url = %display_text(pr_url),
                     "could not resolve PR repo to local path, using config/discovery fallback"
                 );
             }
             Err(e) => {
                 warn!(
-                    pr_url = %pr_url,
-                    error = %e,
+                    pr_url = %display_text(pr_url),
+                    error = %display_text(&e.to_string()),
                     "PR repo resolution failed, using config/discovery fallback"
                 );
             }
@@ -1963,10 +2056,17 @@ async fn post_pr_comment(pr_url: &str, body: &str) {
         .await;
     match result {
         Ok(s) if !s.success() => {
-            warn!(pr_url, "gh pr comment failed (non-fatal)");
+            warn!(
+                pr_url = %display_text(pr_url),
+                "gh pr comment failed (non-fatal)"
+            );
         }
         Err(e) => {
-            warn!(pr_url, error = %e, "gh pr comment failed (non-fatal)");
+            warn!(
+                pr_url = %display_text(pr_url),
+                error = %display_text(&e.to_string()),
+                "gh pr comment failed (non-fatal)"
+            );
         }
         _ => {}
     }
@@ -2048,7 +2148,10 @@ async fn resolve_dispatch_work_unit(
     let work_unit_id = match &work_unit {
         Ok(wu) => Some(wu.id.clone()),
         Err(e) => {
-            warn!(error = %e, "work unit resolution failed (non-fatal)");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "work unit resolution failed (non-fatal)"
+            );
             None
         }
     };
@@ -2057,7 +2160,10 @@ async fn resolve_dispatch_work_unit(
         for repo in repos {
             if !wu.repos.contains(repo) {
                 if let Err(e) = registry.add_work_unit_repo(&wu.id, repo).await {
-                    warn!(error = %e, "failed to add repo to work unit (non-fatal)");
+                    warn!(
+                        error = %display_text(&e.to_string()),
+                        "failed to add repo to work unit (non-fatal)"
+                    );
                 }
             }
         }
@@ -2097,20 +2203,21 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
         Ok(mut child) => match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) if !status.success() => {
                 warn!(
-                    worktree = %worktree_path.display(),
+                    worktree = %display_text(&worktree_path.display().to_string()),
                     "rollback worktree remove exited with {status}"
                 );
             }
             Ok(Err(e)) => {
                 warn!(
-                    worktree = %worktree_path.display(),
-                    "rollback worktree remove failed: {e}"
+                    worktree = %display_text(&worktree_path.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "rollback worktree remove failed"
                 );
             }
             Err(_) => {
                 let _ = child.kill().await;
                 warn!(
-                    worktree = %worktree_path.display(),
+                    worktree = %display_text(&worktree_path.display().to_string()),
                     "rollback worktree remove timed out"
                 );
             }
@@ -2118,8 +2225,9 @@ async fn rollback_worktree(is_meta: bool, worktree_path: &Path, workspace_root: 
         },
         Err(e) => {
             warn!(
-                worktree = %worktree_path.display(),
-                "failed to spawn worktree remove: {e}"
+                worktree = %display_text(&worktree_path.display().to_string()),
+                error = %display_text(&e.to_string()),
+                "failed to spawn worktree remove"
             );
         }
     }
@@ -2185,8 +2293,38 @@ mod tests {
                 "unexpected error for {slug:?}: {err}"
             );
         }
+        let hostile = "tasks/bad\x1b[2J\u{202e}gpj/../secret";
+        let hostile_err = validate_document_policy_slug(hostile)
+            .unwrap_err()
+            .to_string();
+        assert!(hostile_err.contains("tasks/bad\\x1b[2J\\u{202e}gpj/../secret"));
+        assert!(!hostile_err.contains('\x1b'));
+        assert!(!hostile_err.contains('\u{202e}'));
+
         validate_document_policy_slug("tasks/foo").unwrap();
         validate_document_policy_slug("specs/atc-agent-harness-contract").unwrap();
+    }
+
+    #[test]
+    fn test_canonicalize_existing_dir_uses_real_path_but_escapes_errors() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let weird_dir = tempdir.path().join("resume-\x1b[2J\u{202e}gpj");
+        std::fs::create_dir(&weird_dir).unwrap();
+
+        let canonical =
+            canonicalize_existing_dir(&weird_dir, "dispatch-\x1b[31m\u{202e}gpj", "transcript cwd")
+                .unwrap();
+        assert_eq!(canonical, std::fs::canonicalize(&weird_dir).unwrap());
+
+        let missing = weird_dir.join("missing");
+        let err =
+            canonicalize_existing_dir(&missing, "dispatch-\x1b[31m\u{202e}gpj", "transcript cwd")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("dispatch-\\x1b[31m\\u{202e}gpj"));
+        assert!(err.contains("resume-\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
     }
 
     #[test]

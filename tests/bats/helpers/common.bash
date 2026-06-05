@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   agent_transcript_cwd      TEXT,
   resume_of_dispatch_id     TEXT,
   agent_capabilities_json   TEXT,
+  terminal_locator_json     TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );

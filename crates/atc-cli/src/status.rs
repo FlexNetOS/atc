@@ -393,8 +393,12 @@ pub struct StatusOpts {
 
 /// Parse `--since 24h` / `--since 2d` etc. via `humantime`.
 fn parse_since(s: &str) -> Result<Duration> {
-    let std_dur = humantime::parse_duration(s)
-        .with_context(|| format!("invalid --since value '{s}' (try 24h, 2d, 1w)"))?;
+    let std_dur = humantime::parse_duration(s).with_context(|| {
+        format!(
+            "invalid --since value '{}' (try 24h, 2d, 1w)",
+            display_text(s)
+        )
+    })?;
     Duration::from_std(std_dur).context("--since duration too large")
 }
 
@@ -759,6 +763,16 @@ mod tests {
         ];
         let out = format_pr_list(&urls);
         assert_eq!(out, "repo#1, repo#2");
+    }
+
+    #[test]
+    fn parse_since_escapes_terminal_controls() {
+        let err = parse_since("bad\x1b[2J\u{202e}gpj")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("bad\\x1b[2J\\u{202e}gpj"), "got: {err}");
+        assert_no_raw_terminal_controls(&err);
     }
 
     #[test]

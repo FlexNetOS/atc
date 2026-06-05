@@ -18,7 +18,8 @@ SET work_unit_id = 'wu-001',
     pr_urls = '["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]',
     agent_session_id = '00000000-0000-4000-8000-000000000794',
     agent_transcript_cwd = '$TEST_TMPDIR/worktree',
-    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true,"supports_tmux_attach":true,"supports_tmux_redirect":true,"supports_stream_json_output":true,"supports_cost_and_turn_reporting":true}'
+    agent_capabilities_json = '{"supports_resume_by_session_id":true,"supports_explicit_session_id_on_start":true,"supports_tmux_attach":true,"supports_tmux_redirect":true,"supports_stream_json_output":true,"supports_cost_and_turn_reporting":true}',
+    terminal_locator_json = '{"kind":"tmux","version":1,"session":"disp-001","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
 WHERE id = 'disp-001';
 SQL
 }
@@ -36,6 +37,14 @@ SQL
     assert_output --partial "--once"
 }
 
+@test "open-session --help documents non-attaching json preview" {
+    run atc open-session --help
+    assert_success
+    assert_output --partial "atc://session"
+    assert_output --partial "--json"
+    assert_output --partial "without attaching"
+}
+
 @test "sessions --json emits session rows and capability action state" {
     require_jq
     setup_sessions_data
@@ -45,11 +54,17 @@ SQL
 
     echo "$STDOUT" | jq -e '.schema_version == 1' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].id == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].uri == "atc://session/disp-001"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].task_slug == "tasks/test-1"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].work_unit_id == "wu-001"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].provider == "claude"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].provider_session_id == "00000000-0000-4000-8000-000000000794"' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].pr_urls == ["https://github.com/org/repo/pull/42","https://github.com/org/api/pull/7"]' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_status.state | type == "string"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].open_shell.action == "open-session"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == .rows[0].open_shell.enabled' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
     echo "$STDOUT" | jq -e '.work_units[0].id == "wu-001"' >/dev/null
@@ -67,9 +82,180 @@ SQL
     run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
     [ "$SPLIT_STATUS" -eq 0 ]
 
-    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == true' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].actions.attach.enabled == .rows[0].open_shell.enabled' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.redirect.enabled == true' >/dev/null
     echo "$STDOUT" | jq -e '.rows[0].actions.resume.enabled == false' >/dev/null
+}
+
+@test "sessions --json emits deterministic inferred locator for legacy tmux session fields" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = NULL,
+    updated_at = '2026-06-05T01:02:03+00:00'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.source == "legacy-session-field"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.confidence == "inferred"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].open_shell.backend == "tmux"' >/dev/null
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e '.data.terminal_locator.source == "legacy-session-field"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
+}
+
+@test "sessions --json rejects unsupported persisted locator versions and falls back safely" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"kind":"tmux","version":2,"session":"future-session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}',
+    updated_at = '2026-06-05T01:02:03+00:00'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.source == "legacy-session-field"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.detected_at == "2026-06-05T01:02:03Z"' >/dev/null
+    [[ "$STDERR" == *"unsupported tmux terminal locator version: 2"* ]]
+    [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+}
+
+@test "sessions --json rejects blank persisted tmux locator sessions and falls back safely" {
+    require_jq
+    setup_sessions_data
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"kind":"tmux","version":1,"session":"  ","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}',
+    updated_at = '2026-06-05T01:02:03+00:00'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.rows[0].terminal_locator.source == "legacy-session-field"' >/dev/null
+    [[ "$STDERR" == *"tmux terminal locator session is empty"* ]]
+    [[ "$STDERR" == *"ignoring invalid terminal_locator_json"* ]]
+}
+
+@test "open-session --json resolves session URI without attaching" {
+    require_jq
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.schema_version == 1' >/dev/null
+    echo "$STDOUT" | jq -e '.kind == "open-session"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.dispatch_id == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.uri == "atc://session/disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.session == "disp-001"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_locator.kind == "tmux"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_status.state | type == "string"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.open_shell.action == "open-session"' >/dev/null
+}
+
+@test "open-session rejects malformed and unsupported atc URIs" {
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://dispatch/disp-001 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unsupported atc resource URI"* ]]
+
+    local esc=$'\033'
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "https://example.invalid/disp-001${esc}[2J" --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unsupported open-session URI scheme"* ]]
+    [[ "$STDERR" == *"\\x1b"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "mailto:disp-001" --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unsupported open-session URI scheme"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/disp-001/extra --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"must be percent-encoded"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/%1Bdisp-001 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"disallowed control or format character"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session atc://session/%E2%80%8Bdisp-001 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"disallowed control or format character"* ]]
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "atc://session/disp-001${esc}[2J" --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"0x1B"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+}
+
+@test "open-session --json prefers raw dispatch ids over URI-like text" {
+    require_jq
+    setup_sessions_data
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "https://example.invalid/dispatch-id" "tasks/uri-id" "running"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session "https://example.invalid/dispatch-id" --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.data.dispatch_id == "https://example.invalid/dispatch-id"' >/dev/null
+    echo "$STDOUT" | jq -e '.data.uri == "atc://session/https%3A%2F%2Fexample.invalid%2Fdispatch-id"' >/dev/null
+}
+
+@test "open-session --json disables stale or unavailable tmux locators" {
+    require_jq
+    setup_sessions_data
+    local missing_session="atc-missing-$BATS_TEST_NUMBER-$$"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"kind":"tmux","version":1,"session":"$missing_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+
+    echo "$STDOUT" | jq -e '.data.open_shell.enabled == false' >/dev/null
+    echo "$STDOUT" | jq -e '.data.open_shell.attach_command == null' >/dev/null
+    echo "$STDOUT" | jq -e '.data.terminal_status.state == "stale" or .data.terminal_status.state == "unavailable"' >/dev/null
+}
+
+@test "open-session refuses non-interactive attach attempts" {
+    setup_sessions_data
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"non-interactive terminal"* ]]
+    [[ "$STDERR" == *"--json"* ]]
+}
+
+@test "open-session rejects ambiguous active task slug with candidates" {
+    setup_sessions_data
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-ambiguous" "tasks/test-1" "running"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session tasks/test-1 --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"multiple active dispatches"* ]]
+    [[ "$STDERR" == *"disp-001"* ]]
+    [[ "$STDERR" == *"disp-ambiguous"* ]]
 }
 
 @test "tui --json is the same sessions command surface" {
@@ -245,16 +431,40 @@ SQL
     assert_file_not_exists "$sentinel"
 }
 
+@test "sessions and open-session preview treat hostile terminal locator as inert data" {
+    require_jq
+    setup_sessions_data
+    local sentinel="$TEST_TMPDIR/terminal-locator-pwned"
+    local hostile_session="\$(touch $sentinel)"
+    sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
+UPDATE dispatches
+SET terminal_locator_json = '{"kind":"tmux","version":1,"session":"$hostile_session","cwd":"$TEST_TMPDIR/worktree","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}'
+WHERE id = 'disp-001';
+SQL
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" sessions --json --all
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e --arg payload "$hostile_session" '.rows[0].terminal_locator.session == $payload' >/dev/null
+    assert_file_not_exists "$sentinel"
+
+    run_split atc --config "$TEST_TMPDIR/atc.toml" open-session disp-001 --json
+    [ "$SPLIT_STATUS" -eq 0 ]
+    echo "$STDOUT" | jq -e --arg payload "$hostile_session" '.data.session == $payload' >/dev/null
+    echo "$STDOUT" | jq -e --arg payload "$hostile_session" '.data.terminal_locator.session == $payload' >/dev/null
+    assert_file_not_exists "$sentinel"
+}
+
 @test "sessions --json escapes Unicode format controls in encoded bytes while preserving decoded values" {
     require_jq
     setup_sessions_data
     local bidi=$'\u202e'
     local line_sep=$'\u2028'
     local paragraph_sep=$'\u2029'
+    local csi=$'\u009b'
     sqlite3 "$TEST_TMPDIR/atc.db" <<SQL
 UPDATE dispatches
 SET branch = 'branch-' || char(8238) || 'gpj' || char(8232) || 'line' || char(8233) || 'para.exe',
-    session = 'tmux-' || char(8238) || 'gpj' || char(8232) || 'line',
+    session = 'tmux-' || char(155) || '31mred' || char(8238) || 'gpj' || char(8232) || 'line',
     agent_provider = 'claude-' || char(8238) || 'gpj' || char(8233) || 'para.exe'
 WHERE id = 'disp-001';
 SQL
@@ -265,14 +475,19 @@ SQL
     [[ "$STDOUT" != *"$bidi"* ]]
     [[ "$STDOUT" != *"$line_sep"* ]]
     [[ "$STDOUT" != *"$paragraph_sep"* ]]
+    [[ "$STDOUT" != *"$csi"* ]]
     [[ "$STDOUT" == *"\\u202e"* ]]
     [[ "$STDOUT" == *"\\u2028"* ]]
     [[ "$STDOUT" == *"\\u2029"* ]]
+    [[ "$STDOUT" == *"\\u009b"* ]]
     local decoded_branch
     decoded_branch="$(echo "$STDOUT" | jq -r '.rows[0].branch')"
     [[ "$decoded_branch" == *"$bidi"* ]]
     [[ "$decoded_branch" == *"$line_sep"* ]]
     [[ "$decoded_branch" == *"$paragraph_sep"* ]]
+    local decoded_session
+    decoded_session="$(echo "$STDOUT" | jq -r '.rows[0].session')"
+    [[ "$decoded_session" == *"$csi"* ]]
 }
 
 @test "sessions --once escapes terminal control sequences in human output" {

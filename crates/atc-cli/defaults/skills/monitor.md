@@ -6,9 +6,10 @@ Use this when the user asks you to watch, monitor, or check on a running agent.
 
 ```bash
 atc status --flat
+atc sessions --json
 ```
 
-Shows all dispatches: status, directive, cost, turns, duration, worktree path. Statuses: `running`, `done`, `failed`, `stopped`, `needs-review`, `needs-human`, `retrying`.
+Shows dispatch/session state. `atc status --flat` focuses on dispatch lifecycle; `atc sessions --json` also includes terminal locator, derived terminal status, and open-shell preview state. Statuses: `running`, `done`, `failed`, `stopped`, `needs-review`, `needs-human`, `retrying`.
 
 For machine-readable output: `atc status --flat --json`.
 
@@ -24,6 +25,16 @@ atc logs "<dispatch-id>"
 # Follow mode (like tail -f)
 atc logs <slug-or-id> -f
 ```
+
+## Open Agent Session
+
+```bash
+atc open-session <dispatch-id>
+atc open-session atc://session/<dispatch-id>
+atc open-session <task-slug> --json
+```
+
+Use `--json` to resolve and preview the terminal action without attaching. Normal mode attaches through ATC's tmux adapter.
 
 ### Reading the Log
 

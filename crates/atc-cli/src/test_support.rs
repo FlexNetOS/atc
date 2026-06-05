@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use atc_core::registry::{Registry, StatusFilter};
-use atc_core::types::{Directive, DispatchRecord, HealthChecks, Status, CLAUDE_AGENT_PROVIDER};
+use atc_core::types::{
+    Directive, DispatchRecord, HealthChecks, Status, TerminalLocator, CLAUDE_AGENT_PROVIDER,
+};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -34,6 +36,7 @@ pub(crate) fn dispatch_record_fixture() -> DispatchRecord {
         agent_transcript_cwd: None,
         resume_of_dispatch_id: None,
         agent_capabilities: None,
+        terminal_locator: None,
         dispatched_at: now,
         updated_at: now,
     }
@@ -74,6 +77,19 @@ impl Registry for MockRegistry {
     async fn update_status(&self, id: &str, status: Status) -> Result<()> {
         self.with_record_mut(id, |record| {
             record.status = status;
+            record.updated_at = Utc::now();
+        })
+    }
+
+    async fn update_session_locator(
+        &self,
+        id: &str,
+        session: &str,
+        terminal_locator: Option<&TerminalLocator>,
+    ) -> Result<()> {
+        self.with_record_mut(id, |record| {
+            record.session = session.to_string();
+            record.terminal_locator = terminal_locator.cloned();
             record.updated_at = Utc::now();
         })
     }
@@ -182,6 +198,20 @@ impl Registry for MockRegistry {
             record.dispatched_at = new_dispatched_at;
             record.updated_at = new_dispatched_at;
             record.status = Status::Running;
+            record.checks = HealthChecks::default();
+            record.pr_urls.clear();
+            record.cost_usd = None;
+            record.num_turns = None;
+            record.duration_ms = None;
+            record.terminal_locator = if new_session.trim().is_empty() {
+                None
+            } else {
+                Some(TerminalLocator::atc_tmux(
+                    new_session,
+                    Some(record.worktree_path.clone()),
+                    new_dispatched_at,
+                ))
+            };
         })
     }
 

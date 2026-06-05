@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::terminal_text::display_text;
+
 use super::{ContextOutput, ContextProvider, DispatchContext};
 
 /// Timeout for gh subprocess calls (REST API, GraphQL, pr view).
@@ -44,7 +46,10 @@ impl ContextProvider for PrContextProvider {
             }
         };
 
-        info!(pr_url = %pr_url, "pr-context: fetching PR data");
+        info!(
+            pr_url = %display_text(&pr_url),
+            "pr-context: fetching PR data"
+        );
 
         // Parse owner/repo/number from URL
         let (owner, repo, pr_number) = parse_pr_url(&pr_url)?;
@@ -58,19 +63,31 @@ impl ContextProvider for PrContextProvider {
         );
 
         let metadata = metadata.unwrap_or_else(|e| {
-            warn!(error = %e, "failed to fetch PR metadata");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "failed to fetch PR metadata"
+            );
             Value::Null
         });
         let comments = comments.unwrap_or_else(|e| {
-            warn!(error = %e, "failed to fetch review comments");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "failed to fetch review comments"
+            );
             Value::Array(vec![])
         });
         let reviews = reviews.unwrap_or_else(|e| {
-            warn!(error = %e, "failed to fetch reviews");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "failed to fetch reviews"
+            );
             Value::Array(vec![])
         });
         let threads = threads.unwrap_or_else(|e| {
-            warn!(error = %e, "failed to fetch review threads");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "failed to fetch review threads"
+            );
             Value::Null
         });
 
@@ -140,18 +157,23 @@ pub fn parse_pr_url(url: &str) -> anyhow::Result<(String, String, u64)> {
     let stripped = url
         .trim_end_matches('/')
         .strip_prefix("https://github.com/")
-        .ok_or_else(|| anyhow::anyhow!("PR URL must start with https://github.com/: {}", url))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "PR URL must start with https://github.com/: {}",
+                display_text(url)
+            )
+        })?;
 
     let parts: Vec<&str> = stripped.split('/').collect();
     if parts.len() < 4 || parts[0].is_empty() || parts[1].is_empty() || parts[2] != "pull" {
-        anyhow::bail!("invalid PR URL format: {}", url);
+        anyhow::bail!("invalid PR URL format: {}", display_text(url));
     }
 
     // Strip any fragment (e.g., #discussion_r12345)
     let num_str = parts[3].split('#').next().unwrap_or(parts[3]);
     let number: u64 = num_str
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid PR number in URL: {}", url))?;
+        .map_err(|_| anyhow::anyhow!("invalid PR number in URL: {}", display_text(url)))?;
 
     Ok((parts[0].to_string(), parts[1].to_string(), number))
 }
@@ -177,7 +199,7 @@ async fn fetch_pr_metadata(pr_url: &str) -> anyhow::Result<Value> {
     if !output.status.success() {
         anyhow::bail!(
             "gh pr view failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
@@ -203,7 +225,7 @@ async fn fetch_review_comments(owner: &str, repo: &str, pr_number: u64) -> anyho
     if !output.status.success() {
         anyhow::bail!(
             "gh api comments failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
@@ -229,7 +251,7 @@ async fn fetch_reviews(owner: &str, repo: &str, pr_number: u64) -> anyhow::Resul
     if !output.status.success() {
         anyhow::bail!(
             "gh api reviews failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
@@ -306,7 +328,7 @@ async fn fetch_review_threads(owner: &str, repo: &str, pr_number: u64) -> anyhow
         if !output.status.success() {
             anyhow::bail!(
                 "gh api graphql failed: {}",
-                String::from_utf8_lossy(&output.stderr)
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
 
@@ -859,6 +881,20 @@ mod tests {
         assert!(parse_pr_url("https://gitlab.com/foo/bar/pull/1").is_err());
         assert!(parse_pr_url("https://github.com/foo/bar/issues/1").is_err());
         assert!(parse_pr_url("not a url").is_err());
+    }
+
+    #[test]
+    fn test_parse_pr_url_invalid_errors_escape_terminal_controls() {
+        for url in [
+            "https://gitlab.com/foo\x1b[2J\u{202e}gpj/bar/pull/1",
+            "https://github.com/foo/bar\x1b[2J\u{202e}gpj/issues/1",
+            "https://github.com/foo/bar/pull/nope\x1b[2J\u{202e}gpj",
+        ] {
+            let err = parse_pr_url(url).unwrap_err().to_string();
+            assert!(err.contains("\\x1b[2J\\u{202e}gpj"), "got: {err}");
+            assert!(!err.contains('\x1b'), "got: {err}");
+            assert!(!err.contains('\u{202e}'), "got: {err}");
+        }
     }
 
     #[test]

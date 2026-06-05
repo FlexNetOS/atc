@@ -1,9 +1,10 @@
 use crate::queue::{
     DispatchQueue, EnqueueItem, EnqueueResult, QueueInputType, QueueItemStatus, QueueRow,
 };
+use crate::terminal_text::display_text;
 use crate::types::{
     claude_agent_capabilities, AgentCapabilities, AgentSessionId, DispatchRecord, HealthChecks,
-    Status, CLAUDE_AGENT_PROVIDER,
+    Status, TerminalLocator, CLAUDE_AGENT_PROVIDER,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -39,6 +40,14 @@ fn active_agent_session_query_sql(select: &str) -> String {
 
 fn active_task_count_query_sql() -> String {
     format!("SELECT COUNT(*) FROM dispatches WHERE task_slug = ?1 AND {ACTIVE_DISPATCH_STATUS_SQL}")
+}
+
+fn display_metadata_error(error: impl std::fmt::Display) -> String {
+    display_text(&error.to_string())
+}
+
+fn dispatch_not_found_error(id: &str) -> String {
+    format!("no dispatch record found for id: {}", display_text(id))
 }
 
 /// Filter passed to `Registry::list`.
@@ -103,6 +112,12 @@ pub trait Registry: Send + Sync {
             }))
     }
     async fn update_status(&self, id: &str, status: Status) -> Result<()>;
+    async fn update_session_locator(
+        &self,
+        id: &str,
+        session: &str,
+        terminal_locator: Option<&TerminalLocator>,
+    ) -> Result<()>;
     async fn update_dispatch_work_unit(
         &self,
         _id: &str,
@@ -274,6 +289,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   agent_transcript_cwd      TEXT,
   resume_of_dispatch_id     TEXT,
   agent_capabilities_json   TEXT,
+  terminal_locator_json     TEXT,
   dispatched_at             TEXT NOT NULL,
   updated_at                TEXT NOT NULL
 );
@@ -525,6 +541,17 @@ impl SqliteRegistry {
                 }
             }
 
+            let (has_terminal_locator,): (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'terminal_locator_json'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if has_terminal_locator == 0 {
+                sqlx::query("ALTER TABLE dispatches ADD COLUMN terminal_locator_json TEXT")
+                    .execute(pool)
+                    .await?;
+            }
+
             // Backfill provider capability snapshots for legacy Claude rows.
             // Capabilities describe the provider contract rather than per-run
             // state; per-action checks still require the needed session/log data.
@@ -603,6 +630,11 @@ impl SqliteRegistry {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let terminal_locator_json = record
+            .terminal_locator
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let worktree_path = record
             .worktree_path
             .to_str()
@@ -637,10 +669,10 @@ impl SqliteRegistry {
                 check_ci_passed, check_reviews_approved, check_threads_resolved,
                 cost_usd, num_turns, duration_ms, work_unit_id,
                 agent_provider, agent_session_id, agent_transcript_cwd, resume_of_dispatch_id,
-                agent_capabilities_json, artifacts, dispatched_at, updated_at
+                agent_capabilities_json, terminal_locator_json, artifacts, dispatched_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34
             )"#,
         )
         .bind(&record.id)
@@ -685,6 +717,7 @@ impl SqliteRegistry {
         .bind(agent_transcript_cwd)
         .bind(&record.resume_of_dispatch_id)
         .bind(&agent_capabilities_json)
+        .bind(&terminal_locator_json)
         .bind(&record.artifacts)
         .bind(record.dispatched_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
@@ -704,6 +737,7 @@ impl SqliteRegistry {
         let worktree_str: String = row.get("worktree_path");
         let log_file_str: String = row.get("log_file");
         let id: String = row.get("id");
+        let display_id = display_text(&id);
         let agent_session_id = match row
             .get::<Option<String>, _>("agent_session_id")
             .as_deref()
@@ -712,7 +746,8 @@ impl SqliteRegistry {
         {
             Ok(session_id) => session_id,
             Err(e) => {
-                warn!(dispatch_id = %id, error = %e, "ignoring invalid agent_session_id");
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid agent_session_id");
                 None
             }
         };
@@ -724,7 +759,21 @@ impl SqliteRegistry {
         {
             Ok(capabilities) => capabilities,
             Err(e) => {
-                warn!(dispatch_id = %id, error = %e, "ignoring invalid agent_capabilities_json");
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid agent_capabilities_json");
+                None
+            }
+        };
+        let terminal_locator = match row
+            .get::<Option<String>, _>("terminal_locator_json")
+            .as_deref()
+            .map(serde_json::from_str::<TerminalLocator>)
+            .transpose()
+        {
+            Ok(locator) => locator,
+            Err(e) => {
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid terminal_locator_json");
                 None
             }
         };
@@ -776,6 +825,7 @@ impl SqliteRegistry {
                 .map(PathBuf::from),
             resume_of_dispatch_id: row.get("resume_of_dispatch_id"),
             agent_capabilities,
+            terminal_locator,
             dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
             updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
         })
@@ -857,7 +907,10 @@ impl Registry for SqliteRegistry {
 
             if let Some((id, status)) = conflict {
                 anyhow::bail!(
-                    "provider session {session_id} is already active in dispatch {id} (status {status})"
+                    "provider session {} is already active in dispatch {} (status {})",
+                    display_text(&session_id),
+                    display_text(&id),
+                    display_text(&status)
                 );
             }
 
@@ -871,7 +924,10 @@ impl Registry for SqliteRegistry {
             if result.is_ok() {
                 return Err(e.into());
             }
-            warn!(error = %e, "failed to roll back resume reservation transaction");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "failed to roll back resume reservation transaction"
+            );
         }
 
         result
@@ -906,7 +962,33 @@ impl Registry for SqliteRegistry {
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn update_session_locator(
+        &self,
+        id: &str,
+        session: &str,
+        terminal_locator: Option<&TerminalLocator>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let terminal_locator_json = terminal_locator.map(serde_json::to_string).transpose()?;
+        let result = sqlx::query(
+            "UPDATE dispatches SET session = ?1, terminal_locator_json = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(session)
+        .bind(&terminal_locator_json)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -922,7 +1004,8 @@ impl Registry for SqliteRegistry {
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -941,7 +1024,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1055,7 +1139,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1075,7 +1160,8 @@ impl Registry for SqliteRegistry {
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1136,7 +1222,8 @@ impl Registry for SqliteRegistry {
                 .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1149,6 +1236,23 @@ impl Registry for SqliteRegistry {
         new_dispatched_at: DateTime<Utc>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let terminal_locator_json = match sqlx::query_as::<_, (String,)>(
+            "SELECT worktree_path FROM dispatches WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            Some((worktree_path,)) if !new_session.trim().is_empty() => {
+                let locator = TerminalLocator::atc_tmux(
+                    new_session,
+                    Some(PathBuf::from(worktree_path)),
+                    new_dispatched_at,
+                );
+                Some(serde_json::to_string(&locator)?)
+            }
+            _ => None,
+        };
         let result = sqlx::query(
             r#"UPDATE dispatches SET
                 retries = retries + 1,
@@ -1167,8 +1271,9 @@ impl Registry for SqliteRegistry {
                 pr_urls = '[]',
                 cost_usd = NULL,
                 num_turns = NULL,
-                duration_ms = NULL
-            WHERE id = ?5"#,
+                duration_ms = NULL,
+                terminal_locator_json = ?5
+            WHERE id = ?6"#,
         )
         .bind(new_session)
         .bind(
@@ -1178,12 +1283,14 @@ impl Registry for SqliteRegistry {
         )
         .bind(new_dispatched_at.to_rfc3339())
         .bind(&now)
+        .bind(&terminal_locator_json)
         .bind(id)
         .execute(&self.pool)
         .await?;
         anyhow::ensure!(
             result.rows_affected() > 0,
-            "no dispatch record found for id: {id}"
+            "{}",
+            dispatch_not_found_error(id)
         );
         Ok(())
     }
@@ -1934,9 +2041,18 @@ mod tests {
             agent_transcript_cwd: Some(PathBuf::from("/tmp/test-worktree")),
             resume_of_dispatch_id: None,
             agent_capabilities: Some(claude_agent_capabilities()),
+            terminal_locator: None,
             dispatched_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn assert_no_raw_terminal_controls(value: &str) {
+        assert!(!value.contains('\x1b'), "raw ESC in output: {value:?}");
+        assert!(
+            !value.contains('\u{202e}'),
+            "raw bidi control in output: {value:?}"
+        );
     }
 
     #[tokio::test]
@@ -1955,6 +2071,88 @@ mod tests {
         assert_eq!(fetched.directive, Directive::Implement);
         assert_eq!(fetched.retries, 0);
         assert_eq!(fetched.resolver, "task");
+    }
+
+    #[tokio::test]
+    async fn test_terminal_locator_round_trip() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let mut record = sample_record("locator-round-trip");
+        record.terminal_locator = Some(TerminalLocator::atc_tmux(
+            "safe-session",
+            Some(PathBuf::from("/tmp/test-worktree")),
+            record.dispatched_at,
+        ));
+
+        registry.insert(&record).await.unwrap();
+        let fetched = registry.get("locator-round-trip").await.unwrap().unwrap();
+
+        assert_eq!(fetched.terminal_locator, record.terminal_locator);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_optional_terminal_locator_does_not_break_reads() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let record = sample_record("bad-terminal-locator");
+        registry.insert(&record).await.unwrap();
+
+        sqlx::query("UPDATE dispatches SET terminal_locator_json = ?1 WHERE id = ?2")
+            .bind("{not-json")
+            .bind("bad-terminal-locator")
+            .execute(&registry.pool)
+            .await
+            .unwrap();
+
+        let fetched = registry.get("bad-terminal-locator").await.unwrap().unwrap();
+
+        assert!(fetched.terminal_locator.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_optional_terminal_locator_kind_does_not_break_reads() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let record = sample_record("unsupported-terminal-locator");
+        registry.insert(&record).await.unwrap();
+
+        sqlx::query("UPDATE dispatches SET terminal_locator_json = ?1 WHERE id = ?2")
+            .bind(
+                r#"{"kind":"terminal-app","version":1,"window_id":"123","detected_at":"2026-06-05T00:00:00Z"}"#,
+            )
+            .bind("unsupported-terminal-locator")
+            .execute(&registry.pool)
+            .await
+            .unwrap();
+
+        let fetched = registry
+            .get("unsupported-terminal-locator")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(fetched.terminal_locator.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_blank_optional_terminal_locator_session_does_not_break_reads() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let record = sample_record("blank-terminal-locator-session");
+        registry.insert(&record).await.unwrap();
+
+        sqlx::query("UPDATE dispatches SET terminal_locator_json = ?1 WHERE id = ?2")
+            .bind(
+                r#"{"kind":"tmux","version":1,"session":"  ","detected_at":"2026-06-05T00:00:00Z","source":"atc-dispatch","confidence":"exact"}"#,
+            )
+            .bind("blank-terminal-locator-session")
+            .execute(&registry.pool)
+            .await
+            .unwrap();
+
+        let fetched = registry
+            .get("blank-terminal-locator-session")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(fetched.terminal_locator.is_none());
     }
 
     #[tokio::test]
@@ -2012,6 +2210,38 @@ mod tests {
         registry.update_status(id, Status::Done).await.unwrap();
         let fetched = registry.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.status, Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_update_session_locator_updates_session_and_locator() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let id = "test@implement@locator-update";
+        let record = sample_record(id);
+        registry.insert(&record).await.unwrap();
+
+        let locator =
+            TerminalLocator::atc_tmux("final-session", Some(record.worktree_path), Utc::now());
+        registry
+            .update_session_locator(id, "final-session", Some(&locator))
+            .await
+            .unwrap();
+
+        let fetched = registry.get(id).await.unwrap().unwrap();
+        assert_eq!(fetched.session, "final-session");
+        assert_eq!(fetched.terminal_locator, Some(locator));
+    }
+
+    #[tokio::test]
+    async fn test_update_session_locator_missing_id_error_escapes_terminal_controls() {
+        let registry = SqliteRegistry::in_memory().await.unwrap();
+        let error = registry
+            .update_session_locator("missing\x1b[2J\u{202e}gpj", "session", None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing\\x1b[2J\\u{202e}gpj"));
+        assert_no_raw_terminal_controls(&error);
     }
 
     #[tokio::test]
@@ -2263,7 +2493,8 @@ mod tests {
         source.status = Status::Done;
         registry.insert(&source).await.unwrap();
 
-        let mut first_resume = sample_record("resume-1");
+        let hostile_id = "resume-1\x1b[2J\u{202e}gpj";
+        let mut first_resume = sample_record(hostile_id);
         first_resume.resume_of_dispatch_id = Some(source.id.clone());
         registry
             .insert_resume_reservation(&first_resume, false)
@@ -2280,6 +2511,9 @@ mod tests {
             err.to_string().contains("already active"),
             "unexpected reservation conflict error: {err}"
         );
+        let error = err.to_string();
+        assert!(error.contains("resume-1\\x1b[2J\\u{202e}gpj"));
+        assert_no_raw_terminal_controls(&error);
 
         let mut forced_resume = sample_record("resume-3");
         forced_resume.resume_of_dispatch_id = Some(source.id);
@@ -2853,6 +3087,14 @@ mod tests {
         assert!(record.agent_transcript_cwd.is_none());
         assert!(record.resume_of_dispatch_id.is_none());
         assert_eq!(record.agent_capabilities, Some(claude_agent_capabilities()));
+        assert!(record.terminal_locator.is_none());
+        let (has_terminal_locator,): (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pragma_table_info('dispatches') WHERE name = 'terminal_locator_json'",
+        )
+        .fetch_one(registry.pool())
+        .await
+        .unwrap();
+        assert_eq!(has_terminal_locator, 1);
     }
 
     #[tokio::test]
@@ -3029,6 +3271,13 @@ mod tests {
         assert_eq!(fetched.retries, 1);
         assert_eq!(fetched.status, Status::Running);
         assert_eq!(fetched.session, "new-session");
+        let locator = fetched
+            .terminal_locator
+            .as_ref()
+            .expect("retry should persist a terminal locator");
+        let TerminalLocator::Tmux(tmux) = locator;
+        assert_eq!(tmux.session, "new-session");
+        assert_eq!(tmux.cwd.as_deref(), Some(Path::new("/tmp/test-worktree")));
         assert!(!fetched.checks.agent_exited_clean);
         assert!(fetched.pr_urls.is_empty());
         assert_eq!(fetched.cost_usd, None);

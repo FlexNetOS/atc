@@ -3,6 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::terminal_text::display_text;
+
 use super::{ContextOutput, ContextProvider, DispatchContext};
 
 /// Timeout for git subprocess calls (fetch, rev-list).
@@ -72,7 +74,10 @@ impl ContextProvider for RebaseProvider {
         let fetch_output = match fetch_result {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
-                warn!(error = %e, "rebase: git fetch failed");
+                warn!(
+                    error = %display_text(&e.to_string()),
+                    "rebase: git fetch failed"
+                );
                 return Ok(output);
             }
             Err(_) => {
@@ -82,7 +87,7 @@ impl ContextProvider for RebaseProvider {
         };
         if !fetch_output.status.success() {
             warn!(
-                stderr = %String::from_utf8_lossy(&fetch_output.stderr),
+                stderr = %display_text(String::from_utf8_lossy(&fetch_output.stderr).trim()),
                 "rebase: git fetch failed"
             );
             return Ok(output);
@@ -107,7 +112,10 @@ impl ContextProvider for RebaseProvider {
         let count_output = match count_result {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
-                warn!(error = %e, "rebase: git rev-list failed");
+                warn!(
+                    error = %display_text(&e.to_string()),
+                    "rebase: git rev-list failed"
+                );
                 return Ok(output);
             }
             Err(_) => {

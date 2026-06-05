@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::config::{expand_tilde, AtcConfig};
+use crate::terminal_text::display_text;
 use crate::types::Directive;
 
 /// Resolve and render the system prompt for a directive.
@@ -41,7 +42,7 @@ async fn resolve_base_template(directive: &Directive, config: &AtcConfig) -> Res
         if let Some(ref path_str) = directive_config.template_path {
             if directive_config.template_inline.is_some() {
                 tracing::warn!(
-                    directive = directive_key,
+                    directive = %display_text(directive_key),
                     "both template_path and template_inline set; using template_path"
                 );
             }
@@ -60,8 +61,8 @@ async fn resolve_base_template(directive: &Directive, config: &AtcConfig) -> Res
                 .with_context(|| {
                     format!(
                         "failed to read template file '{}' for directive '{}'",
-                        expanded.display(),
-                        directive_key,
+                        display_text(&expanded.display().to_string()),
+                        display_text(directive_key),
                     )
                 })?;
             return Ok(content);
@@ -75,8 +76,8 @@ async fn resolve_base_template(directive: &Directive, config: &AtcConfig) -> Res
     }
     anyhow::bail!(
         "no template configured for directive '{}': set [directives.{}] template_path or template_inline in atc.toml",
-        directive_key,
-        directive_key,
+        display_text(directive_key),
+        display_text(directive_key),
     )
 }
 
@@ -218,18 +219,24 @@ mod tests {
         let cfg = config_with_directive(
             "implement",
             DirectiveConfig {
-                template_path: Some("/tmp/nonexistent-atc-template-268.txt".to_string()),
+                template_path: Some(
+                    "/tmp/nonexistent-atc-template-\x1b[2J\u{202e}gpj.txt".to_string(),
+                ),
                 template_inline: None,
                 ..Default::default()
             },
         );
         let err = render_prompt(&Directive::Implement, "tasks/t", &cfg, "")
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.to_string().contains("failed to read template file"),
+            err.contains("failed to read template file"),
             "unexpected error: {err}"
         );
+        assert!(err.contains("\\x1b[2J\\u{202e}gpj"), "got: {err}");
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
     }
 
     // -- Error when no config for directive --

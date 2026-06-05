@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::display_text;
 use atc_core::types::{Directive, Status};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
@@ -128,14 +129,17 @@ pub async fn extract_pr_head_branch(pr_url: &str) -> Result<String> {
         anyhow::bail!(
             "gh pr view --json headRefName failed (exit {:?}):\n{}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            display_text(String::from_utf8_lossy(&output.stderr).trim())
         );
     }
 
     let branch = String::from_utf8(output.stdout)?;
     let branch = branch.trim().to_string();
     if branch.is_empty() {
-        anyhow::bail!("gh pr view returned empty headRefName for {}", pr_url);
+        anyhow::bail!(
+            "gh pr view returned empty headRefName for {}",
+            display_text(pr_url)
+        );
     }
     Ok(branch)
 }
@@ -159,7 +163,10 @@ fn find_repo(value: &serde_json::Value, prefix: &str, target: &str) -> Option<St
                 )
             })
         {
-            warn!(path = %rel.display(), "skipping unsafe meta project path");
+            warn!(
+                path = %display_text(&rel.display().to_string()),
+                "skipping unsafe meta project path"
+            );
             continue;
         }
 
@@ -200,8 +207,20 @@ pub async fn resolve_pr_repo_path(
     // Extract org/repo from PR URL: "https://github.com/org/repo/pull/27" → "org/repo"
     let github_repo = pr_url
         .strip_prefix("https://github.com/")
-        .and_then(|s| s.split("/pull/").next())
-        .ok_or_else(|| anyhow::anyhow!("cannot extract org/repo from PR URL: {}", pr_url))?;
+        .and_then(|s| s.split_once("/pull/").map(|(repo, _)| repo))
+        .filter(|repo| {
+            let mut parts = repo.split('/');
+            matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(org), Some(name), None) if !org.is_empty() && !name.is_empty()
+            )
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot extract org/repo from PR URL: {}",
+                display_text(pr_url)
+            )
+        })?;
 
     let output = tokio::time::timeout(
         SUBPROCESS_TIMEOUT,
@@ -318,20 +337,16 @@ pub async fn write_diag_file(log_dir: &Path, dispatch_id: &str, gh_token_present
     }
 
     if let Err(e) = tokio::fs::write(&diag_path, &content).await {
-        warn!(error = %e, "failed to write .diag file");
+        warn!(
+            error = %display_text(&e.to_string()),
+            "failed to write .diag file"
+        );
     }
 }
 
 /// Check if a tmux session exists.
 pub async fn tmux_session_alive(session: &str) -> bool {
-    tokio::process::Command::new("tmux")
-        .args(["has-session", "-t", session])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::tmux::session_alive(session).await
 }
 
 /// Result of meta workspace discovery.
@@ -379,7 +394,11 @@ pub async fn discover_meta(cwd: &Path) -> Option<MetaDiscovery> {
 
     match repo {
         Some(repo) => {
-            debug!(repo = %repo, root = %workspace_root.display(), "meta workspace discovered");
+            debug!(
+                repo = %display_text(&repo),
+                root = %display_text(&workspace_root.display().to_string()),
+                "meta workspace discovered"
+            );
             Some(MetaDiscovery {
                 repo,
                 workspace_root,
@@ -402,18 +421,29 @@ async fn check_worktree_collision(
         if alive && !force {
             anyhow::bail!(
                 "Worktree {} is in use by dispatch {} (session: {}). Use --force to override.",
-                worktree_path.display(),
-                r.id,
-                r.session,
+                display_text(&worktree_path.display().to_string()),
+                display_text(&r.id),
+                display_text(&r.session),
             );
         }
         if !alive {
-            info!(id = %r.id, "marking stale Running record as Failed (dead tmux session)");
+            info!(
+                id = %display_text(&r.id),
+                "marking stale Running record as Failed (dead tmux session)"
+            );
             if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                warn!(id = %r.id, error = %e, "failed to mark stale record as Failed");
+                warn!(
+                    id = %display_text(&r.id),
+                    error = %display_text(&e.to_string()),
+                    "failed to mark stale record as Failed"
+                );
             }
         } else if force {
-            info!(id = %r.id, session = %r.session, "force-overriding live dispatch; killing session and marking as Failed");
+            info!(
+                id = %display_text(&r.id),
+                session = %display_text(&r.session),
+                "force-overriding live dispatch; killing session and marking as Failed"
+            );
             let _ = tokio::process::Command::new("tmux")
                 .args(["kill-session", "-t", &r.session])
                 .stdout(std::process::Stdio::null())
@@ -421,7 +451,11 @@ async fn check_worktree_collision(
                 .status()
                 .await;
             if let Err(e) = registry.update_status(&r.id, Status::Failed).await {
-                warn!(id = %r.id, error = %e, "failed to mark force-overridden record as Failed");
+                warn!(
+                    id = %display_text(&r.id),
+                    error = %display_text(&e.to_string()),
+                    "failed to mark force-overridden record as Failed"
+                );
             }
         }
     }
@@ -473,7 +507,10 @@ pub async fn resolve_document_workspace(
             )
         })
     {
-        anyhow::bail!("invalid document slug for workspace resolution: {}", slug);
+        anyhow::bail!(
+            "invalid document slug for workspace resolution: {}",
+            display_text(slug)
+        );
     }
 
     let workspaces_dir = kb_root.join(".kb/workspaces");
@@ -527,7 +564,10 @@ pub async fn resolve_document_workspace(
             || branch_name == ".."
             || branch_name == "."
         {
-            warn!(branch_name, "skipping unsafe workspace directory name");
+            warn!(
+                branch_name = %display_text(&branch_name),
+                "skipping unsafe workspace directory name"
+            );
             continue;
         }
         let doc_path = entry.path().join(format!("{}.md", slug));
@@ -599,7 +639,10 @@ pub async fn resolve_document_workspace(
     } else {
         let cwd = find_worktree_for_branch(&selected, worktree_base, workspace_root)
             .unwrap_or_else(|| {
-                warn!(branch = %selected, "no worktree found for branch, falling back to workspace_root");
+                warn!(
+                    branch = %display_text(&selected),
+                    "no worktree found for branch, falling back to workspace_root"
+                );
                 workspace_root.to_path_buf()
             });
         Ok(Some(DocumentWorkspace {
@@ -670,7 +713,11 @@ pub fn find_worktree_for_branch(
 
 /// Auto-checkout a document to the main KB workspace.
 pub async fn auto_checkout_to_main(slug: &str, kb_root: &Path) -> Result<()> {
-    info!(slug, kb_root = %kb_root.display(), "auto-checking out document to main workspace");
+    info!(
+        slug = %display_text(slug),
+        kb_root = %display_text(&kb_root.display().to_string()),
+        "auto-checking out document to main workspace"
+    );
     let child = tokio::process::Command::new("git-kb")
         .args(["checkout", slug])
         .env("GITKB_ROOT", kb_root)
@@ -689,8 +736,8 @@ pub async fn auto_checkout_to_main(slug: &str, kb_root: &Path) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         warn!(
-            slug,
-            stderr = %stderr,
+            slug = %display_text(slug),
+            stderr = %display_text(stderr.trim()),
             "git-kb checkout failed for document (non-fatal)"
         );
     }
@@ -785,7 +832,11 @@ pub async fn ensure_worktree(
                             )
                             .await?;
                         }
-                        info!(branch, path = %existing, "reusing existing worktree");
+                        info!(
+                            branch = %display_text(branch),
+                            path = %display_text(existing),
+                            "reusing existing worktree"
+                        );
                         let _ = tokio::process::Command::new("git")
                             .args(["-C", existing, "fetch", "origin"])
                             .stdout(std::process::Stdio::null())
@@ -822,7 +873,7 @@ pub async fn ensure_worktree(
             anyhow::bail!(
                 "meta git worktree create failed (exit {:?}):\n{}",
                 output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
     } else {
@@ -853,7 +904,7 @@ pub async fn ensure_worktree(
             anyhow::bail!(
                 "git worktree add failed (exit {:?}):\n{}",
                 output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
     }
@@ -1257,6 +1308,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_document_workspace_invalid_slug_escapes_terminal_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+        let err = resolve_document_workspace(
+            "tasks/bad\x1b[2J\u{202e}gpj/../secret",
+            kb_root,
+            Path::new("/tmp/worktrees"),
+            kb_root,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("tasks/bad\\x1b[2J\\u{202e}gpj/../secret"),
+            "got: {err}"
+        );
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
+    }
+
+    #[tokio::test]
     async fn test_resolve_document_workspace_ambiguous_warns_and_picks_alphabetically() {
         let dir = tempfile::tempdir().unwrap();
         let kb_root = dir.path();
@@ -1280,6 +1353,29 @@ mod tests {
         let ws = result.unwrap();
         // Should pick first alphabetically
         assert_eq!(ws.workspace_branch, "branch-a");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_pr_repo_path_invalid_url_escapes_terminal_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        for invalid in [
+            "not-github\x1b[2J\u{202e}gpj",
+            "https://github.com/gitkb/atc/issues/72\x1b[2J\u{202e}gpj",
+            "https://github.com/gitkb/atc",
+            "https://github.com/gitkb//pull/72",
+        ] {
+            let err = resolve_pr_repo_path(invalid, dir.path())
+                .await
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                err.contains("cannot extract org/repo from PR URL"),
+                "got: {err}"
+            );
+            assert!(!err.contains('\x1b'), "got: {err}");
+            assert!(!err.contains('\u{202e}'), "got: {err}");
+        }
     }
 
     #[test]

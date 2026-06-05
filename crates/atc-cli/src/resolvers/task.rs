@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use atc_core::config::AtcConfig;
 use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
+use atc_core::terminal_text::display_text;
 use atc_core::types::{Directive, DispatchRecord, RunOpts};
 
 use crate::dispatch::{build_dispatch_id, derive_branch};
@@ -59,16 +60,30 @@ impl TaskResolver {
             Ok(child) => match tokio::time::timeout(KB_TIMEOUT, child.wait_with_output()).await {
                 Ok(Ok(o)) => o.status.success(),
                 Ok(Err(e)) => {
-                    debug!(slug, ?kb_root, error = %e, "git-kb show failed");
+                    debug!(
+                        slug = %display_text(slug),
+                        kb_root = %display_text(&kb_root.display().to_string()),
+                        error = %display_text(&e.to_string()),
+                        "git-kb show failed"
+                    );
                     false
                 }
                 Err(_) => {
-                    debug!(slug, ?kb_root, "git-kb show timed out");
+                    debug!(
+                        slug = %display_text(slug),
+                        kb_root = %display_text(&kb_root.display().to_string()),
+                        "git-kb show timed out"
+                    );
                     false
                 }
             },
             Err(e) => {
-                debug!(slug, ?kb_root, error = %e, "failed to spawn git-kb");
+                debug!(
+                    slug = %display_text(slug),
+                    kb_root = %display_text(&kb_root.display().to_string()),
+                    error = %display_text(&e.to_string()),
+                    "failed to spawn git-kb"
+                );
                 false
             }
         }
@@ -101,7 +116,10 @@ impl TaskResolver {
         let child = match child {
             Ok(c) => c,
             Err(e) => {
-                debug!(error = %e, "meta not available, skipping multi-KB discovery");
+                debug!(
+                    error = %display_text(&e.to_string()),
+                    "meta not available, skipping multi-KB discovery"
+                );
                 return Vec::new();
             }
         };
@@ -119,7 +137,10 @@ impl TaskResolver {
         let json: serde_json::Value = match serde_json::from_str(&stdout) {
             Ok(v) => v,
             Err(e) => {
-                debug!(error = %e, "failed to parse meta project list JSON");
+                debug!(
+                    error = %display_text(&e.to_string()),
+                    "failed to parse meta project list JSON"
+                );
                 return Vec::new();
             }
         };
@@ -138,7 +159,10 @@ impl TaskResolver {
                     if rel.is_absolute()
                         || rel.components().any(|c| matches!(c, Component::ParentDir))
                     {
-                        warn!(path = %rel.display(), "skipping unsafe meta project path");
+                        warn!(
+                            path = %display_text(&rel.display().to_string()),
+                            "skipping unsafe meta project path"
+                        );
                         continue;
                     }
                     let joined = workspace_root.join(rel);
@@ -148,14 +172,20 @@ impl TaskResolver {
                         (joined.canonicalize(), workspace_root.canonicalize())
                     {
                         if canon == root {
-                            debug!(path = %rel.display(), "skipping workspace root self-reference");
+                            debug!(
+                                path = %display_text(&rel.display().to_string()),
+                                "skipping workspace root self-reference"
+                            );
                             continue;
                         }
                     }
                     // Skip paths that don't exist on disk — stale meta entries
                     // would otherwise spawn doomed git-kb subprocesses.
                     if !joined.is_dir() {
-                        debug!(path = %joined.display(), "skipping non-existent meta project path");
+                        debug!(
+                            path = %display_text(&joined.display().to_string()),
+                            "skipping non-existent meta project path"
+                        );
                         continue;
                     }
                     paths.push(joined);
@@ -211,13 +241,17 @@ impl TaskResolver {
             if hit {
                 if let Some(ref first) = found {
                     warn!(
-                        slug,
-                        first = %first.display(),
-                        duplicate = %path.display(),
+                        slug = %display_text(slug),
+                        first = %display_text(&first.display().to_string()),
+                        duplicate = %display_text(&path.display().to_string()),
                         "ambiguous slug: found in multiple KBs, using first match"
                     );
                 } else {
-                    debug!(slug, kb_root = %path.display(), "found task in sub-project KB");
+                    debug!(
+                        slug = %display_text(slug),
+                        kb_root = %display_text(&path.display().to_string()),
+                        "found task in sub-project KB"
+                    );
                     found = Some(path);
                 }
             }
@@ -256,7 +290,7 @@ impl TaskResolver {
             .map_err(|_| {
                 anyhow::anyhow!(
                     "git-kb show --json {} timed out after {:?}",
-                    slug,
+                    display_text(slug),
                     KB_TIMEOUT
                 )
             })??;
@@ -264,8 +298,8 @@ impl TaskResolver {
         if !output.status.success() {
             anyhow::bail!(
                 "git kb show --json {} failed: {}",
-                slug,
-                String::from_utf8_lossy(&output.stderr)
+                display_text(slug),
+                display_text(String::from_utf8_lossy(&output.stderr).trim())
             );
         }
 
@@ -340,7 +374,11 @@ impl TaskResolver {
         let output = tokio::time::timeout(KB_TIMEOUT, child.wait_with_output())
             .await
             .map_err(|_| {
-                anyhow::anyhow!("git-kb assign {} timed out after {:?}", slug, KB_TIMEOUT)
+                anyhow::anyhow!(
+                    "git-kb assign {} timed out after {:?}",
+                    display_text(slug),
+                    KB_TIMEOUT
+                )
             })??;
 
         if !output.status.success() {
@@ -348,12 +386,12 @@ impl TaskResolver {
             let msg = if stderr.contains("already assigned") || stderr.contains("already claimed") {
                 format!(
                     "task {} is already claimed; use `atc status` to check",
-                    slug
+                    display_text(slug)
                 )
             } else {
-                format!("failed to claim task {}", slug)
+                format!("failed to claim task {}", display_text(slug))
             };
-            anyhow::bail!("{}\n{}", msg, stderr.trim());
+            anyhow::bail!("{}\n{}", msg, display_text(stderr.trim()));
         }
 
         Ok(())
@@ -370,16 +408,27 @@ impl TaskResolver {
 
         match status {
             Ok(Some(s)) if !s.success() => {
-                warn!(slug, exit_code = ?s.code(), "git kb unassign exited with error");
+                warn!(
+                    slug = %display_text(slug),
+                    exit_code = ?s.code(),
+                    "git kb unassign exited with error"
+                );
             }
             Ok(None) => {
-                warn!(slug, "git kb unassign timed out (non-fatal)");
+                warn!(
+                    slug = %display_text(slug),
+                    "git kb unassign timed out (non-fatal)"
+                );
             }
             Err(e) => {
-                warn!(slug, error = %e, "git kb unassign failed");
+                warn!(
+                    slug = %display_text(slug),
+                    error = %display_text(&e.to_string()),
+                    "git kb unassign failed"
+                );
             }
             _ => {
-                debug!(slug, "unassign succeeded");
+                debug!(slug = %display_text(slug), "unassign succeeded");
             }
         }
     }
@@ -432,7 +481,11 @@ impl InputResolver for TaskResolver {
         };
 
         let kb_root = if let Some(path) = cached {
-            debug!(slug, kb_root = %path.display(), "using cached KB root from can_resolve");
+            debug!(
+                slug = %display_text(slug),
+                kb_root = %display_text(&path.display().to_string()),
+                "using cached KB root from can_resolve"
+            );
             path
         } else {
             let primary_kb_root = Self::primary_kb_root(config);
@@ -441,7 +494,7 @@ impl InputResolver for TaskResolver {
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "task slug '{}' not found in any KB (searched primary root and meta sub-projects)",
-                        slug
+                        display_text(slug)
                     )
                 })?
         };
@@ -450,7 +503,11 @@ impl InputResolver for TaskResolver {
         let branch = derive_branch(slug);
         let resolved_directive =
             Self::resolve_directive(opts.directive.clone(), slug, &kb_root, Some(&branch)).await?;
-        info!(%slug, directive = %resolved_directive.as_str(), "directive resolved");
+        info!(
+            slug = %display_text(slug),
+            directive = %resolved_directive.as_str(),
+            "directive resolved"
+        );
 
         // 2. Build dispatch ID
         let dispatch_id = build_dispatch_id(&branch, &resolved_directive);
@@ -524,15 +581,19 @@ impl InputResolver for TaskResolver {
                             .any(|r| r.id != record.id && !r.status.is_terminal());
                         if has_other_live {
                             debug!(
-                                slug,
-                                id = %record.id,
+                                slug = %display_text(slug),
+                                id = %display_text(&record.id),
                                 "skipping unassign: another live dispatch exists for this slug"
                             );
                             return;
                         }
                     }
                     Err(e) => {
-                        warn!(slug, error = %e, "failed to check for sibling dispatches; skipping unassign for safety");
+                        warn!(
+                            slug = %display_text(slug),
+                            error = %display_text(&e.to_string()),
+                            "failed to check for sibling dispatches; skipping unassign for safety"
+                        );
                         return;
                     }
                 }

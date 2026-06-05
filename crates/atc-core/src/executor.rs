@@ -1,3 +1,4 @@
+use crate::terminal_text::display_text;
 use crate::types::{AgentSessionId, Directive};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -130,7 +131,11 @@ impl ClaudeExecutor {
             match tokio::time::timeout(Duration::from_secs(secs as u64), child.wait()).await {
                 Ok(result) => result.map_err(Into::into),
                 Err(_) => {
-                    warn!(slug = %slug, timeout_secs = secs, "inline spawn timed out, killing child");
+                    warn!(
+                        slug = %display_text(slug),
+                        timeout_secs = secs,
+                        "inline spawn timed out, killing child"
+                    );
                     let _ = child.kill().await;
                     // Return a synthetic "timed out" exit status — caller checks inline_exit_code
                     Err(anyhow::anyhow!("__timeout__"))
@@ -177,18 +182,21 @@ impl ClaudeExecutor {
                     .output(),
             )
             .await
-            .map_err(|_| anyhow::anyhow!("git-kb show {} timed out", opts.slug))??;
+            .map_err(|_| anyhow::anyhow!("git-kb show {} timed out", display_text(&opts.slug)))??;
 
             if !task_doc.status.success() {
                 anyhow::bail!(
                     "git kb show {} failed (exit {:?}): {}",
-                    opts.slug,
+                    display_text(&opts.slug),
                     task_doc.status.code(),
-                    String::from_utf8_lossy(&task_doc.stderr)
+                    display_text(String::from_utf8_lossy(&task_doc.stderr).trim())
                 );
             }
             if task_doc.stdout.is_empty() {
-                warn!(slug = %opts.slug, "git kb show returned empty output");
+                warn!(
+                    slug = %display_text(&opts.slug),
+                    "git kb show returned empty output"
+                );
             }
             task_doc.stdout
         };
@@ -256,7 +264,7 @@ impl ClaudeExecutor {
         cmd.stderr(std::process::Stdio::piped());
 
         info!(
-            slug = %opts.slug,
+            slug = %display_text(&opts.slug),
             agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             agent_resume = matches!(opts.agent_invocation, AgentInvocation::Resume(_)),
             "spawning claude (inline)"
@@ -270,7 +278,11 @@ impl ClaudeExecutor {
                 if e.kind() != std::io::ErrorKind::BrokenPipe {
                     return Err(e.into());
                 }
-                warn!(slug = %opts.slug, error = %e, "claude closed stdin early");
+                warn!(
+                    slug = %display_text(&opts.slug),
+                    error = %display_text(&e.to_string()),
+                    "claude closed stdin early"
+                );
             }
             drop(stdin);
         }
@@ -297,7 +309,11 @@ impl ClaudeExecutor {
         // Wait for all stream tasks and the child process
         for t in tasks {
             if let Err(e) = t.await {
-                tracing::warn!(slug = %opts.slug, error = %e, "log stream task failed");
+                tracing::warn!(
+                    slug = %display_text(&opts.slug),
+                    error = %display_text(&e.to_string()),
+                    "log stream task failed"
+                );
             }
         }
         let exit_code = match Self::wait_with_timeout(&mut child, opts.timeout, &opts.slug).await {
@@ -305,7 +321,11 @@ impl ClaudeExecutor {
             Err(e) if e.to_string() == "__timeout__" => 124,
             Err(e) => return Err(e),
         };
-        info!(slug = %opts.slug, exit_code, "inline spawn completed");
+        info!(
+            slug = %display_text(&opts.slug),
+            exit_code,
+            "inline spawn completed"
+        );
 
         // Temp files cleaned up on drop
 
@@ -372,7 +392,7 @@ impl ClaudeExecutor {
         cmd.stderr(std::process::Stdio::inherit());
 
         info!(
-            slug = %opts.slug,
+            slug = %display_text(&opts.slug),
             agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             "spawning claude (ephemeral inline)"
         );
@@ -384,7 +404,11 @@ impl ClaudeExecutor {
             Err(e) if e.to_string() == "__timeout__" => 124,
             Err(e) => return Err(e),
         };
-        info!(slug = %opts.slug, exit_code, "ephemeral inline spawn completed");
+        info!(
+            slug = %display_text(&opts.slug),
+            exit_code,
+            "ephemeral inline spawn completed"
+        );
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),
@@ -605,7 +629,7 @@ impl ClaudeExecutor {
 
         // 5. Create tmux session
         info!(
-            session = %opts.session_name,
+            session = %display_text(&opts.session_name),
             agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             agent_resume = matches!(opts.agent_invocation, AgentInvocation::Resume(_)),
             "creating tmux session"
@@ -638,17 +662,17 @@ impl ClaudeExecutor {
             if stderr.contains("duplicate session") || stderr.contains("already exists") {
                 anyhow::bail!(
                     "tmux session '{}' already exists; use `atc redirect` to reattach or kill the session",
-                    opts.session_name
+                    display_text(&opts.session_name)
                 );
             }
             anyhow::bail!(
                 "tmux new-session failed (exit {:?}): {}",
                 output.status.code(),
-                stderr
+                display_text(stderr.trim())
             );
         }
 
-        info!(session = %opts.session_name, "tmux session created");
+        info!(session = %display_text(&opts.session_name), "tmux session created");
         Ok(AgentHandle {
             session: opts.session_name.clone(),
             inline_exit_code: None,
@@ -674,10 +698,16 @@ fn spawn_stream_to_log<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             }
             let mut w = writer.lock().await;
             if let Err(e) = w.write_all(&line).await {
-                warn!(error = %e, "failed to write to log");
+                warn!(
+                    error = %display_text(&e.to_string()),
+                    "failed to write to log"
+                );
             }
             if let Err(e) = w.flush().await {
-                warn!(error = %e, "failed to flush log");
+                warn!(
+                    error = %display_text(&e.to_string()),
+                    "failed to flush log"
+                );
             }
         }
     })
