@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::display_text;
 use atc_core::types::{Directive, Status};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
@@ -201,7 +202,12 @@ pub async fn resolve_pr_repo_path(
     let github_repo = pr_url
         .strip_prefix("https://github.com/")
         .and_then(|s| s.split("/pull/").next())
-        .ok_or_else(|| anyhow::anyhow!("cannot extract org/repo from PR URL: {}", pr_url))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot extract org/repo from PR URL: {}",
+                display_text(pr_url)
+            )
+        })?;
 
     let output = tokio::time::timeout(
         SUBPROCESS_TIMEOUT,
@@ -466,7 +472,10 @@ pub async fn resolve_document_workspace(
             )
         })
     {
-        anyhow::bail!("invalid document slug for workspace resolution: {}", slug);
+        anyhow::bail!(
+            "invalid document slug for workspace resolution: {}",
+            display_text(slug)
+        );
     }
 
     let workspaces_dir = kb_root.join(".kb/workspaces");
@@ -1250,6 +1259,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_document_workspace_invalid_slug_escapes_terminal_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb_root = dir.path();
+        let err = resolve_document_workspace(
+            "tasks/bad\x1b[2J\u{202e}gpj/../secret",
+            kb_root,
+            Path::new("/tmp/worktrees"),
+            kb_root,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("tasks/bad\\x1b[2J\\u{202e}gpj/../secret"),
+            "got: {err}"
+        );
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
+    }
+
+    #[tokio::test]
     async fn test_resolve_document_workspace_ambiguous_warns_and_picks_alphabetically() {
         let dir = tempfile::tempdir().unwrap();
         let kb_root = dir.path();
@@ -1273,6 +1304,19 @@ mod tests {
         let ws = result.unwrap();
         // Should pick first alphabetically
         assert_eq!(ws.workspace_branch, "branch-a");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_pr_repo_path_invalid_url_escapes_terminal_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_pr_repo_path("not-github\x1b[2J\u{202e}gpj", dir.path())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("not-github\\x1b[2J\\u{202e}gpj"), "got: {err}");
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
     }
 
     #[test]

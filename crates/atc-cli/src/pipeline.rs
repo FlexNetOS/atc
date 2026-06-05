@@ -162,7 +162,7 @@ fn validate_document_policy_slug(slug: &str) -> Result<()> {
     anyhow::ensure!(
         !unsafe_slug,
         "invalid slug for document policy: unsafe path '{}'",
-        slug
+        display_text(slug)
     );
     Ok(())
 }
@@ -2256,6 +2256,14 @@ mod tests {
                 "unexpected error for {slug:?}: {err}"
             );
         }
+        let hostile = "tasks/bad\x1b[2J\u{202e}gpj/../secret";
+        let hostile_err = validate_document_policy_slug(hostile)
+            .unwrap_err()
+            .to_string();
+        assert!(hostile_err.contains("tasks/bad\\x1b[2J\\u{202e}gpj/../secret"));
+        assert!(!hostile_err.contains('\x1b'));
+        assert!(!hostile_err.contains('\u{202e}'));
+
         validate_document_policy_slug("tasks/foo").unwrap();
         validate_document_policy_slug("specs/atc-agent-harness-contract").unwrap();
     }

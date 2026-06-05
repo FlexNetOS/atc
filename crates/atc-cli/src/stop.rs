@@ -18,7 +18,7 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     // 2. Warn if already terminal, but proceed
     if record.status.is_terminal() {
         warn!(
-            id,
+            id = %display_text(id),
             status = %record.status,
             "dispatch is already in terminal state"
         );
@@ -42,8 +42,8 @@ pub async fn run_stop(config: &AtcConfig, registry: &dyn Registry, arg: &str) ->
     match resolver_by_name(&record.resolver) {
         Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
         None => warn!(
-            id,
-            resolver = %record.resolver,
+            id = %display_text(id),
+            resolver = %display_text(&record.resolver),
             "unknown resolver name; skipping on_cleanup — task state may be orphaned"
         ),
     }

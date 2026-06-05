@@ -27,7 +27,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{self, Stdout, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -543,16 +543,7 @@ fn initial_terminal_status(locator: Option<&TerminalLocator>) -> TerminalStatus 
 }
 
 fn effective_locator_for_row(row: &SessionRow) -> Option<TerminalLocator> {
-    row.terminal_locator.clone().or_else(|| {
-        let has_tmux_open_shell = row.open_shell.backend.as_deref() == Some("tmux");
-        (has_tmux_open_shell && !row.session.trim().is_empty()).then(|| {
-            TerminalLocator::inferred_tmux(
-                row.session.clone(),
-                Some(PathBuf::from(row.worktree_path.clone())),
-                row.updated_at,
-            )
-        })
-    })
+    row.terminal_locator.clone()
 }
 
 fn availability_from_open_shell(open_shell: &OpenSessionPreview) -> ActionAvailability {
@@ -1354,7 +1345,7 @@ fn apply_filter_edit(filter: &mut SessionFilter, edit: FilterEdit) -> Result<Str
         FilterField::Status => filter.status.as_ref().map(Status::as_str),
     };
     Ok(match value {
-        Some(value) => format!("{label} filter set to {value}"),
+        Some(value) => format!("{label} filter set to {}", display_text(value)),
         None => format!("{label} filter cleared"),
     })
 }
@@ -1622,7 +1613,7 @@ fn enter_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
 fn parse_poll_interval(value: Option<&str>) -> Result<Duration> {
     let interval = match value {
         Some(value) => humantime::parse_duration(value)
-            .with_context(|| format!("invalid --poll-interval value '{value}'"))?,
+            .with_context(|| format!("invalid --poll-interval value '{}'", display_text(value)))?,
         None => DEFAULT_POLL_INTERVAL,
     };
     if interval < MIN_POLL_INTERVAL {
@@ -2048,6 +2039,33 @@ mod tests {
     }
 
     #[test]
+    fn effective_locator_for_row_does_not_infer_from_action_preview() {
+        let filter = SessionFilter::default();
+        let snapshot = build_snapshot(
+            vec![record("running", Status::Running)],
+            vec![work_unit()],
+            &filter,
+            SessionGroupBy::None,
+        );
+        let mut row = snapshot.rows[0].clone();
+        row.terminal_locator = None;
+        row.open_shell = OpenSessionPreview {
+            enabled: true,
+            reason: None,
+            action: "open-session".to_string(),
+            backend: Some("tmux".to_string()),
+            attach_command: Some(vec![
+                "tmux".to_string(),
+                "attach".to_string(),
+                "-t".to_string(),
+                row.session.clone(),
+            ]),
+        };
+
+        assert!(effective_locator_for_row(&row).is_none());
+    }
+
+    #[test]
     fn snapshot_defaults_to_active_and_recent_terminal_statuses() {
         let filter = SessionFilter::default();
         let now = Utc.with_ymd_and_hms(2026, 6, 3, 13, 0, 0).unwrap();
@@ -2327,6 +2345,19 @@ mod tests {
         let message = apply_filter_edit(
             &mut filter,
             FilterEdit {
+                field: FilterField::Search,
+                value: " task\x1b[2J\u{202e}gpj ".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(message, "search filter set to task\\x1b[2J\\u{202e}gpj");
+        assert!(!message.contains('\x1b'));
+        assert!(!message.contains('\u{202e}'));
+        assert_eq!(filter.search.as_deref(), Some("task\x1b[2J\u{202e}gpj"));
+
+        let message = apply_filter_edit(
+            &mut filter,
+            FilterEdit {
                 field: FilterField::Provider,
                 value: " ".to_string(),
             },
@@ -2393,6 +2424,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least 250ms"));
+        let hostile_error = parse_poll_interval(Some("bad\x1b[2J\u{202e}gpj"))
+            .unwrap_err()
+            .to_string();
+        assert!(hostile_error.contains("bad\\x1b[2J\\u{202e}gpj"));
+        assert!(!hostile_error.contains('\x1b'));
+        assert!(!hostile_error.contains('\u{202e}'));
     }
 
     #[derive(Default)]

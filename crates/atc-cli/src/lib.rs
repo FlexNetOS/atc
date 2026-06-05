@@ -2,7 +2,7 @@ use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
-use atc_core::terminal_text::terminal_safe_json_pretty;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use atc_core::types::RunOpts;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -527,7 +527,10 @@ fn parse_params(param_args: &[String]) -> Result<HashMap<String, String>> {
     let mut params = HashMap::new();
     for p in param_args {
         let (k, v) = p.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("invalid --param format: {:?} (expected key=value)", p)
+            anyhow::anyhow!(
+                "invalid --param format: '{}' (expected key=value)",
+                display_text(p)
+            )
         })?;
         params.insert(k.to_string(), v.to_string());
     }
@@ -999,7 +1002,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Commands};
+    use super::{parse_params, Args, Commands};
     use clap::Parser;
     use std::path::Path;
 
@@ -1013,6 +1016,16 @@ mod tests {
             }
             _ => panic!("expected sessions command"),
         }
+    }
+
+    #[test]
+    fn parse_params_error_escapes_terminal_controls() {
+        let params = vec!["bad\x1b[2J\u{202e}gpj".to_string()];
+        let err = parse_params(&params).unwrap_err().to_string();
+
+        assert!(err.contains("bad\\x1b[2J\\u{202e}gpj"), "got: {err}");
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
     }
 
     #[test]

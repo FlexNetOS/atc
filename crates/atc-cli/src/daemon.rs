@@ -11,6 +11,7 @@ use atc_core::executor::AgentExecutor;
 use atc_core::queue::{DispatchQueue, QueueInputType, QueueRow};
 use atc_core::registry::{Registry, StatusFilter};
 use atc_core::source::SourceConfig;
+use atc_core::terminal_text::display_text;
 use atc_core::types::Status;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -341,7 +342,7 @@ async fn start_sources(
                     unknown => {
                         anyhow::bail!(
                             "unknown source '{}'; valid built-in sources: ready, board, events",
-                            unknown
+                            display_text(unknown)
                         );
                     }
                 }
@@ -768,4 +769,35 @@ pub async fn daemon_status(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atc_core::registry::SqliteRegistry;
+
+    #[tokio::test]
+    async fn start_sources_unknown_name_escapes_terminal_controls() {
+        let config = AtcConfig::default();
+        let queue = Arc::new(SqliteRegistry::in_memory().await.unwrap());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_notify = Arc::new(Notify::new());
+        let source_names = vec!["bad\x1b[2J\u{202e}gpj".to_string()];
+
+        let error = start_sources(
+            &config,
+            &source_names,
+            &["default".to_string()],
+            queue,
+            shutdown,
+            shutdown_notify,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("bad\\x1b[2J\\u{202e}gpj"));
+        assert!(!error.contains('\x1b'));
+        assert!(!error.contains('\u{202e}'));
+    }
 }

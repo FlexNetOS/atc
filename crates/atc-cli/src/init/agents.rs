@@ -11,7 +11,7 @@
 //! [`super::picker`] both call it — there is no duplicated install logic.
 
 use anyhow::{anyhow, bail, Context, Result};
-use atc_core::terminal_text::terminal_safe_json_pretty;
+use atc_core::terminal_text::{display_text, terminal_safe_json_pretty};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -158,7 +158,10 @@ pub fn agent_status(base: &Path, entry: &AgentEntry) -> AgentStatus {
 /// - real user directory → refuse, regardless of `force`
 pub fn run_init_agent(base: &Path, agent_name: &str, opts: AgentOpts) -> Result<WireOutcome> {
     let entry = find_agent(agent_name).ok_or_else(|| {
-        anyhow!("unknown agent '{agent_name}'. Run 'atc init --list-agents' for supported agents.")
+        anyhow!(
+            "unknown agent '{}'. Run 'atc init --list-agents' for supported agents.",
+            display_text(agent_name)
+        )
     })?;
 
     let skills_src = base.join(".atc").join("skills");
@@ -828,8 +831,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
         make_skills_dir(base);
-        let err = run_init_agent(base, "vscode", AgentOpts::default()).unwrap_err();
-        assert!(err.to_string().contains("unknown agent"));
+        let err = run_init_agent(base, "vscode\x1b[2J\u{202e}gpj", AgentOpts::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown agent"));
+        assert!(err.contains("vscode\\x1b[2J\\u{202e}gpj"), "got: {err}");
+        assert!(!err.contains('\x1b'), "got: {err}");
+        assert!(!err.contains('\u{202e}'), "got: {err}");
     }
 
     #[test]

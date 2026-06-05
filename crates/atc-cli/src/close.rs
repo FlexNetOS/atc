@@ -1,6 +1,7 @@
 use anyhow::Result;
 use atc_core::config::AtcConfig;
 use atc_core::registry::Registry;
+use atc_core::terminal_text::display_text;
 use atc_core::types::Status;
 use tracing::{info, warn};
 
@@ -25,7 +26,7 @@ pub async fn run_close(
 
     // 2. Idempotent: already Done
     if record.status == Status::Done {
-        println!("[{id}] already closed");
+        println!("[{}] already closed", display_text(id));
         return Ok(());
     }
 
@@ -49,7 +50,7 @@ pub async fn run_close(
     if !session_killed && !record.status.is_terminal() {
         anyhow::bail!(
             "failed to confirm tmux session '{}' was stopped; leaving dispatch state unchanged",
-            record.session
+            display_text(&record.session)
         );
     }
 
@@ -60,8 +61,8 @@ pub async fn run_close(
     match resolver_by_name(&record.resolver) {
         Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
         None => warn!(
-            id,
-            resolver = %record.resolver,
+            id = %display_text(id),
+            resolver = %display_text(&record.resolver),
             "unknown resolver name; skipping on_cleanup — task state may be orphaned"
         ),
     }
@@ -83,12 +84,20 @@ pub async fn run_close(
                             .iter()
                             .any(|r| r.id != *id && !r.status.is_terminal());
                         if has_other_live {
-                            info!(id, slug, "skipping status=completed: another live dispatch exists for this slug");
+                            info!(
+                                id = %display_text(id),
+                                slug = %display_text(slug),
+                                "skipping status=completed: another live dispatch exists for this slug"
+                            );
                         }
                         !has_other_live
                     }
                     Err(e) => {
-                        warn!(id, error = %e, "failed to check sibling dispatches; skipping status=completed for safety");
+                        warn!(
+                            id = %display_text(id),
+                            error = %display_text(&e.to_string()),
+                            "failed to check sibling dispatches; skipping status=completed for safety"
+                        );
                         false
                     }
                 };
@@ -104,23 +113,34 @@ pub async fn run_close(
 
                     match status {
                         Ok(Some(s)) if !s.success() => {
-                            warn!(id, exit_code = ?s.code(), "git-kb set status=completed failed (non-fatal)");
+                            warn!(
+                                id = %display_text(id),
+                                exit_code = ?s.code(),
+                                "git-kb set status=completed failed (non-fatal)"
+                            );
                         }
                         Ok(None) => {
-                            warn!(id, "git-kb set status=completed timed out (non-fatal)");
+                            warn!(
+                                id = %display_text(id),
+                                "git-kb set status=completed timed out (non-fatal)"
+                            );
                         }
                         Err(e) => {
-                            warn!(id, error = %e, "git-kb set status=completed failed (non-fatal)");
+                            warn!(
+                                id = %display_text(id),
+                                error = %display_text(&e.to_string()),
+                                "git-kb set status=completed failed (non-fatal)"
+                            );
                         }
                         _ => {
-                            info!(id, "git-kb status set to completed");
+                            info!(id = %display_text(id), "git-kb status set to completed");
                         }
                     }
                 }
             }
         } else {
             warn!(
-                id,
+                id = %display_text(id),
                 "could not resolve meta_workspace_root; skipping git-kb set"
             );
         }
@@ -136,8 +156,8 @@ pub async fn run_close(
 
         if shared {
             warn!(
-                id,
-                worktree = %worktree_path.display(),
+                id = %display_text(id),
+                worktree = %display_text(&worktree_path.display().to_string()),
                 "skipping worktree removal: another running record shares this worktree"
             );
         } else {
@@ -161,19 +181,30 @@ pub async fn run_close(
                     match result {
                         Ok(Some(s)) if !s.success() => {
                             warn!(
-                                id,
+                                id = %display_text(id),
                                 exit_code = ?s.code(),
                                 "git worktree remove failed (non-fatal)"
                             );
                         }
                         Ok(None) => {
-                            warn!(id, "git worktree remove timed out (non-fatal)");
+                            warn!(
+                                id = %display_text(id),
+                                "git worktree remove timed out (non-fatal)"
+                            );
                         }
                         Err(e) => {
-                            warn!(id, error = %e, "git worktree remove failed (non-fatal)");
+                            warn!(
+                                id = %display_text(id),
+                                error = %display_text(&e.to_string()),
+                                "git worktree remove failed (non-fatal)"
+                            );
                         }
                         _ => {
-                            info!(id, worktree = %worktree_path.display(), "worktree removed");
+                            info!(
+                                id = %display_text(id),
+                                worktree = %display_text(&worktree_path.display().to_string()),
+                                "worktree removed"
+                            );
 
                             // Attempt to rmdir parent if empty and inside worktree_base
                             if let Some(parent) = worktree_path.parent() {
@@ -186,14 +217,17 @@ pub async fn run_close(
                     }
                 }
                 None => {
-                    warn!(id, "could not derive repo_root; skipping worktree removal");
+                    warn!(
+                        id = %display_text(id),
+                        "could not derive repo_root; skipping worktree removal"
+                    );
                 }
             }
         }
     } else {
         warn!(
-            id,
-            worktree = %worktree_path.display(),
+            id = %display_text(id),
+            worktree = %display_text(&worktree_path.display().to_string()),
             "worktree path does not exist; skipping removal"
         );
     }
@@ -201,7 +235,11 @@ pub async fn run_close(
     // 8. Print result
     let pr_display = effective_pr_url.as_deref().unwrap_or("none");
     let slug_display = record.task_slug.as_deref().unwrap_or(id);
-    println!("[{slug_display}] closed | pr={pr_display}");
+    println!(
+        "[{}] closed | pr={}",
+        display_text(slug_display),
+        display_text(pr_display)
+    );
 
     Ok(())
 }

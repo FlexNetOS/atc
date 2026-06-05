@@ -1,4 +1,5 @@
 use crate::source::SourceConfig;
+use crate::terminal_text::display_text;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -162,7 +163,8 @@ impl AtcConfig {
         for (name, source) in &cfg.sources {
             anyhow::ensure!(
                 source.poll_interval_secs() > 0,
-                "sources.{name}.poll_interval_secs must be >= 1"
+                "sources.{}.poll_interval_secs must be >= 1",
+                display_text(name)
             );
         }
         // Validate directive keys against known Directive variants + per-directive overrides
@@ -175,7 +177,7 @@ impl AtcConfig {
             anyhow::ensure!(
                 known_resolvers.contains(&name.as_str()),
                 "unknown resolver '{}' in resolvers.order; valid resolvers: {}",
-                name,
+                display_text(name),
                 known_resolvers.join(", ")
             );
         }
@@ -310,29 +312,30 @@ impl AtcConfig {
     /// Validate a single directive entry (name + config).
     /// Used by both `parse_and_validate` and `load_directive_files`.
     fn validate_directive(key: &str, directive_cfg: &DirectiveConfig) -> anyhow::Result<()> {
+        let display_key = display_text(key);
         key.parse::<crate::types::Directive>().map_err(|_| {
             anyhow::anyhow!(
                 "unknown directive '{}' in [directives.{}]; valid directives: implement, research, kb-update, review-fix, pr-comments, refine, create-task, close",
-                key, key,
+                display_key, display_key,
             )
         })?;
         if let Some(components) = &directive_cfg.components {
             anyhow::ensure!(
                 !components.is_empty(),
                 "directives.{}.components must contain at least one component name",
-                key
+                display_key
             );
             for name in components {
                 anyhow::ensure!(
                     !name.trim().is_empty(),
                     "directives.{}.components contains an empty component name",
-                    key
+                    display_key
                 );
                 anyhow::ensure!(
                     !name.contains('/') && !name.contains('\\') && !name.contains(".."),
                     "directives.{}.components contains an invalid component name '{}': must not contain '/', '\\', or '..'",
-                    key,
-                    name
+                    display_key,
+                    display_text(name)
                 );
             }
         }
@@ -340,19 +343,23 @@ impl AtcConfig {
             anyhow::ensure!(
                 budget > 0.0 && budget.is_finite(),
                 "directives.{}.max_budget_usd must be a positive finite number",
-                key
+                display_key
             );
         }
         if let Some(turns) = directive_cfg.max_turns {
-            anyhow::ensure!(turns > 0, "directives.{}.max_turns must be >= 1", key);
+            anyhow::ensure!(
+                turns > 0,
+                "directives.{}.max_turns must be >= 1",
+                display_key
+            );
         }
         if let Some(providers) = &directive_cfg.providers {
             for name in providers {
                 anyhow::ensure!(
                     crate::providers::KNOWN_PROVIDERS.contains(&name.as_str()),
                     "unknown provider '{}' in directives.{}.providers; valid providers: {}",
-                    name,
-                    key,
+                    display_text(name),
+                    display_key,
                     crate::providers::KNOWN_PROVIDERS.join(", ")
                 );
             }
@@ -1223,6 +1230,41 @@ template_inline = "typo in directive name"
             err.to_string().contains("unknown directive 'implment'"),
             "expected unknown directive error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_config_parse_errors_escape_terminal_controls() {
+        let cases = [
+            r#"
+[resolvers]
+order = ["task\u001B[2J\u202Egpj"]
+"#,
+            r#"
+[directives."impl\u001B[2J\u202Egpj"]
+template_inline = "bad directive"
+"#,
+            r#"
+[directives.implement]
+providers = ["provider\u001B[2J\u202Egpj"]
+"#,
+            r#"
+[directives.implement]
+components = ["component\u001B[2J\u202Egpj/secret"]
+"#,
+            r#"
+[sources."source\u001B[2J\u202Egpj"]
+type = "ready"
+poll_interval_secs = 0
+"#,
+        ];
+
+        for toml in cases {
+            let error = AtcConfig::parse_and_validate(toml).unwrap_err().to_string();
+
+            assert!(error.contains("\\x1b[2J\\u{202e}gpj"));
+            assert!(!error.contains('\x1b'));
+            assert!(!error.contains('\u{202e}'));
+        }
     }
 
     #[test]

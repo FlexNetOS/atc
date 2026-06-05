@@ -118,6 +118,29 @@ load helpers/common
     echo "$STDERR" | grep -F "ignoring invalid terminal_locator_json"
 }
 
+@test "status --json escapes malformed required enum values" {
+    setup_lifecycle
+    insert_test_dispatch "$TEST_TMPDIR/atc.db" "disp-001" "tasks/test-1" "running"
+    local esc=$'\033'
+    local bidi=$'\u202e'
+
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET status = 'running' || char(27) || '[2J' || char(8238) || 'gpj' WHERE id = 'disp-001';"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unknown status: running\\x1b[2J\\u{202e}gpj"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+
+    sqlite3 "$TEST_TMPDIR/atc.db" \
+        "UPDATE dispatches SET status = 'running', directive = 'implement' || char(27) || '[2J' || char(8238) || 'gpj' WHERE id = 'disp-001';"
+    run_split atc --config "$TEST_TMPDIR/atc.toml" status --json
+    [ "$SPLIT_STATUS" -ne 0 ]
+    [[ "$STDERR" == *"unknown directive: implement\\x1b[2J\\u{202e}gpj"* ]]
+    [[ "$STDERR" != *"$esc"* ]]
+    [[ "$STDERR" != *"$bidi"* ]]
+}
+
 @test "registry malformed metadata warnings escape hostile dispatch ids" {
     require_jq
     setup_lifecycle

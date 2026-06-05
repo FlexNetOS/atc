@@ -1,5 +1,6 @@
 use crate::config::AtcConfig;
 use crate::registry::{Registry, StatusFilter};
+use crate::terminal_text::display_text;
 use crate::types::{DispatchRecord, HealthChecks, Status};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -76,13 +77,19 @@ impl HealthChecker {
             match handle.await {
                 Ok(Ok(result)) => results.push(result),
                 Ok(Err(e)) => errors.push(e),
-                Err(e) => errors.push(anyhow::anyhow!("task panicked: {e}")),
+                Err(e) => errors.push(anyhow::anyhow!(
+                    "task panicked: {}",
+                    display_text(&e.to_string())
+                )),
             }
         }
 
         // Log errors but still return successful results
         for e in &errors {
-            warn!(error = %e, "health check task failed");
+            warn!(
+                error = %display_text(&e.to_string()),
+                "health check task failed"
+            );
         }
 
         // If ALL tasks failed, propagate the first error
@@ -165,7 +172,7 @@ impl HealthChecker {
         // stranding the record due to a transient failure.
         if Self::should_skip_transition(had_error, new_status) {
             warn!(
-                id = %record.id,
+                id = %display_text(&record.id),
                 proposed_status = %new_status,
                 "health check: skipping terminal transition due to transient signal error"
             );
@@ -189,13 +196,13 @@ impl HealthChecker {
                 .await?;
 
             info!(
-                id = %record.id,
+                id = %display_text(&record.id),
                 status = %record.status,
                 "health check: status transitioned"
             );
         } else {
             debug!(
-                id = %record.id,
+                id = %display_text(&record.id),
                 status = %record.status,
                 "health check: no change"
             );
@@ -221,20 +228,24 @@ impl HealthChecker {
             Ok(Ok(status)) => {
                 if status.success() {
                     // Session exists — agent still running
-                    debug!(id = %record.id, "signal 1: tmux session exists, agent running");
+                    debug!(id = %display_text(&record.id), "signal 1: tmux session exists, agent running");
                     SignalResult::False
                 } else {
                     // Session gone — agent finished
-                    debug!(id = %record.id, "signal 1: tmux session gone, agent exited");
+                    debug!(id = %display_text(&record.id), "signal 1: tmux session gone, agent exited");
                     SignalResult::True
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %record.id, error = %e, "signal 1: tmux command failed");
+                warn!(
+                    id = %display_text(&record.id),
+                    error = %display_text(&e.to_string()),
+                    "signal 1: tmux command failed"
+                );
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %record.id, "signal 1: tmux command timed out");
+                warn!(id = %display_text(&record.id), "signal 1: tmux command timed out");
                 SignalResult::Error
             }
         }
@@ -263,27 +274,35 @@ impl HealthChecker {
                 let code = status.code().unwrap_or(-1);
                 match code {
                     0 => {
-                        debug!(id = %record.id, "signal 2: branch exists on remote");
+                        debug!(id = %display_text(&record.id), "signal 2: branch exists on remote");
                         SignalResult::True
                     }
                     2 => {
                         // Exit code 2 = definitive "not found"
-                        debug!(id = %record.id, "signal 2: branch not found on remote");
+                        debug!(id = %display_text(&record.id), "signal 2: branch not found on remote");
                         SignalResult::False
                     }
                     other => {
                         // Unexpected exit code — could be auth/network error
-                        warn!(id = %record.id, exit_code = other, "signal 2: git ls-remote unexpected exit code");
+                        warn!(
+                            id = %display_text(&record.id),
+                            exit_code = other,
+                            "signal 2: git ls-remote unexpected exit code"
+                        );
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %record.id, error = %e, "signal 2: git ls-remote failed");
+                warn!(
+                    id = %display_text(&record.id),
+                    error = %display_text(&e.to_string()),
+                    "signal 2: git ls-remote failed"
+                );
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %record.id, "signal 2: git ls-remote timed out");
+                warn!(id = %display_text(&record.id), "signal 2: git ls-remote timed out");
                 SignalResult::Error
             }
         }
@@ -294,7 +313,11 @@ impl HealthChecker {
     async fn eval_signal_3(&self, record: &mut DispatchRecord) -> SignalResult {
         // If pr_urls already known, skip the gh call
         if !record.pr_urls.is_empty() {
-            debug!(id = %record.id, count = record.pr_urls.len(), "signal 3: pr_urls already known, skipping gh call");
+            debug!(
+                id = %display_text(&record.id),
+                count = record.pr_urls.len(),
+                "signal 3: pr_urls already known, skipping gh call"
+            );
             return SignalResult::True;
         }
 
@@ -320,13 +343,13 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %record.id, "signal 3: gh pr list failed");
+                    warn!(id = %display_text(&record.id), "signal 3: gh pr list failed");
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout.trim();
                 if trimmed.is_empty() || trimmed == "null" {
-                    debug!(id = %record.id, "signal 3: no PR found");
+                    debug!(id = %display_text(&record.id), "signal 3: no PR found");
                     return SignalResult::False;
                 }
                 // Each line is a PR URL (jq .[].url outputs one per line)
@@ -336,25 +359,37 @@ impl HealthChecker {
                     .filter(|u| !u.is_empty())
                     .collect();
                 if urls.is_empty() {
-                    debug!(id = %record.id, "signal 3: no PR found");
+                    debug!(id = %display_text(&record.id), "signal 3: no PR found");
                     return SignalResult::False;
                 }
-                info!(id = %record.id, count = urls.len(), "signal 3: PR(s) discovered");
+                info!(
+                    id = %display_text(&record.id),
+                    count = urls.len(),
+                    "signal 3: PR(s) discovered"
+                );
                 // Store all discovered PR URLs in registry
                 for url in &urls {
                     if let Err(e) = self.registry.add_pr_url(&record.id, url).await {
-                        warn!(id = %record.id, error = %e, "signal 3: failed to store pr_url");
+                        warn!(
+                            id = %display_text(&record.id),
+                            error = %display_text(&e.to_string()),
+                            "signal 3: failed to store pr_url"
+                        );
                     }
                 }
                 record.pr_urls = urls;
                 SignalResult::True
             }
             Ok(Err(e)) => {
-                warn!(id = %record.id, error = %e, "signal 3: gh pr list command failed");
+                warn!(
+                    id = %display_text(&record.id),
+                    error = %display_text(&e.to_string()),
+                    "signal 3: gh pr list command failed"
+                );
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %record.id, "signal 3: gh pr list timed out");
+                warn!(id = %display_text(&record.id), "signal 3: gh pr list timed out");
                 SignalResult::Error
             }
         }
@@ -379,7 +414,7 @@ impl HealthChecker {
                 other => return other,
             }
         }
-        debug!(id = %record.id, "signal 4: all CI checks passed across all PRs");
+        debug!(id = %display_text(&record.id), "signal 4: all CI checks passed across all PRs");
         SignalResult::True
     }
 
@@ -409,7 +444,11 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %dispatch_id, pr = %pr_url, "signal 4: gh pr checks failed");
+                    warn!(
+                        id = %display_text(dispatch_id),
+                        pr = %display_text(pr_url),
+                        "signal 4: gh pr checks failed"
+                    );
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -417,21 +456,40 @@ impl HealthChecker {
                 match trimmed.parse::<u64>() {
                     Ok(0) => SignalResult::True,
                     Ok(n) => {
-                        debug!(id = %dispatch_id, pr = %pr_url, failing = n, "signal 4: CI checks failing");
+                        debug!(
+                            id = %display_text(dispatch_id),
+                            pr = %display_text(pr_url),
+                            failing = n,
+                            "signal 4: CI checks failing"
+                        );
                         SignalResult::False
                     }
                     Err(_) => {
-                        warn!(id = %dispatch_id, pr = %pr_url, output = %trimmed, "signal 4: could not parse gh pr checks output");
+                        warn!(
+                            id = %display_text(dispatch_id),
+                            pr = %display_text(pr_url),
+                            output = %display_text(trimmed),
+                            "signal 4: could not parse gh pr checks output"
+                        );
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 4: gh pr checks command failed");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    pr = %display_text(pr_url),
+                    error = %display_text(&e.to_string()),
+                    "signal 4: gh pr checks command failed"
+                );
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %dispatch_id, pr = %pr_url, "signal 4: gh pr checks timed out");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    pr = %display_text(pr_url),
+                    "signal 4: gh pr checks timed out"
+                );
                 SignalResult::Error
             }
         }
@@ -451,7 +509,7 @@ impl HealthChecker {
                 other => return other,
             }
         }
-        debug!(id = %record.id, "signal 5: reviews approved across all PRs");
+        debug!(id = %display_text(&record.id), "signal 5: reviews approved across all PRs");
         SignalResult::True
     }
 
@@ -481,7 +539,11 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %dispatch_id, pr = %pr_url, "signal 5: gh pr view failed");
+                    warn!(
+                        id = %display_text(dispatch_id),
+                        pr = %display_text(pr_url),
+                        "signal 5: gh pr view failed"
+                    );
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -489,17 +551,31 @@ impl HealthChecker {
                 match trimmed {
                     "APPROVED" | "" | "null" => SignalResult::True,
                     other => {
-                        debug!(id = %dispatch_id, pr = %pr_url, decision = %other, "signal 5: reviews not approved");
+                        debug!(
+                            id = %display_text(dispatch_id),
+                            pr = %display_text(pr_url),
+                            decision = %display_text(other),
+                            "signal 5: reviews not approved"
+                        );
                         SignalResult::False
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 5: gh pr view command failed");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    pr = %display_text(pr_url),
+                    error = %display_text(&e.to_string()),
+                    "signal 5: gh pr view command failed"
+                );
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %dispatch_id, pr = %pr_url, "signal 5: gh pr view timed out");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    pr = %display_text(pr_url),
+                    "signal 5: gh pr view timed out"
+                );
                 SignalResult::Error
             }
         }
@@ -517,7 +593,7 @@ impl HealthChecker {
                 other => return other,
             }
         }
-        debug!(id = %record.id, "signal 6: all threads resolved across all PRs");
+        debug!(id = %display_text(&record.id), "signal 6: all threads resolved across all PRs");
         SignalResult::True
     }
 
@@ -528,7 +604,11 @@ impl HealthChecker {
         let (owner, repo, number) = match Self::parse_pr_url(pr_url) {
             Some(parts) => parts,
             None => {
-                warn!(id = %dispatch_id, url = %pr_url, "signal 6: could not parse PR URL");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    url = %display_text(pr_url),
+                    "signal 6: could not parse PR URL"
+                );
                 return SignalResult::Error;
             }
         };
@@ -558,14 +638,22 @@ impl HealthChecker {
         match result {
             Ok(Ok(output)) => {
                 if !output.status.success() {
-                    warn!(id = %dispatch_id, pr = %pr_url, "signal 6: gh api graphql failed");
+                    warn!(
+                        id = %display_text(dispatch_id),
+                        pr = %display_text(pr_url),
+                        "signal 6: gh api graphql failed"
+                    );
                     return SignalResult::Error;
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 match serde_json::from_str::<serde_json::Value>(&stdout) {
                     Ok(json) => {
                         if json.get("errors").is_some() {
-                            warn!(id = %dispatch_id, pr = %pr_url, "signal 6: GraphQL response contains errors");
+                            warn!(
+                                id = %display_text(dispatch_id),
+                                pr = %display_text(pr_url),
+                                "signal 6: GraphQL response contains errors"
+                            );
                             return SignalResult::Error;
                         }
 
@@ -577,7 +665,11 @@ impl HealthChecker {
                             .and_then(|v| v.as_bool())
                         {
                             if has_next {
-                                warn!(id = %dispatch_id, pr = %pr_url, "signal 6: >100 review threads, result truncated — treating as unresolved");
+                                warn!(
+                                    id = %display_text(dispatch_id),
+                                    pr = %display_text(pr_url),
+                                    "signal 6: >100 review threads, result truncated — treating as unresolved"
+                                );
                                 return SignalResult::False;
                             }
                         }
@@ -597,28 +689,51 @@ impl HealthChecker {
                                 if unresolved == 0 {
                                     SignalResult::True
                                 } else {
-                                    debug!(id = %dispatch_id, pr = %pr_url, unresolved = unresolved, "signal 6: unresolved threads remain");
+                                    debug!(
+                                        id = %display_text(dispatch_id),
+                                        pr = %display_text(pr_url),
+                                        unresolved = unresolved,
+                                        "signal 6: unresolved threads remain"
+                                    );
                                     SignalResult::False
                                 }
                             }
                             None => {
-                                warn!(id = %dispatch_id, pr = %pr_url, "signal 6: reviewThreads nodes is null/missing");
+                                warn!(
+                                    id = %display_text(dispatch_id),
+                                    pr = %display_text(pr_url),
+                                    "signal 6: reviewThreads nodes is null/missing"
+                                );
                                 SignalResult::Error
                             }
                         }
                     }
                     Err(e) => {
-                        warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 6: could not parse GraphQL response");
+                        warn!(
+                            id = %display_text(dispatch_id),
+                            pr = %display_text(pr_url),
+                            error = %display_text(&e.to_string()),
+                            "signal 6: could not parse GraphQL response"
+                        );
                         SignalResult::Error
                     }
                 }
             }
             Ok(Err(e)) => {
-                warn!(id = %dispatch_id, pr = %pr_url, error = %e, "signal 6: gh api graphql command failed");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    pr = %display_text(pr_url),
+                    error = %display_text(&e.to_string()),
+                    "signal 6: gh api graphql command failed"
+                );
                 SignalResult::Error
             }
             Err(_) => {
-                warn!(id = %dispatch_id, pr = %pr_url, "signal 6: gh api graphql timed out");
+                warn!(
+                    id = %display_text(dispatch_id),
+                    pr = %display_text(pr_url),
+                    "signal 6: gh api graphql timed out"
+                );
                 SignalResult::Error
             }
         }

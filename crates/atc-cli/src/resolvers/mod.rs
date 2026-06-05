@@ -4,6 +4,7 @@ pub mod template;
 
 use atc_core::config::AtcConfig;
 use atc_core::resolver::InputResolver;
+use atc_core::terminal_text::display_text;
 
 /// Single source of truth: instantiate a resolver by name.
 ///
@@ -29,7 +30,10 @@ pub fn build_resolvers(config: &AtcConfig) -> Vec<Box<dyn InputResolver>> {
             "template" => rc.template.enabled,
             "prompt" => rc.prompt.enabled,
             _ => {
-                tracing::warn!(resolver = %name, "unknown resolver name in [resolvers].order; skipping");
+                tracing::warn!(
+                    resolver = %display_text(name),
+                    "unknown resolver name in [resolvers].order; skipping"
+                );
                 false
             }
         };

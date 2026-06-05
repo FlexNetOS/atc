@@ -211,8 +211,13 @@ impl InputResolver for TemplateResolver {
         let resolved_directive = if let Some(ref m) = opts.directive {
             m.clone()
         } else if let Some(ref d) = output.directive {
-            d.parse::<Directive>()
-                .with_context(|| format!("unknown directive '{}' in template '{}'", d, input))?
+            d.parse::<Directive>().with_context(|| {
+                format!(
+                    "unknown directive '{}' in template '{}'",
+                    atc_core::terminal_text::display_text(d),
+                    atc_core::terminal_text::display_text(input)
+                )
+            })?
         } else if let Some(first_directive) = output.directives.first() {
             first_directive.parse::<Directive>().unwrap_or_else(|_| {
                 debug!(directive = %first_directive, "unrecognized directive, defaulting to implement");
@@ -935,7 +940,7 @@ mod tests {
 
         std::fs::write(
             dir.path().join("templates/bad.md"),
-            "---\ndirective: nonexistent-directive\n---\nBody.",
+            "---\ndirective: \"nonexistent\\u001b[2J\\u202egpj\"\n---\nBody.",
         )
         .unwrap();
 
@@ -950,6 +955,9 @@ mod tests {
             "expected unknown directive error, got: {}",
             err
         );
+        assert!(err.contains("nonexistent\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
     }
 
     /// Test `worktree: none` suppresses synthetic branch (uses stable `tpl--none--<name>`).

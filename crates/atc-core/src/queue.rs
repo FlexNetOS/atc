@@ -34,7 +34,10 @@ impl std::str::FromStr for QueueInputType {
             "task" => Ok(QueueInputType::Task),
             "template" => Ok(QueueInputType::Template),
             "prompt" => Ok(QueueInputType::Prompt),
-            other => Err(anyhow::anyhow!("unknown input type: {}", other)),
+            other => Err(anyhow::anyhow!(
+                "unknown input type: {}",
+                crate::terminal_text::display_text(other)
+            )),
         }
     }
 }
@@ -77,7 +80,10 @@ impl std::str::FromStr for QueueItemStatus {
             "dispatched" => Ok(QueueItemStatus::Dispatched),
             "failed" => Ok(QueueItemStatus::Failed),
             "cancelled" => Ok(QueueItemStatus::Cancelled),
-            other => Err(anyhow::anyhow!("unknown queue item status: {}", other)),
+            other => Err(anyhow::anyhow!(
+                "unknown queue item status: {}",
+                crate::terminal_text::display_text(other)
+            )),
         }
     }
 }
@@ -131,9 +137,9 @@ impl std::str::FromStr for Priority {
             "high" | "25" => Ok(Priority::High),
             "medium" | "50" => Ok(Priority::Medium),
             "low" | "75" => Ok(Priority::Low),
-            other => Err(anyhow::anyhow!(
+            _ => Err(anyhow::anyhow!(
                 "unknown priority '{}'; valid: critical, high, medium, low",
-                other
+                crate::terminal_text::display_text(s)
             )),
         }
     }
@@ -254,4 +260,27 @@ pub trait DispatchQueue: Send + Sync {
     /// Recover 'dispatching' rows on daemon restart, scoped to the given queues.
     /// Returns (recovered_to_pending, marked_dispatched) counts.
     async fn queue_recover(&self, queue_names: &[&str]) -> Result<(u64, u64)>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_enum_parse_errors_escape_terminal_controls() {
+        for error in [
+            "task\x1b[2J\u{202e}gpj"
+                .parse::<QueueInputType>()
+                .unwrap_err(),
+            "pending\x1b[2J\u{202e}gpj"
+                .parse::<QueueItemStatus>()
+                .unwrap_err(),
+            "medium\x1b[2J\u{202e}gpj".parse::<Priority>().unwrap_err(),
+        ] {
+            let error = error.to_string();
+            assert!(error.contains("\\x1b[2J\\u{202e}gpj"));
+            assert!(!error.contains('\x1b'));
+            assert!(!error.contains('\u{202e}'));
+        }
+    }
 }

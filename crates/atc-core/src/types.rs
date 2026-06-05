@@ -487,8 +487,12 @@ impl AgentSessionId {
     }
 
     pub fn parse_str(value: &str) -> anyhow::Result<Self> {
-        let uuid = uuid::Uuid::parse_str(value)
-            .map_err(|e| anyhow::anyhow!("invalid agent session id {value:?}: {e}"))?;
+        let uuid = uuid::Uuid::parse_str(value).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid agent session id '{}': {e}",
+                crate::terminal_text::display_text(value)
+            )
+        })?;
         Ok(Self(uuid))
     }
 }
@@ -640,7 +644,10 @@ impl std::str::FromStr for Status {
             "needs-human" => Ok(Status::NeedsHuman),
             "stopped" => Ok(Status::Stopped),
             "retrying" => Ok(Status::Retrying),
-            other => Err(anyhow::anyhow!("unknown status: {}", other)),
+            other => Err(anyhow::anyhow!(
+                "unknown status: {}",
+                crate::terminal_text::display_text(other)
+            )),
         }
     }
 }
@@ -692,7 +699,10 @@ impl std::str::FromStr for Directive {
             "refine" => Ok(Directive::Refine),
             "create-task" => Ok(Directive::CreateTask),
             "close" => Ok(Directive::Close),
-            other => Err(anyhow::anyhow!("unknown directive: {}", other)),
+            other => Err(anyhow::anyhow!(
+                "unknown directive: {}",
+                crate::terminal_text::display_text(other)
+            )),
         }
     }
 }
@@ -739,7 +749,10 @@ impl std::str::FromStr for WorktreePolicy {
             "document" => Ok(WorktreePolicy::Document),
             "none" => Ok(WorktreePolicy::None),
             "current" => Ok(WorktreePolicy::Current),
-            other => Err(anyhow::anyhow!("unknown worktree policy: {}", other)),
+            other => Err(anyhow::anyhow!(
+                "unknown worktree policy: {}",
+                crate::terminal_text::display_text(other)
+            )),
         }
     }
 }
@@ -798,7 +811,10 @@ impl std::str::FromStr for WorkUnitStatus {
             "merged" => Ok(WorkUnitStatus::Merged),
             "closed" => Ok(WorkUnitStatus::Closed),
             "abandoned" => Ok(WorkUnitStatus::Abandoned),
-            other => Err(anyhow::anyhow!("unknown work unit status: {}", other)),
+            other => Err(anyhow::anyhow!(
+                "unknown work unit status: {}",
+                crate::terminal_text::display_text(other)
+            )),
         }
     }
 }
@@ -1243,5 +1259,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(invalid_escape.contains("0x1B"));
+    }
+
+    #[test]
+    fn test_required_enum_parse_errors_escape_terminal_controls() {
+        for error in [
+            "running\x1b[2J\u{202e}gpj".parse::<Status>().unwrap_err(),
+            "implement\x1b[2J\u{202e}gpj"
+                .parse::<Directive>()
+                .unwrap_err(),
+            "branch\x1b[2J\u{202e}gpj"
+                .parse::<WorktreePolicy>()
+                .unwrap_err(),
+            "active\x1b[2J\u{202e}gpj"
+                .parse::<WorkUnitStatus>()
+                .unwrap_err(),
+        ] {
+            let error = error.to_string();
+            assert!(error.contains("\\x1b[2J\\u{202e}gpj"));
+            assert!(!error.contains('\x1b'));
+            assert!(!error.contains('\u{202e}'));
+        }
     }
 }

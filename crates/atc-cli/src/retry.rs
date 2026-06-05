@@ -3,6 +3,7 @@ use atc_core::config::AtcConfig;
 use atc_core::executor::AgentExecutor;
 use atc_core::registry::Registry;
 use atc_core::stream_json;
+use atc_core::terminal_text::display_text;
 use atc_core::types::{RunOpts, Status};
 use std::collections::HashMap;
 use tracing::{info, warn};
@@ -30,21 +31,31 @@ fn classify_failure_overrides(
 ) -> (Option<f64>, Option<u32>) {
     match stream_json::read_last_result(log_file) {
         Ok(Some(event)) => {
+            let id_display = display_text(id);
+            let subtype_display = display_text(&event.subtype);
             info!(
-                id,
-                subtype = %event.subtype,
+                id = %id_display,
+                subtype = %subtype_display,
                 "last result event: subtype={}",
-                event.subtype
+                subtype_display
             );
             compute_overrides(config, directive, &event.subtype)
         }
         Ok(None) => {
-            warn!(id, log_file = %log_file.display(), "no result event found in log");
+            warn!(
+                id = %display_text(id),
+                log_file = %display_text(&log_file.display().to_string()),
+                "no result event found in log"
+            );
             println!("  No result event found. Retrying with same configuration.");
             (None, None)
         }
         Err(e) => {
-            warn!(id, error = %e, "failed to read log file for failure classification");
+            warn!(
+                id = %display_text(id),
+                error = %display_text(&e.to_string()),
+                "failed to read log file for failure classification"
+            );
             println!("  Could not read log. Retrying with same configuration.");
             (None, None)
         }
@@ -83,10 +94,17 @@ fn compute_overrides(
             (Some(doubled), None)
         }
         other => {
-            println!("  Failure: {other}. Retrying with same configuration.");
+            println!("{}", unknown_failure_message(other));
             (None, None)
         }
     }
+}
+
+fn unknown_failure_message(subtype: &str) -> String {
+    format!(
+        "  Failure: {}. Retrying with same configuration.",
+        display_text(subtype)
+    )
 }
 
 /// Execute the `atc retry` command.
@@ -105,7 +123,8 @@ pub async fn run_retry(
         Status::Failed | Status::NeedsHuman => {}
         other => {
             anyhow::bail!(
-                "cannot retry dispatch {id}: status is '{other}', expected 'failed' or 'needs-human'"
+                "cannot retry dispatch {}: status is '{other}', expected 'failed' or 'needs-human'",
+                display_text(id)
             );
         }
     }
@@ -120,14 +139,15 @@ pub async fn run_retry(
         match resolver_by_name(&record.resolver) {
             Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
             None => warn!(
-                id,
-                resolver = %record.resolver,
+                id = %display_text(id),
+                resolver = %display_text(&record.resolver),
                 "unknown resolver name; skipping on_cleanup — task state may be orphaned"
             ),
         }
 
         anyhow::bail!(
-            "Dispatch {id} has reached max retries ({max_retries}). Marking needs-human."
+            "Dispatch {} has reached max retries ({max_retries}). Marking needs-human.",
+            display_text(id)
         );
     }
 
@@ -137,7 +157,10 @@ pub async fn run_retry(
         .as_deref()
         .or(record.task_slug.as_deref())
         .ok_or_else(|| {
-            anyhow::anyhow!("cannot retry dispatch {id}: no original_input or task slug recorded")
+            anyhow::anyhow!(
+                "cannot retry dispatch {}: no original_input or task slug recorded",
+                display_text(id)
+            )
         })?;
 
     // 5. Validate resolver is known before mutating any external state.
@@ -146,8 +169,8 @@ pub async fn run_retry(
     let recorded_resolver = resolver_by_name(&record.resolver).ok_or_else(|| {
         anyhow::anyhow!(
             "cannot retry dispatch {}: unknown resolver '{}'",
-            id,
-            record.resolver
+            display_text(id),
+            display_text(&record.resolver)
         )
     })?;
 
@@ -165,13 +188,25 @@ pub async fn run_retry(
     .await
     {
         Ok(Some(s)) if !s.success() => {
-            tracing::debug!(id, session = %record.session, "tmux kill-session exited non-zero (session may not exist)");
+            tracing::debug!(
+                id = %display_text(id),
+                session = %display_text(&record.session),
+                "tmux kill-session exited non-zero (session may not exist)"
+            );
         }
         Ok(None) => {
-            tracing::debug!(id, session = %record.session, "tmux kill-session timed out (non-fatal)");
+            tracing::debug!(
+                id = %display_text(id),
+                session = %display_text(&record.session),
+                "tmux kill-session timed out (non-fatal)"
+            );
         }
         Err(e) => {
-            tracing::debug!(id, error = %e, "tmux kill-session failed (non-fatal)");
+            tracing::debug!(
+                id = %display_text(id),
+                error = %display_text(&e.to_string()),
+                "tmux kill-session failed (non-fatal)"
+            );
         }
         _ => {}
     }
@@ -184,7 +219,11 @@ pub async fn run_retry(
                 .iter()
                 .any(|r| r.id != *id && !r.status.is_terminal()),
             Err(e) => {
-                warn!(id, error = %e, "failed to check sibling dispatches; skipping status=draft for safety");
+                warn!(
+                    id = %display_text(id),
+                    error = %display_text(&e.to_string()),
+                    "failed to check sibling dispatches; skipping status=draft for safety"
+                );
                 true // conservative: skip draft reset
             }
         };
@@ -192,8 +231,9 @@ pub async fn run_retry(
             kb_set_status_draft(task_slug, config).await;
         } else {
             info!(
-                id,
-                task_slug, "skipping status=draft: another live dispatch exists for this slug"
+                id = %display_text(id),
+                task_slug = %display_text(task_slug),
+                "skipping status=draft: another live dispatch exists for this slug"
             );
         }
     }
@@ -209,7 +249,10 @@ pub async fn run_retry(
     // 8. Re-dispatch via pipeline
     let retry_num = record.retries + 1;
     // Print the dispatch ID (not original_input which may contain raw prompt text)
-    println!("Re-dispatching {} (retry {retry_num}/{max_retries})...", id);
+    println!(
+        "Re-dispatching {} (retry {retry_num}/{max_retries})...",
+        display_text(id)
+    );
 
     // Recover the original input for faithful retry. Falls back to task slug
     // for records created before original_input was persisted.
@@ -257,15 +300,21 @@ pub async fn run_retry(
     let outcome = match pipeline.execute(&input, &opts).await {
         Ok(o) => o,
         Err(e) => {
-            warn!(id, error = %e, "dispatch failed during retry; rolling back to {original_status}");
+            warn!(
+                id = %display_text(id),
+                error = %display_text(&e.to_string()),
+                "dispatch failed during retry; rolling back to {original_status}"
+            );
             if let Err(rollback_err) = registry.update_status(id, original_status).await {
                 warn!(
-                    id,
-                    error = %rollback_err,
+                    id = %display_text(id),
+                    error = %display_text(&rollback_err.to_string()),
                     "failed to rollback status to {original_status} after dispatch error"
                 );
                 anyhow::bail!(
-                    "dispatch failed during retry ({e}); additionally failed to rollback status: {rollback_err}"
+                    "dispatch failed during retry ({}); additionally failed to rollback status: {}",
+                    display_text(&e.to_string()),
+                    display_text(&rollback_err.to_string())
                 );
             }
             return Err(e);
@@ -275,7 +324,11 @@ pub async fn run_retry(
     // Mark the old record as Stopped so it can't be retried again by ID.
     // The new dispatch record carries the incremented retries counter.
     if let Err(e) = registry.update_status(id, Status::Stopped).await {
-        warn!(id, error = %e, "failed to mark old record as Stopped after retry (non-fatal)");
+        warn!(
+            id = %display_text(id),
+            error = %display_text(&e.to_string()),
+            "failed to mark old record as Stopped after retry (non-fatal)"
+        );
     }
 
     if let Some(code) = outcome.inline_exit_code {
@@ -307,13 +360,23 @@ async fn kb_set_status_draft(slug: &str, config: &AtcConfig) {
 
     match status {
         Ok(Some(s)) if !s.success() => {
-            warn!(slug, "git-kb set status=draft failed (non-fatal)");
+            warn!(
+                slug = %display_text(slug),
+                "git-kb set status=draft failed (non-fatal)"
+            );
         }
         Ok(None) => {
-            warn!(slug, "git-kb set status=draft timed out (non-fatal)");
+            warn!(
+                slug = %display_text(slug),
+                "git-kb set status=draft timed out (non-fatal)"
+            );
         }
         Err(e) => {
-            warn!(slug, error = %e, "git-kb set status=draft failed (non-fatal)");
+            warn!(
+                slug = %display_text(slug),
+                error = %display_text(&e.to_string()),
+                "git-kb set status=draft failed (non-fatal)"
+            );
         }
         _ => {}
     }
@@ -356,20 +419,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_max_retries_marks_needs_human() {
-        let record = sample_record("test-id-1", 3); // already at max
+        let record = sample_record("test-id-1\x1b[2J\u{202e}gpj", 3); // already at max
         let registry = MockRegistry::new(vec![record]);
         let executor = MockExecutor;
         let config = AtcConfig::default(); // max_retries = 3
 
-        let result = run_retry(&config, &registry, &executor, "test-id-1").await;
+        let result = run_retry(&config, &registry, &executor, "test-id-1\x1b[2J\u{202e}gpj").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("max retries"),
             "expected max retries error, got: {err}"
         );
+        assert!(err.contains("test-id-1\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
 
-        let r = registry.get("test-id-1").await.unwrap().unwrap();
+        let r = registry
+            .get("test-id-1\x1b[2J\u{202e}gpj")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(r.status, Status::NeedsHuman);
     }
 
@@ -389,19 +459,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_rejects_running_task() {
-        let mut record = sample_record("test-id-1", 0);
+        let mut record = sample_record("test-id-1\x1b[2J\u{202e}gpj", 0);
         record.status = Status::Running;
         let registry = MockRegistry::new(vec![record]);
         let executor = MockExecutor;
         let config = AtcConfig::default();
 
-        let result = run_retry(&config, &registry, &executor, "test-id-1").await;
+        let result = run_retry(&config, &registry, &executor, "test-id-1\x1b[2J\u{202e}gpj").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("cannot retry"),
             "expected status guard error, got: {err}"
         );
+        assert!(err.contains("test-id-1\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
     }
 
     #[tokio::test]
@@ -419,6 +492,23 @@ mod tests {
             err.contains("cannot retry"),
             "expected status guard error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_retry_unknown_resolver_escapes_terminal_controls() {
+        let mut record = sample_record("test-id-1\x1b[2J\u{202e}gpj", 0);
+        record.resolver = "unknown\x1b[2J\u{202e}gpj".to_string();
+        let registry = MockRegistry::new(vec![record]);
+        let executor = MockExecutor;
+        let config = AtcConfig::default();
+
+        let result = run_retry(&config, &registry, &executor, "test-id-1\x1b[2J\u{202e}gpj").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("test-id-1\\x1b[2J\\u{202e}gpj"));
+        assert!(err.contains("unknown\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
     }
 
     #[tokio::test]
@@ -462,20 +552,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_rejects_no_input_or_slug() {
-        let mut record = sample_record("test-id-1", 0);
+        let mut record = sample_record("test-id-1\x1b[2J\u{202e}gpj", 0);
         record.task_slug = None;
         record.original_input = None;
         let registry = MockRegistry::new(vec![record]);
         let executor = MockExecutor;
         let config = AtcConfig::default();
 
-        let result = run_retry(&config, &registry, &executor, "test-id-1").await;
+        let result = run_retry(&config, &registry, &executor, "test-id-1\x1b[2J\u{202e}gpj").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("no original_input or task slug"),
             "expected no-input error, got: {err}"
         );
+        assert!(err.contains("test-id-1\\x1b[2J\\u{202e}gpj"));
+        assert!(!err.contains('\x1b'));
+        assert!(!err.contains('\u{202e}'));
     }
 
     // --- Failure classification tests ---
@@ -502,6 +595,15 @@ mod tests {
         let (budget, turns) = compute_overrides(&config, "implement", "error_something_else");
         assert_eq!(budget, None);
         assert_eq!(turns, None);
+    }
+
+    #[test]
+    fn test_unknown_failure_message_escapes_terminal_controls() {
+        let message = unknown_failure_message("error\x1b[2J\u{202e}gpj");
+
+        assert!(message.contains("error\\x1b[2J\\u{202e}gpj"));
+        assert!(!message.contains('\x1b'));
+        assert!(!message.contains('\u{202e}'));
     }
 
     #[test]

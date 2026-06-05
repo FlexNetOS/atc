@@ -12,6 +12,7 @@
 //! let header = dim().render("dispatched_at");
 //! ```
 
+use atc_core::terminal_text::display_text;
 use atc_core::types::{Status, WorkUnitStatus};
 use owo_colors::{OwoColorize, Style};
 use std::io::IsTerminal;
@@ -35,8 +36,9 @@ impl std::str::FromStr for ColorMode {
             "auto" => Ok(ColorMode::Auto),
             "always" => Ok(ColorMode::Always),
             "never" => Ok(ColorMode::Never),
-            other => Err(anyhow::anyhow!(
-                "invalid --color value '{other}' (expected auto, always, or never)"
+            _ => Err(anyhow::anyhow!(
+                "invalid --color value '{}' (expected auto, always, or never)",
+                display_text(s)
             )),
         }
     }
@@ -249,5 +251,17 @@ mod tests {
         assert_eq!("ALWAYS".parse::<ColorMode>().unwrap(), ColorMode::Always);
         assert_eq!("never".parse::<ColorMode>().unwrap(), ColorMode::Never);
         assert!("nope".parse::<ColorMode>().is_err());
+    }
+
+    #[test]
+    fn color_mode_parse_errors_escape_terminal_controls() {
+        let error = "auto\x1b[2J\u{202e}gpj"
+            .parse::<ColorMode>()
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("auto\\x1b[2J\\u{202e}gpj"));
+        assert!(!error.contains('\x1b'));
+        assert!(!error.contains('\u{202e}'));
     }
 }

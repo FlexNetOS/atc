@@ -65,14 +65,14 @@ async fn cleanup_single(
             );
         }
         warn!(
-            id,
-            session = %record.session,
+            id = %display_text(id),
+            session = %display_text(&record.session),
             "skipping worktree removal: tmux session kill was inconclusive (already terminal)"
         );
     } else if shared {
         warn!(
-            id,
-            worktree = %worktree_path.display(),
+            id = %display_text(id),
+            worktree = %display_text(&worktree_path.display().to_string()),
             "skipping worktree removal: another running dispatch shares this worktree"
         );
     } else {
@@ -89,8 +89,8 @@ async fn cleanup_single(
     match resolver_by_name(&record.resolver) {
         Some(resolver) => resolver.on_cleanup(&record, config, Some(registry)).await,
         None => warn!(
-            id = %record.id,
-            resolver = %record.resolver,
+            id = %display_text(&record.id),
+            resolver = %display_text(&record.resolver),
             "unknown resolver name; skipping on_cleanup — task state may be orphaned"
         ),
     }
@@ -120,8 +120,8 @@ async fn cleanup_done(config: &AtcConfig, registry: &dyn Registry) -> Result<()>
             Err(e) => {
                 failed += 1;
                 warn!(
-                    id = %record.id,
-                    error = %e,
+                    id = %display_text(&record.id),
+                    error = %display_text(&e.to_string()),
                     "failed to clean dispatch (skipping)"
                 );
             }

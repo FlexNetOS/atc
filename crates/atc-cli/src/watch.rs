@@ -235,9 +235,17 @@ fn start_socket_broadcaster(
     tx: broadcast::Sender<String>,
 ) -> Result<SocketServer> {
     let socket_path = prepare_socket_path(socket_path)?;
-    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let listener = tokio::net::UnixListener::bind(&socket_path).with_context(|| {
+        format!(
+            "failed to bind watch socket: {}",
+            display_text(&socket_path.display().to_string())
+        )
+    })?;
     let socket_identity = socket_identity(&socket_path)?;
-    info!(path = %socket_path.display(), "listening on Unix socket");
+    info!(
+        path = %display_text(&socket_path.display().to_string()),
+        "listening on Unix socket"
+    );
 
     let handle = tokio::spawn(async move {
         loop {
@@ -249,7 +257,10 @@ fn start_socket_broadcaster(
                     });
                 }
                 Err(e) => {
-                    warn!(error = %e, "socket accept failed");
+                    warn!(
+                        error = %display_text(&e.to_string()),
+                        "socket accept failed"
+                    );
                 }
             }
         }
@@ -338,8 +349,8 @@ fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
         Ok(socket_path) => socket_path,
         Err(e) => {
             warn!(
-                path = %socket_path.display(),
-                error = %e,
+                path = %display_text(&socket_path.display().to_string()),
+                error = %display_text(&e.to_string()),
                 "not removing watch socket because its parent is no longer private"
             );
             return;
@@ -351,11 +362,15 @@ fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
             let actual = socket_identity_from_metadata(&metadata);
             if actual == expected {
                 if let Err(e) = std::fs::remove_file(&socket_path) {
-                    warn!(path = %socket_path.display(), error = %e, "failed to clean up watch socket");
+                    warn!(
+                        path = %display_text(&socket_path.display().to_string()),
+                        error = %display_text(&e.to_string()),
+                        "failed to clean up watch socket"
+                    );
                 }
             } else {
                 warn!(
-                    path = %socket_path.display(),
+                    path = %display_text(&socket_path.display().to_string()),
                     expected_dev = expected.dev,
                     expected_ino = expected.ino,
                     actual_dev = actual.dev,
@@ -366,13 +381,17 @@ fn cleanup_socket_path(socket_path: &Path, expected: SocketIdentity) {
         }
         Ok(_) => {
             warn!(
-                path = %socket_path.display(),
+                path = %display_text(&socket_path.display().to_string()),
                 "not removing non-socket path during watch socket cleanup"
             );
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            warn!(path = %socket_path.display(), error = %e, "failed to inspect watch socket during cleanup");
+            warn!(
+                path = %display_text(&socket_path.display().to_string()),
+                error = %display_text(&e.to_string()),
+                "failed to inspect watch socket during cleanup"
+            );
         }
     }
 }
@@ -641,7 +660,10 @@ pub async fn run_watch(
             OutputFormat::Ndjson
         }
         other => {
-            anyhow::bail!("unknown format: {other} (expected ndjson, json, pretty, human, or auto)")
+            anyhow::bail!(
+                "unknown format: {} (expected ndjson, json, pretty, human, or auto)",
+                display_text(other)
+            )
         }
     };
 
@@ -665,7 +687,7 @@ pub async fn run_watch(
     } else if let Some(id) = id {
         match registry.get(id).await? {
             Some(r) => vec![r],
-            None => anyhow::bail!("dispatch not found: {id}"),
+            None => anyhow::bail!("dispatch not found: {}", display_text(id)),
         }
     } else {
         // Most recent running
@@ -759,7 +781,11 @@ pub async fn run_watch(
                         post_completion::run_post_completion(&input, registry.as_ref(), config)
                             .await
                     {
-                        warn!(id = %id, error = %e, "post-completion failed for dead session");
+                        warn!(
+                            id = %display_text(id),
+                            error = %display_text(&e.to_string()),
+                            "post-completion failed for dead session"
+                        );
                         continue;
                     }
                 }
@@ -901,6 +927,48 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_str(&stdout[0]).unwrap();
         assert_eq!(decoded["id"], "disp-\u{202e}gpj.exe");
         assert_eq!(decoded["text"], "hello\u{202e}gpj.exe");
+    }
+
+    #[tokio::test]
+    async fn run_watch_unknown_format_escapes_terminal_controls() {
+        let config = AtcConfig::default();
+        let registry = Arc::new(crate::test_support::MockRegistry::new(Vec::new()));
+
+        let error = run_watch(
+            &config,
+            registry,
+            None,
+            false,
+            "bad\x1b[2J\u{202e}gpj",
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("bad\\x1b[2J\\u{202e}gpj"));
+        assert_no_raw_terminal_controls(&error);
+    }
+
+    #[tokio::test]
+    async fn run_watch_missing_id_escapes_terminal_controls() {
+        let config = AtcConfig::default();
+        let registry = Arc::new(crate::test_support::MockRegistry::new(Vec::new()));
+
+        let error = run_watch(
+            &config,
+            registry,
+            Some("missing\x1b[2J\u{202e}gpj"),
+            false,
+            "json",
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("missing\\x1b[2J\\u{202e}gpj"));
+        assert_no_raw_terminal_controls(&error);
     }
 
     #[test]
