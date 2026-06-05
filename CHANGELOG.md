@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/gitkb/atc/compare/v0.1.7...v0.1.8) (2026-06-05)
+
+
+### Features
+
+* add ATC tmux session locators and open-session ([#72](https://github.com/gitkb/atc/issues/72)) ([e2d7147](https://github.com/gitkb/atc/commit/e2d714756ed6a0b5e9ab970130be4e8d147976c7))
+
 ## [0.1.7](https://github.com/gitkb/atc/compare/v0.1.6...v0.1.7) (2026-06-05)
 
 
