@@ -48,10 +48,9 @@ pub async fn run_post_completion(
     config: &AtcConfig,
 ) -> Result<PostCompleteResult> {
     // 1. Look up the dispatch record
-    let record = registry
-        .get(&input.dispatch_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("dispatch not found: {}", input.dispatch_id))?;
+    let record = registry.get(&input.dispatch_id).await?.ok_or_else(|| {
+        anyhow::anyhow!("dispatch not found: {}", display_text(&input.dispatch_id))
+    })?;
 
     // 2. Resolve log file path
     let log_file = input.log_file.as_deref().unwrap_or(&record.log_file);
@@ -200,9 +199,9 @@ pub async fn run_post_completion(
     }
 
     info!(
-        id = %input.dispatch_id,
+        id = %display_text(&input.dispatch_id),
         status = %status,
-        pr_url = ?pr_url,
+        pr_url = %pr_url.as_deref().map(display_text).unwrap_or_else(|| "-".to_string()),
         "post-completion finished"
     );
 
@@ -233,7 +232,10 @@ fn save_review_artifact(log_dir: &Path, dispatch_id: &str, artifacts: &Artifacts
 
     let path = log_dir.join(format!("{dispatch_id}-review-artifact.json"));
     std::fs::write(&path, serde_json::to_string_pretty(&review_artifact)?)?;
-    info!(path = %path.display(), "saved review artifact");
+    info!(
+        path = %display_text(&path.display().to_string()),
+        "saved review artifact"
+    );
     Ok(())
 }
 
@@ -413,7 +415,7 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
 
     if !is_safe {
         warn!(
-            path = %path_str,
+            path = %display_text(&path_str),
             "skipping worktree cleanup: path does not match safe patterns"
         );
         return;
@@ -478,7 +480,10 @@ pub async fn cleanup_worktree(worktree_path: &Path, worktree_base: &Path) {
             }
         }
     } else {
-        warn!(path = %path_str, "skipping worktree cleanup: could not resolve repo root");
+        warn!(
+            path = %display_text(&path_str),
+            "skipping worktree cleanup: could not resolve repo root"
+        );
     }
 }
 

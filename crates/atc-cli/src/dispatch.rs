@@ -557,7 +557,10 @@ pub async fn resolve_document_workspace(
             || branch_name == ".."
             || branch_name == "."
         {
-            warn!(branch_name, "skipping unsafe workspace directory name");
+            warn!(
+                branch_name = %display_text(&branch_name),
+                "skipping unsafe workspace directory name"
+            );
             continue;
         }
         let doc_path = entry.path().join(format!("{}.md", slug));
@@ -629,7 +632,10 @@ pub async fn resolve_document_workspace(
     } else {
         let cwd = find_worktree_for_branch(&selected, worktree_base, workspace_root)
             .unwrap_or_else(|| {
-                warn!(branch = %selected, "no worktree found for branch, falling back to workspace_root");
+                warn!(
+                    branch = %display_text(&selected),
+                    "no worktree found for branch, falling back to workspace_root"
+                );
                 workspace_root.to_path_buf()
             });
         Ok(Some(DocumentWorkspace {
@@ -819,7 +825,11 @@ pub async fn ensure_worktree(
                             )
                             .await?;
                         }
-                        info!(branch, path = %existing, "reusing existing worktree");
+                        info!(
+                            branch = %display_text(branch),
+                            path = %display_text(existing),
+                            "reusing existing worktree"
+                        );
                         let _ = tokio::process::Command::new("git")
                             .args(["-C", existing, "fetch", "origin"])
                             .stdout(std::process::Stdio::null())

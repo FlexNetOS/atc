@@ -106,8 +106,8 @@ pub async fn run_queue_drain(
                         .await
                     {
                         warn!(
-                            queue_id = %item.id,
-                            error = %e,
+                            queue_id = %display_text(&item.id),
+                            error = %display_text(&e.to_string()),
                             "failed to persist dispatch_id for crash recovery"
                         );
                     }
@@ -116,16 +116,16 @@ pub async fn run_queue_drain(
                         .await
                     {
                         error!(
-                            queue_id = %item.id,
-                            error = %e,
+                            queue_id = %display_text(&item.id),
+                            error = %display_text(&e.to_string()),
                             "failed to mark dispatched"
                         );
                     }
                     dispatched += 1;
                     info!(
-                        queue_id = %item.id,
-                        dispatch_id = %dispatch_id,
-                        input = %label,
+                        queue_id = %display_text(&item.id),
+                        dispatch_id = %display_text(&dispatch_id),
+                        input = %display_text(&label),
                         "dispatched from queue"
                     );
                 }
@@ -136,16 +136,16 @@ pub async fn run_queue_drain(
                         .await
                     {
                         warn!(
-                            queue_id = %item.id,
-                            error = %mark_err,
+                            queue_id = %display_text(&item.id),
+                            error = %display_text(&mark_err.to_string()),
                             "failed to mark item as failed in queue"
                         );
                     }
                     failed += 1;
                     warn!(
-                        queue_id = %item.id,
-                        input = %label,
-                        error = %err_msg,
+                        queue_id = %display_text(&item.id),
+                        input = %display_text(&label),
+                        error = %display_text(&err_msg),
                         "queue dispatch failed"
                     );
                 }
@@ -194,7 +194,11 @@ pub async fn dispatch_queue_item(
             Some(m) => match m.parse() {
                 Ok(d) => Some(d),
                 Err(_) => {
-                    warn!(queue_id = %row.id, mode = %m, "invalid directive/mode, ignoring");
+                    warn!(
+                        queue_id = %display_text(&row.id),
+                        mode = %display_text(m),
+                        "invalid directive/mode, ignoring"
+                    );
                     None
                 }
             },

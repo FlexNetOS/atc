@@ -182,18 +182,21 @@ impl ClaudeExecutor {
                     .output(),
             )
             .await
-            .map_err(|_| anyhow::anyhow!("git-kb show {} timed out", opts.slug))??;
+            .map_err(|_| anyhow::anyhow!("git-kb show {} timed out", display_text(&opts.slug)))??;
 
             if !task_doc.status.success() {
                 anyhow::bail!(
                     "git kb show {} failed (exit {:?}): {}",
-                    opts.slug,
+                    display_text(&opts.slug),
                     task_doc.status.code(),
-                    String::from_utf8_lossy(&task_doc.stderr)
+                    display_text(String::from_utf8_lossy(&task_doc.stderr).trim())
                 );
             }
             if task_doc.stdout.is_empty() {
-                warn!(slug = %opts.slug, "git kb show returned empty output");
+                warn!(
+                    slug = %display_text(&opts.slug),
+                    "git kb show returned empty output"
+                );
             }
             task_doc.stdout
         };
@@ -261,7 +264,7 @@ impl ClaudeExecutor {
         cmd.stderr(std::process::Stdio::piped());
 
         info!(
-            slug = %opts.slug,
+            slug = %display_text(&opts.slug),
             agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             agent_resume = matches!(opts.agent_invocation, AgentInvocation::Resume(_)),
             "spawning claude (inline)"
@@ -318,7 +321,11 @@ impl ClaudeExecutor {
             Err(e) if e.to_string() == "__timeout__" => 124,
             Err(e) => return Err(e),
         };
-        info!(slug = %opts.slug, exit_code, "inline spawn completed");
+        info!(
+            slug = %display_text(&opts.slug),
+            exit_code,
+            "inline spawn completed"
+        );
 
         // Temp files cleaned up on drop
 
@@ -385,7 +392,7 @@ impl ClaudeExecutor {
         cmd.stderr(std::process::Stdio::inherit());
 
         info!(
-            slug = %opts.slug,
+            slug = %display_text(&opts.slug),
             agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             "spawning claude (ephemeral inline)"
         );
@@ -397,7 +404,11 @@ impl ClaudeExecutor {
             Err(e) if e.to_string() == "__timeout__" => 124,
             Err(e) => return Err(e),
         };
-        info!(slug = %opts.slug, exit_code, "ephemeral inline spawn completed");
+        info!(
+            slug = %display_text(&opts.slug),
+            exit_code,
+            "ephemeral inline spawn completed"
+        );
 
         Ok(AgentHandle {
             session: opts.session_name.clone(),
@@ -618,7 +629,7 @@ impl ClaudeExecutor {
 
         // 5. Create tmux session
         info!(
-            session = %opts.session_name,
+            session = %display_text(&opts.session_name),
             agent_session_id = opts.agent_invocation.session_id().map(|id| id.to_string()),
             agent_resume = matches!(opts.agent_invocation, AgentInvocation::Resume(_)),
             "creating tmux session"
