@@ -13,13 +13,13 @@ use tracing::{error, info, warn};
 pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Result<()> {
     let items = queue.queue_list(queue_name).await?;
     if items.is_empty() {
-        println!("Queue '{}' is empty.", queue_name);
+        println!("Queue '{}' is empty.", display_text(queue_name));
         return Ok(());
     }
 
     println!(
         "Queue '{}' — {} pending item(s):\n",
-        queue_name,
+        display_text(queue_name),
         items.len()
     );
     println!(
@@ -32,17 +32,10 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
             .map(|p| p.as_str())
             .unwrap_or("unknown");
         // Truncate long input for display
-        let input_display = if item.input_value.chars().count() > 40 {
-            format!(
-                "{}...",
-                item.input_value.chars().take(37).collect::<String>()
-            )
-        } else {
-            item.input_value.clone()
-        };
+        let input_display = queue_input_display(&item.input_value);
         println!(
             "{:<24} {:<10} {:<10} {:<8} {}",
-            &item.id[..item.id.len().min(24)],
+            display_text(&item.id.chars().take(24).collect::<String>()),
             item.input_type.as_str(),
             priority_str,
             item.status.as_str(),
@@ -52,12 +45,22 @@ pub async fn run_queue_list(queue: &dyn DispatchQueue, queue_name: &str) -> Resu
     Ok(())
 }
 
+fn queue_input_display(input: &str) -> String {
+    let safe_input = display_text(input);
+    if safe_input.chars().count() > 40 {
+        format!("{}...", safe_input.chars().take(37).collect::<String>())
+    } else {
+        safe_input
+    }
+}
+
 /// Clear all pending items from a queue.
 pub async fn run_queue_clear(queue: &dyn DispatchQueue, queue_name: &str) -> Result<()> {
     let count = queue.queue_clear(queue_name).await?;
     println!(
         "Cleared {} pending item(s) from queue '{}'.",
-        count, queue_name
+        count,
+        display_text(queue_name)
     );
     Ok(())
 }
@@ -246,4 +249,31 @@ pub async fn dispatch_queue_item(
 
     let outcome = pipeline.execute(&raw_input, &opts).await?;
     Ok(outcome.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_input_display_escapes_terminal_controls_before_truncating() {
+        let input = format!("task\x1b[2J\u{202e}gpj{}", "x".repeat(80));
+        let display = queue_input_display(&input);
+
+        assert!(!display.contains('\x1b'), "raw escape leaked: {display:?}");
+        assert!(
+            !display.contains('\u{202e}'),
+            "raw bidi control leaked: {display:?}"
+        );
+        assert!(
+            display.contains("\\x1b"),
+            "escaped ESC missing: {display:?}"
+        );
+        assert!(
+            display.contains("\\u{202e}"),
+            "escaped bidi missing: {display:?}"
+        );
+        assert!(display.ends_with("..."), "long input was not truncated");
+        assert_eq!(display.chars().count(), 40);
+    }
 }

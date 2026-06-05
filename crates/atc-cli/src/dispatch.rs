@@ -207,7 +207,14 @@ pub async fn resolve_pr_repo_path(
     // Extract org/repo from PR URL: "https://github.com/org/repo/pull/27" → "org/repo"
     let github_repo = pr_url
         .strip_prefix("https://github.com/")
-        .and_then(|s| s.split("/pull/").next())
+        .and_then(|s| s.split_once("/pull/").map(|(repo, _)| repo))
+        .filter(|repo| {
+            let mut parts = repo.split('/');
+            matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(org), Some(name), None) if !org.is_empty() && !name.is_empty()
+            )
+        })
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "cannot extract org/repo from PR URL: {}",
@@ -1351,14 +1358,24 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_pr_repo_path_invalid_url_escapes_terminal_controls() {
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_pr_repo_path("not-github\x1b[2J\u{202e}gpj", dir.path())
-            .await
-            .unwrap_err()
-            .to_string();
+        for invalid in [
+            "not-github\x1b[2J\u{202e}gpj",
+            "https://github.com/gitkb/atc/issues/72\x1b[2J\u{202e}gpj",
+            "https://github.com/gitkb/atc",
+            "https://github.com/gitkb//pull/72",
+        ] {
+            let err = resolve_pr_repo_path(invalid, dir.path())
+                .await
+                .unwrap_err()
+                .to_string();
 
-        assert!(err.contains("not-github\\x1b[2J\\u{202e}gpj"), "got: {err}");
-        assert!(!err.contains('\x1b'), "got: {err}");
-        assert!(!err.contains('\u{202e}'), "got: {err}");
+            assert!(
+                err.contains("cannot extract org/repo from PR URL"),
+                "got: {err}"
+            );
+            assert!(!err.contains('\x1b'), "got: {err}");
+            assert!(!err.contains('\u{202e}'), "got: {err}");
+        }
     }
 
     #[test]

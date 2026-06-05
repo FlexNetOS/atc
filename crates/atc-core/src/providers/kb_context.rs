@@ -81,7 +81,7 @@ async fn fetch_related_context(task_slug: &str, kb_root: &PathBuf, branch: &str)
     {
         Ok(result) => result.ok()?,
         Err(_) => {
-            warn!(task_slug = %task_slug, "git-kb graph timed out");
+            warn!(task_slug = %display_text(task_slug), "git-kb graph timed out");
             return None;
         }
     };
