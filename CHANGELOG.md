@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.7](https://github.com/gitkb/atc/compare/v0.1.6...v0.1.7) (2026-06-05)
+
+
+### Features
+
+* add ATC session switchboard ([#69](https://github.com/gitkb/atc/issues/69)) ([84f4228](https://github.com/gitkb/atc/commit/84f422813c1d965d77b1dd258a4085519d14ad55))
+
+
+### Tests
+
+* harden atc sessions review follow-up ([#71](https://github.com/gitkb/atc/issues/71)) ([692f98b](https://github.com/gitkb/atc/commit/692f98b7c561df088bd0ddb7d03e3d4aee92e200))
+
 ## [0.1.6](https://github.com/gitkb/atc/compare/v0.1.5...v0.1.6) (2026-06-03)
 
 
