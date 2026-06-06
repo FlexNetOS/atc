@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use atc_core::config::AtcConfig;
+use atc_core::config::{AtcConfig, CloudConfig};
 use atc_core::executor::{AgentExecutor, AgentInvocation, AgentOpts};
 use atc_core::registry::Registry;
 use atc_core::resolver::{InputResolver, ResolvedInput};
@@ -208,9 +208,12 @@ fn build_dispatch_record(
     session_name: &str,
     log_file: &Path,
     agent_metadata: &AgentSessionMetadata,
+    backend: &str,
+    cloud: &CloudConfig,
     now: DateTime<Utc>,
 ) -> DispatchRecord {
-    let terminal_locator = dispatch_terminal_locator(opts, session_name, worktree_path, now);
+    let terminal_locator =
+        dispatch_terminal_locator(opts, backend, session_name, worktree_path, now, cloud);
     DispatchRecord {
         id: resolved.dispatch_id.clone(),
         task_slug: resolved.task_slug.clone(),
@@ -245,18 +248,26 @@ fn build_dispatch_record(
 
 fn dispatch_terminal_locator(
     opts: &RunOpts,
+    backend: &str,
     session_name: &str,
     worktree_path: &Path,
     detected_at: DateTime<Utc>,
+    cloud: &CloudConfig,
 ) -> Option<TerminalLocator> {
     if opts.inline || session_name.trim().is_empty() {
-        None
-    } else {
-        Some(TerminalLocator::atc_tmux(
+        return None;
+    }
+    let cwd = Some(worktree_path.to_path_buf());
+    match backend {
+        // Remote worker: `session_name` carries the worker/Machine id.
+        "cloud" => Some(TerminalLocator::atc_cloud(
             session_name,
-            Some(worktree_path.to_path_buf()),
+            cloud.fly_app.clone(),
+            cloud.fly_region.clone(),
+            cwd,
             detected_at,
-        ))
+        )),
+        _ => Some(TerminalLocator::atc_tmux(session_name, cwd, detected_at)),
     }
 }
 
@@ -924,6 +935,8 @@ impl<'a> DispatchPipeline<'a> {
             &session_name,
             &log_file,
             &agent_metadata,
+            self.executor.backend(),
+            &self.config.cloud,
             now,
         );
         info!(
@@ -1258,8 +1271,14 @@ impl<'a> DispatchPipeline<'a> {
             None => Status::Running,
         };
         record.session = handle.session.clone();
-        record.terminal_locator =
-            dispatch_terminal_locator(opts, &handle.session, &worktree_path, Utc::now());
+        record.terminal_locator = dispatch_terminal_locator(
+            opts,
+            self.executor.backend(),
+            &handle.session,
+            &worktree_path,
+            Utc::now(),
+            &self.config.cloud,
+        );
         record.status = status;
         record.updated_at = Utc::now();
 

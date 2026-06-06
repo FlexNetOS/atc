@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "atc-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -126,10 +126,11 @@ dependencies = [
 
 [[package]]
 name = "atc-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "clap",
  "futures",

@@ -1,15 +1,24 @@
+use crate::config::CloudConfig;
 use crate::terminal_text::display_text;
 use crate::types::{AgentSessionId, Directive};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use base64::Engine as _;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{info, warn};
 
 #[async_trait]
 pub trait AgentExecutor: Send + Sync {
     async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle>;
+
+    /// Terminal backend this executor produces: `"tmux"` for local dispatch,
+    /// `"cloud"` for remote workers. The dispatch pipeline uses this to build
+    /// the matching `TerminalLocator` variant after spawn.
+    fn backend(&self) -> &'static str {
+        "tmux"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,6 +764,288 @@ impl AgentExecutor for ClaudeExecutor {
     }
 }
 
+const B64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
+
+/// Remote executor for the Cloud ATC vertical slice.
+///
+/// `spawn` creates an ephemeral Fly Machine worker (via the `fly` CLI) that
+/// forks a warm bare-mirror volume, runs `claude --output-format stream-json`,
+/// and tees each event line to a per-dispatch NATS subject. Before creating the
+/// Machine it starts a control-plane consumer that **re-materializes** that
+/// NATS stream back to the durable `log_file` — so the existing
+/// `stream_json` → `post_completion` → health/`atc logs` paths run unchanged,
+/// reading the same file a local tmux dispatch would have written.
+///
+/// The Machine carries the worker id in [`AgentHandle::session`]; the pipeline
+/// records it as a [`crate::types::TerminalLocator::Cloud`] locator.
+///
+/// Secrets (GitHub App private key, NATS credentials, `FLY_API_TOKEN` for
+/// self-destruct) are provided to the worker as Fly app secrets, never embedded
+/// in the image or passed on the control-plane command line.
+pub struct RemoteExecutor {
+    pub cloud: CloudConfig,
+}
+
+impl RemoteExecutor {
+    pub fn new(cloud: CloudConfig) -> Self {
+        Self { cloud }
+    }
+
+    /// Base64-encode a payload for transport as a Fly Machine env var. Keeps
+    /// large/multi-line content (system prompt, task stdin) off the argv in a
+    /// shell-safe, newline-free form.
+    fn encode_payload(value: &str) -> String {
+        B64.encode(value.as_bytes())
+    }
+
+    /// Derive the worker's branch name from the dispatch session name, sanitized
+    /// to the git-ref-safe subset. The worker pushes this branch and opens the PR.
+    fn worker_branch(opts: &AgentOpts) -> String {
+        let raw = if opts.session_name.trim().is_empty() {
+            opts.slug.as_str()
+        } else {
+            opts.session_name.as_str()
+        };
+        let sanitized: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if sanitized.trim_matches('-').is_empty() {
+            format!("atc/{}", opts.dispatch_id)
+        } else {
+            sanitized
+        }
+    }
+
+    /// Build the env-var pairs (key, value) handed to the worker Machine.
+    fn worker_env(&self, opts: &AgentOpts, subject: &str) -> Result<Vec<(String, String)>> {
+        let repo_remote = self.cloud.repo_remote.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cloud.repo_remote (or the repo git URL) is required for remote dispatch"
+            )
+        })?;
+
+        let mut env = vec![
+            ("ATC_DISPATCH_ID".to_string(), opts.dispatch_id.clone()),
+            ("ATC_SLUG".to_string(), opts.slug.clone()),
+            (
+                "ATC_DIRECTIVE".to_string(),
+                opts.directive.as_str().to_string(),
+            ),
+            ("ATC_NATS_URL".to_string(), self.cloud.resolved_nats_url()),
+            ("ATC_NATS_SUBJECT".to_string(), subject.to_string()),
+            ("ATC_REPO_REMOTE".to_string(), repo_remote.to_string()),
+            ("ATC_BRANCH".to_string(), Self::worker_branch(opts)),
+            ("ATC_MAX_TURNS".to_string(), opts.max_turns.to_string()),
+            (
+                "ATC_MAX_BUDGET_USD".to_string(),
+                opts.max_budget_usd.to_string(),
+            ),
+            (
+                "ATC_SYSTEM_PROMPT_B64".to_string(),
+                Self::encode_payload(&opts.prompt),
+            ),
+            (
+                "ATC_STDIN_B64".to_string(),
+                Self::encode_payload(opts.stdin_content.as_deref().unwrap_or_default()),
+            ),
+        ];
+
+        // Forward task/provider env (GITKB_*, etc.). Skip keys that are not
+        // shell-safe and values containing control characters that `fly -e`
+        // cannot carry verbatim.
+        let mut forwarded: Vec<(&String, &String)> = opts.env.iter().collect();
+        forwarded.sort_by(|a, b| a.0.cmp(b.0)); // deterministic argv order
+        for (key, value) in forwarded {
+            if validate_env_key(key).is_err() {
+                warn!(key = %display_text(key), "skipping non-portable env key for remote worker");
+                continue;
+            }
+            if value.contains(['\n', '\0']) {
+                warn!(key = %display_text(key), "skipping env value with control characters for remote worker");
+                continue;
+            }
+            env.push((key.clone(), value.clone()));
+        }
+        Ok(env)
+    }
+
+    /// Build the argv for `fly machine run` (excluding the program name).
+    fn build_fly_args(&self, opts: &AgentOpts, subject: &str) -> Result<Vec<String>> {
+        let image =
+            self.cloud.fly_image.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("cloud.fly_image is required for remote dispatch")
+            })?;
+        let app = self
+            .cloud
+            .fly_app
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("cloud.fly_app is required for remote dispatch"))?;
+
+        let mut args = vec![
+            "machine".to_string(),
+            "run".to_string(),
+            image.to_string(),
+            "--app".to_string(),
+            app.to_string(),
+            // Ephemeral: never restart; the worker self-destructs on completion.
+            "--restart".to_string(),
+            "no".to_string(),
+            "--metadata".to_string(),
+            format!("atc_dispatch_id={}", opts.dispatch_id),
+        ];
+        if let Some(region) = self.cloud.fly_region.as_deref() {
+            args.push("--region".to_string());
+            args.push(region.to_string());
+        }
+        if let Some(volume) = self.cloud.worker_volume.as_deref() {
+            // Fork the warm bare-mirror volume onto /workspace.
+            args.push("--volume".to_string());
+            args.push(format!("{volume}:/workspace"));
+        }
+        for (key, value) in self.worker_env(opts, subject)? {
+            args.push("-e".to_string());
+            args.push(format!("{key}={value}"));
+        }
+        Ok(args)
+    }
+
+    /// Parse a Fly Machine id (14 lowercase-hex chars) from `fly machine run`
+    /// output. Accepts both the human "Machine ID: <id>" form and the plain id.
+    fn parse_machine_id(stdout: &str) -> Option<String> {
+        for token in stdout.split(|c: char| !c.is_ascii_alphanumeric()) {
+            if token.len() == 14 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(token.to_string());
+            }
+        }
+        None
+    }
+
+    /// Start the control-plane NATS consumer that re-materializes the worker's
+    /// stream-json events to `log_file`. Runs `nats sub --raw` and streams its
+    /// stdout to the log using the same writer pump as the local executor, so
+    /// the on-disk format is byte-identical to a local dispatch.
+    ///
+    /// The consumer is detached; for a real run it must be hosted by a
+    /// long-lived control-plane process (the daemon) so it outlives `atc run`.
+    /// Subscribing here, before the Machine is created, minimizes the window in
+    /// which early events could be missed (core NATS is fire-and-forget;
+    /// JetStream durability is a follow-on).
+    async fn start_log_rematerializer(&self, subject: &str, log_file: &Path) -> Result<()> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        if let Some(parent) = log_file.parent().filter(|p| !p.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .await
+            .with_context(|| format!("failed to open log file {}", log_file.display()))?;
+        let writer = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(file)));
+
+        let nats_bin = self.cloud.resolved_nats_bin();
+        let nats_url = self.cloud.resolved_nats_url();
+        let mut child = Command::new(&nats_bin)
+            .args(["sub", "--raw", "--server", &nats_url, subject])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to start NATS consumer ({} sub) — is the nats CLI installed?",
+                    nats_bin.display()
+                )
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("nats sub produced no stdout pipe"))?;
+        spawn_stream_to_log(stdout, writer);
+        // Detach the child; it streams until the subject closes or the host
+        // process exits.
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        info!(subject = %display_text(subject), "started NATS log re-materializer");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentExecutor for RemoteExecutor {
+    async fn spawn(&self, opts: &AgentOpts) -> Result<AgentHandle> {
+        if opts.inline || opts.ephemeral {
+            anyhow::bail!(
+                "RemoteExecutor does not support --inline/--ephemeral dispatch (durable stream-json path only)"
+            );
+        }
+        let log_file = opts.log_file.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "RemoteExecutor requires a durable log_file (the standard dispatch path)"
+            )
+        })?;
+        let subject = self.cloud.subject_for(&opts.dispatch_id);
+
+        // 1. Start the re-materializer first so we don't miss early events.
+        self.start_log_rematerializer(&subject, log_file).await?;
+
+        // 2. Create the ephemeral Fly Machine worker.
+        let args = self.build_fly_args(opts, &subject)?;
+        let fly_bin = self.cloud.resolved_fly_bin();
+        info!(
+            machine_image = self.cloud.fly_image.as_deref(),
+            app = self.cloud.fly_app.as_deref(),
+            subject = %display_text(&subject),
+            "creating remote worker Machine"
+        );
+        let output = tokio::process::Command::new(&fly_bin)
+            .args(&args)
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to invoke {} machine run — is flyctl installed and authenticated?",
+                    fly_bin.display()
+                )
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "fly machine run failed (exit {:?}): {}",
+                output.status.code(),
+                display_text(stderr.trim())
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let machine_id = Self::parse_machine_id(&stdout).ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not parse a Fly Machine id from `fly machine run` output: {}",
+                display_text(stdout.trim())
+            )
+        })?;
+        info!(machine_id = %display_text(&machine_id), "remote worker Machine created");
+
+        Ok(AgentHandle {
+            session: machine_id,
+            inline_exit_code: None,
+        })
+    }
+
+    fn backend(&self) -> &'static str {
+        "cloud"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,5 +1728,132 @@ exit 0
         let args = std::fs::read_to_string(capture).unwrap();
         assert!(args.contains("--session-id"));
         assert!(args.contains("33333333-3333-4333-8333-333333333333"));
+    }
+
+    // --- RemoteExecutor pure-helper tests ---
+
+    fn remote_cloud_cfg() -> CloudConfig {
+        CloudConfig {
+            enabled: true,
+            fly_app: Some("atc-workers".to_string()),
+            fly_image: Some("registry.fly.io/atc-worker:latest".to_string()),
+            fly_region: Some("iad".to_string()),
+            worker_volume: Some("atc_mirror".to_string()),
+            nats_url: Some("nats://nats.internal:4222".to_string()),
+            nats_subject_prefix: Some("atc.dispatch".to_string()),
+            repo_remote: Some("https://github.com/gitkb/atc.git".to_string()),
+            ..CloudConfig::default()
+        }
+    }
+
+    fn remote_opts() -> AgentOpts {
+        AgentOpts {
+            slug: "tasks/harmony-844".to_string(),
+            worktree_path: PathBuf::from("/tmp/worktrees/tasks--harmony-844/atc"),
+            prompt: "SYSTEM PROMPT\nwith newlines & specials: $(x)".to_string(),
+            directive: Directive::Implement,
+            log_file: Some(PathBuf::from("/tmp/atc/logs/d.jsonl")),
+            env: HashMap::from([
+                ("GITKB_ROOT".to_string(), "/workspace".to_string()),
+                ("BAD KEY".to_string(), "x".to_string()),
+                ("MULTILINE".to_string(), "a\nb".to_string()),
+            ]),
+            session_name: "tasks--harmony-844".to_string(),
+            dispatch_id: "tasks--harmony-844@implement@1780727928109".to_string(),
+            agent_invocation: AgentInvocation::None,
+            sandbox: false,
+            inline: false,
+            max_turns: 10_000,
+            max_budget_usd: 25.0,
+            stdin_content: Some("TASK DOC BODY".to_string()),
+            ephemeral: false,
+            timeout: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_machine_id_from_human_output() {
+        let out =
+            "Success! A Machine has been successfully launched\n  Machine ID: 148e123b71d089\n";
+        assert_eq!(
+            RemoteExecutor::parse_machine_id(out).as_deref(),
+            Some("148e123b71d089")
+        );
+    }
+
+    #[test]
+    fn test_parse_machine_id_none_when_absent() {
+        assert_eq!(RemoteExecutor::parse_machine_id("no id here"), None);
+        // 13 hex chars is too short; must be exactly 14.
+        assert_eq!(RemoteExecutor::parse_machine_id("abcdef0123456"), None);
+    }
+
+    #[test]
+    fn test_worker_branch_sanitizes_and_falls_back() {
+        let opts = remote_opts();
+        assert_eq!(RemoteExecutor::worker_branch(&opts), "tasks--harmony-844");
+
+        let mut blank = remote_opts();
+        blank.session_name = "  ".to_string();
+        blank.slug = "tasks/harmony-844".to_string();
+        assert_eq!(RemoteExecutor::worker_branch(&blank), "tasks/harmony-844");
+    }
+
+    #[test]
+    fn test_encode_payload_round_trips() {
+        let encoded = RemoteExecutor::encode_payload("SYSTEM PROMPT\nwith $(x)");
+        assert!(!encoded.contains('\n'));
+        let decoded = B64.decode(encoded.as_bytes()).unwrap();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "SYSTEM PROMPT\nwith $(x)"
+        );
+    }
+
+    #[test]
+    fn test_build_fly_args_includes_required_flags_and_env() {
+        let exec = RemoteExecutor::new(remote_cloud_cfg());
+        let opts = remote_opts();
+        let subject = exec.cloud.subject_for(&opts.dispatch_id);
+        let args = exec.build_fly_args(&opts, &subject).unwrap();
+        let joined = args.join(" ");
+
+        assert_eq!(args[0], "machine");
+        assert_eq!(args[1], "run");
+        assert!(joined.contains("registry.fly.io/atc-worker:latest"));
+        assert!(joined.contains("--app atc-workers"));
+        assert!(joined.contains("--region iad"));
+        assert!(joined.contains("--restart no"));
+        assert!(joined.contains("atc_mirror:/workspace"));
+        assert!(joined.contains(&format!("atc_dispatch_id={}", opts.dispatch_id)));
+
+        // Required worker env present.
+        assert!(args.contains(&format!("ATC_DISPATCH_ID={}", opts.dispatch_id)));
+        assert!(args.contains(&format!("ATC_NATS_SUBJECT={subject}")));
+        assert!(args.contains(&"ATC_REPO_REMOTE=https://github.com/gitkb/atc.git".to_string()));
+        assert!(args.contains(&"ATC_BRANCH=tasks--harmony-844".to_string()));
+        assert!(args.iter().any(|a| a.starts_with("ATC_SYSTEM_PROMPT_B64=")));
+        assert!(args.iter().any(|a| a.starts_with("ATC_STDIN_B64=")));
+
+        // Safe pass-through env forwarded; unsafe key/value dropped.
+        assert!(args.contains(&"GITKB_ROOT=/workspace".to_string()));
+        assert!(!joined.contains("BAD KEY"));
+        assert!(!args.iter().any(|a| a.starts_with("MULTILINE=")));
+    }
+
+    #[test]
+    fn test_build_fly_args_requires_repo_and_image() {
+        let mut cfg = remote_cloud_cfg();
+        cfg.repo_remote = None;
+        let exec = RemoteExecutor::new(cfg);
+        let opts = remote_opts();
+        let subject = exec.cloud.subject_for(&opts.dispatch_id);
+        assert!(exec.build_fly_args(&opts, &subject).is_err());
+    }
+
+    #[test]
+    fn test_remote_executor_backend_is_cloud() {
+        let exec = RemoteExecutor::new(remote_cloud_cfg());
+        assert_eq!(exec.backend(), "cloud");
     }
 }
