@@ -162,6 +162,10 @@ impl AtcConfig {
                 && cfg.health.cost_warning_threshold >= 0.0,
             "health.cost_warning_threshold must be a finite non-negative number"
         );
+        anyhow::ensure!(
+            cfg.cloud.liveness_ttl_secs > 0,
+            "cloud.liveness_ttl_secs must be >= 1"
+        );
         // Validate source poll intervals
         for (name, source) in &cfg.sources {
             anyhow::ensure!(
@@ -1160,6 +1164,17 @@ max_budget_usd = 10.0
         let cfg: AtcConfig = toml::from_str("").unwrap();
         assert!(!cfg.cloud.enabled);
         assert_eq!(cfg.cloud.liveness_ttl_secs, 120);
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_liveness_ttl() {
+        let toml = "[cloud]\nliveness_ttl_secs = 0";
+        let err = AtcConfig::parse_and_validate(toml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cloud.liveness_ttl_secs must be >= 1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
