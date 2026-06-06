@@ -1,0 +1,29 @@
+# Fly app config for the ATC Cloud worker ([[tasks/harmony-844]]).
+#
+# This app hosts the worker IMAGE and the warm bare-mirror VOLUME. Workers are
+# created on demand as ephemeral Machines by RemoteExecutor (`fly machine run`),
+# NOT by `fly deploy` — there is no long-running service here. There are no
+# [[services]] / [http_service] blocks on purpose: a worker boots, runs one
+# dispatch, and self-destructs.
+#
+# Secrets (set with `fly secrets set -a atc-workers ...`), never in the image:
+#   GH_APP_ID, GH_APP_INSTALLATION_ID, GH_APP_PRIVATE_KEY
+#   NATS_CREDS (or NATS_URL with embedded creds)
+#   FLY_API_TOKEN   (scoped; used by self-destruct.sh)
+#   ANTHROPIC_API_KEY (or Claude auth the headless CLI expects)
+
+app = "atc-workers"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[machine]
+  # Ephemeral: a worker never restarts; it self-destructs on completion.
+  restart = "no"
+
+[mounts]
+  # The warm bare-mirror volume. `fly machine run --volume atc_mirror:/workspace`
+  # forks this volume per worker so each dispatch gets an isolated copy.
+  source = "atc_mirror"
+  destination = "/workspace"
