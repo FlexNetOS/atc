@@ -1118,6 +1118,51 @@ max_budget_usd = 10.0
     }
 
     #[test]
+    fn test_cloud_config_defaults_disabled() {
+        let cfg = CloudConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.liveness_ttl_secs, 120);
+        assert_eq!(cfg.resolved_fly_bin(), PathBuf::from("fly"));
+        assert_eq!(cfg.resolved_nats_bin(), PathBuf::from("nats"));
+        assert_eq!(cfg.resolved_subject_prefix(), "atc.dispatch");
+        assert_eq!(
+            cfg.subject_for("tasks--harmony-844@implement@1780727928109"),
+            "atc.dispatch.tasks--harmony-844@implement@1780727928109.events"
+        );
+    }
+
+    #[test]
+    fn test_cloud_config_parses_from_toml() {
+        let toml_src = r#"
+            [cloud]
+            enabled = true
+            fly_app = "atc-workers"
+            fly_image = "registry.fly.io/atc-workers:latest"
+            worker_volume = "atc_mirror"
+            nats_url = "nats://nats.internal:4222"
+            database_url = "postgres://localhost/atc"
+            repo_remote = "https://github.com/gitkb/atc.git"
+            liveness_ttl_secs = 90
+        "#;
+        let cfg: AtcConfig = toml::from_str(toml_src).unwrap();
+        assert!(cfg.cloud.enabled);
+        assert_eq!(cfg.cloud.fly_app.as_deref(), Some("atc-workers"));
+        assert_eq!(cfg.cloud.resolved_nats_url(), "nats://nats.internal:4222");
+        assert_eq!(
+            cfg.cloud.resolved_database_url().as_deref(),
+            Some("postgres://localhost/atc")
+        );
+        assert_eq!(cfg.cloud.liveness_ttl_secs, 90);
+    }
+
+    #[test]
+    fn test_cloud_config_absent_defaults_to_disabled() {
+        let cfg: AtcConfig = toml::from_str("").unwrap();
+        assert!(!cfg.cloud.enabled);
+        assert_eq!(cfg.cloud.liveness_ttl_secs, 120);
+    }
+
+    #[test]
     fn test_resolved_path_explicit() {
         let cfg = RegistryConfig {
             path: Some(PathBuf::from("/custom/path.db")),
