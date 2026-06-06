@@ -215,7 +215,6 @@ impl HealthChecker {
         Ok(HealthResult { record, changed })
     }
 
-    /// Signal 1: Check if tmux session still exists.
     /// Signal 1: agent_exited_clean. For local (tmux) dispatches this probes
     /// the tmux session; for cloud dispatches it uses a heartbeat TTL derived
     /// from the re-materialized stream-json log (network-free liveness).
