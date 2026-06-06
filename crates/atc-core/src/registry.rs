@@ -27,6 +27,20 @@ fn active_agent_session_index_sql() -> String {
     )
 }
 
+/// Postgres-only: a *unique* partial index enforcing at most one active
+/// (running/retrying) dispatch per provider session. SQLite serializes the
+/// reservation's check-then-insert via `BEGIN IMMEDIATE`, but Postgres
+/// (READ COMMITTED) lets concurrent transactions both pass a pre-check and
+/// insert duplicate active rows, so the constraint must live in the DB to honor
+/// the [`Registry::insert_resume_reservation`] contract atomically.
+fn pg_active_agent_session_unique_index_sql() -> String {
+    format!(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatches_active_agent_session \
+         ON dispatches(agent_provider, agent_session_id) \
+         WHERE {ACTIVE_DISPATCH_STATUS_SQL} AND agent_session_id IS NOT NULL;"
+    )
+}
+
 fn active_agent_session_query_sql(select: &str) -> String {
     format!(
         "{select}
@@ -2076,6 +2090,10 @@ impl PgRegistry {
         for idx_sql in PG_CREATE_INDEXES_SQL {
             sqlx::query(idx_sql).execute(&pool).await?;
         }
+        // Atomic backstop for active-session uniqueness (see helper docs).
+        sqlx::query(&pg_active_agent_session_unique_index_sql())
+            .execute(&pool)
+            .await?;
         Ok(Self { pool })
     }
 
@@ -2339,7 +2357,24 @@ impl Registry for PgRegistry {
                 display_text(&status)
             );
         }
-        Self::insert_dispatch(&mut *tx, record).await?;
+        // The pre-check above gives a friendly message but is not atomic under
+        // READ COMMITTED; the unique partial index is the real guard. Translate
+        // its violation (SQLSTATE 23505) into the same contract error in case a
+        // concurrent reservation slipped in between the check and the insert.
+        if let Err(e) = Self::insert_dispatch(&mut *tx, record).await {
+            let is_unique_violation = e
+                .downcast_ref::<sqlx::Error>()
+                .and_then(|se| se.as_database_error())
+                .and_then(|db| db.code())
+                .is_some_and(|code| code == "23505");
+            if is_unique_violation {
+                anyhow::bail!(
+                    "provider session {} is already active",
+                    display_text(&session_id)
+                );
+            }
+            return Err(e);
+        }
         tx.commit().await?;
         Ok(())
     }
