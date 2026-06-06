@@ -537,6 +537,152 @@ fn parse_params(param_args: &[String]) -> Result<HashMap<String, String>> {
     Ok(params)
 }
 
+/// Handle `atc run` against an abstract registry/executor. Shared by the local
+/// entry point ([`run`]) and the cloud entry point ([`run_cloud`]) so the
+/// dispatch logic stays identical across backends.
+async fn handle_run(
+    command: &Commands,
+    config: &AtcConfig,
+    registry: &dyn Registry,
+    executor: &dyn AgentExecutor,
+) -> Result<()> {
+    let Commands::Run {
+        input,
+        directive,
+        param,
+        pr_url,
+        repos,
+        inline,
+        force,
+        dry_run,
+        list,
+        directives,
+        no_worktree,
+        max_budget_usd,
+        max_turns,
+        resume,
+        ephemeral,
+        timeout,
+        json,
+    } = command
+    else {
+        unreachable!("handle_run called with a non-Run command");
+    };
+    let json_mode = *json;
+    // In --json mode, every failure path (including pre-pipeline argument
+    // validation) must surface as a structured envelope on stdout instead
+    // of the default anyhow stderr trace. Wrap the whole handler in a
+    // closure so we can intercept errors uniformly.
+    let result: Result<()> = (async {
+        if *list {
+            let templates = resolvers::template::TemplateResolver::list_templates(config);
+            if json_mode {
+                let payload = serde_json::json!({
+                    "schema_version": output_schema::SCHEMA_VERSION,
+                    "kind": "templates",
+                    "data": { "templates": templates },
+                });
+                println!("{}", terminal_safe_json_pretty(&payload)?);
+            } else if templates.is_empty() {
+                println!("No templates found.");
+            } else {
+                println!("Available templates:");
+                for name in &templates {
+                    println!("  {}", display_text(name));
+                }
+            }
+            return Ok(());
+        }
+
+        if input.is_empty() || input.iter().all(|s| s.trim().is_empty()) {
+            anyhow::bail!(
+                "input is required: provide a task slug, template name, or prompt string\n\
+                 hint: try `atc run --list` to see templates, or `atc run task <slug>` for a task."
+            );
+        }
+
+        let (raw_input, force_task) = if input.first().map(|s| s.as_str()) == Some("task") {
+            let slug = input[1..].join(" ");
+            if slug.is_empty() {
+                anyhow::bail!(
+                    "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'\n\
+                     hint: list slugs with `git kb list --type task` or check `atc status`."
+                );
+            }
+            (slug, true)
+        } else {
+            (input.join(" "), false)
+        };
+
+        let is_inline = *inline
+            || std::env::var("ATC_CI")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+
+        let params = parse_params(param)?;
+
+        let opts = RunOpts {
+            input: raw_input.clone(),
+            directive: directive.clone(),
+            params,
+            pr_url: pr_url.clone(),
+            repos: repos.clone(),
+            inline: is_inline,
+            force: *force,
+            dry_run: *dry_run,
+            directives: directives.clone(),
+            no_worktree: *no_worktree,
+            max_budget_usd: *max_budget_usd,
+            max_turns: *max_turns,
+            resume: resume.clone(),
+            retries: 0,
+            list: false,
+            ephemeral: *ephemeral,
+            timeout: *timeout,
+            json: json_mode,
+        };
+
+        let all_resolvers = resolvers::build_resolvers(config);
+        let resolvers_to_use = if force_task {
+            all_resolvers
+                .into_iter()
+                .filter(|r| r.name() == "task")
+                .collect()
+        } else {
+            all_resolvers
+        };
+
+        let pipeline = pipeline::DispatchPipeline {
+            resolvers: resolvers_to_use,
+            config,
+            registry,
+            executor,
+        };
+
+        let outcome = pipeline.execute(&raw_input, &opts).await?;
+        if let Some(code) = outcome.inline_exit_code {
+            if code != 0 {
+                if json_mode {
+                    std::process::exit(1);
+                }
+                anyhow::bail!("inline dispatch failed with exit code {code}");
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    if json_mode {
+        if let Err(e) = result {
+            pipeline::emit_run_error_envelope(&e);
+            std::process::exit(1);
+        }
+        Ok(())
+    } else {
+        result
+    }
+}
+
 /// Library entry point for command execution.
 pub async fn run(
     args: &Args,
@@ -545,138 +691,8 @@ pub async fn run(
     executor: Arc<dyn AgentExecutor>,
 ) -> Result<()> {
     match &args.command {
-        Commands::Run {
-            input,
-            directive,
-            param,
-            pr_url,
-            repos,
-            inline,
-            force,
-            dry_run,
-            list,
-            directives,
-            no_worktree,
-            max_budget_usd,
-            max_turns,
-            resume,
-            ephemeral,
-            timeout,
-            json,
-        } => {
-            let json_mode = *json;
-            // In --json mode, every failure path (including pre-pipeline argument
-            // validation) must surface as a structured envelope on stdout instead
-            // of the default anyhow stderr trace. Wrap the whole handler in a
-            // closure so we can intercept errors uniformly.
-            let result: Result<()> = (async {
-                if *list {
-                    let templates = resolvers::template::TemplateResolver::list_templates(config);
-                    if json_mode {
-                        let payload = serde_json::json!({
-                            "schema_version": output_schema::SCHEMA_VERSION,
-                            "kind": "templates",
-                            "data": { "templates": templates },
-                        });
-                        println!("{}", terminal_safe_json_pretty(&payload)?);
-                    } else if templates.is_empty() {
-                        println!("No templates found.");
-                    } else {
-                        println!("Available templates:");
-                        for name in &templates {
-                            println!("  {}", display_text(name));
-                        }
-                    }
-                    return Ok(());
-                }
-
-                if input.is_empty() || input.iter().all(|s| s.trim().is_empty()) {
-                    anyhow::bail!(
-                        "input is required: provide a task slug, template name, or prompt string\n\
-                         hint: try `atc run --list` to see templates, or `atc run task <slug>` for a task."
-                    );
-                }
-
-                let (raw_input, force_task) = if input.first().map(|s| s.as_str()) == Some("task") {
-                    let slug = input[1..].join(" ");
-                    if slug.is_empty() {
-                        anyhow::bail!(
-                            "'atc run task' requires a task slug, e.g. 'atc run task tasks/gitkb-42'\n\
-                             hint: list slugs with `git kb list --type task` or check `atc status`."
-                        );
-                    }
-                    (slug, true)
-                } else {
-                    (input.join(" "), false)
-                };
-
-                let is_inline = *inline
-                    || std::env::var("ATC_CI")
-                        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-                        .unwrap_or(false);
-
-                let params = parse_params(param)?;
-
-                let opts = RunOpts {
-                    input: raw_input.clone(),
-                    directive: directive.clone(),
-                    params,
-                    pr_url: pr_url.clone(),
-                    repos: repos.clone(),
-                    inline: is_inline,
-                    force: *force,
-                    dry_run: *dry_run,
-                    directives: directives.clone(),
-                    no_worktree: *no_worktree,
-                    max_budget_usd: *max_budget_usd,
-                    max_turns: *max_turns,
-                    resume: resume.clone(),
-                    retries: 0,
-                    list: false,
-                    ephemeral: *ephemeral,
-                    timeout: *timeout,
-                    json: json_mode,
-                };
-
-                let all_resolvers = resolvers::build_resolvers(config);
-                let resolvers_to_use = if force_task {
-                    all_resolvers
-                        .into_iter()
-                        .filter(|r| r.name() == "task")
-                        .collect()
-                } else {
-                    all_resolvers
-                };
-
-                let pipeline = pipeline::DispatchPipeline {
-                    resolvers: resolvers_to_use,
-                    config,
-                    registry: registry.as_ref(),
-                    executor: executor.as_ref(),
-                };
-
-                let outcome = pipeline.execute(&raw_input, &opts).await?;
-                if let Some(code) = outcome.inline_exit_code {
-                    if code != 0 {
-                        if json_mode {
-                            std::process::exit(1);
-                        }
-                        anyhow::bail!("inline dispatch failed with exit code {code}");
-                    }
-                }
-                Ok(())
-            })
-            .await;
-
-            if json_mode {
-                if let Err(e) = result {
-                    pipeline::emit_run_error_envelope(&e);
-                    std::process::exit(1);
-                }
-                Ok(())
-            } else {
-                result
-            }
+        Commands::Run { .. } => {
+            handle_run(&args.command, config, registry.as_ref(), executor.as_ref()).await
         }
         Commands::Health { json, all, auto } => {
             health::run_health(
@@ -997,6 +1013,90 @@ pub async fn run(
                 daemon::run_daemon(registry, executor, config, &opts).await
             }
         },
+    }
+}
+
+/// Cloud entry point for the Cloud ATC vertical slice ([[tasks/harmony-844]]).
+///
+/// Selected at `main` when `[cloud] enabled = true`, with a `PgRegistry` and a
+/// `RemoteExecutor` injected as trait objects. It supports the spike's hand-run
+/// command surface — dispatch (`run`), finalize (`post-complete`), and observe
+/// (`status`/`logs`/`info`/`watch`/`health`) — all of which need only
+/// `&dyn Registry`. Queue/daemon and other commands require the SQLite backend
+/// and are intentionally unsupported here (follow-on work).
+pub async fn run_cloud(
+    args: &Args,
+    config: &AtcConfig,
+    registry: Arc<dyn Registry>,
+    executor: Arc<dyn AgentExecutor>,
+) -> Result<()> {
+    match &args.command {
+        Commands::Run { .. } => {
+            handle_run(&args.command, config, registry.as_ref(), executor.as_ref()).await
+        }
+        Commands::PostComplete { id, exit_code, log } => {
+            post_complete::run_post_complete(
+                config,
+                registry.as_ref(),
+                id.as_deref(),
+                *exit_code,
+                log.clone(),
+            )
+            .await
+        }
+        Commands::StatusCmd {
+            status_filter,
+            json,
+            flat,
+            all,
+            include_done,
+            since,
+            reverse,
+        } => {
+            let opts = status::StatusOpts {
+                status_filter: status_filter.clone(),
+                json: *json,
+                flat: *flat,
+                all: *all,
+                include_done: *include_done,
+                since: since.clone(),
+                reverse: *reverse,
+                no_pager: args.no_pager || *json,
+            };
+            status::run_status(registry, Some(&config.pager), opts).await
+        }
+        Commands::Logs { arg, follow } => logs::run_logs(registry, config, arg, *follow).await,
+        Commands::Info { id, json } => info::run_info(registry, id, *json).await,
+        Commands::Watch {
+            id,
+            all_running,
+            format,
+            pretty,
+            socket,
+        } => {
+            let effective_format = if *pretty { "pretty" } else { format.as_str() };
+            watch::run_watch(
+                config,
+                registry,
+                id.as_deref(),
+                *all_running,
+                effective_format,
+                socket.clone(),
+            )
+            .await
+        }
+        Commands::Health { json, all, auto } => {
+            health::run_health(config, registry, executor, *json, *all, *auto).await
+        }
+        Commands::Stop { id } => stop::run_stop(config, registry.as_ref(), id).await,
+        Commands::Cleanup { id, done } => {
+            cleanup::run_cleanup(config, registry.as_ref(), id.as_deref(), *done).await
+        }
+        _ => anyhow::bail!(
+            "this command is not supported with [cloud] enabled; the Cloud ATC slice \
+             supports run, post-complete, status, logs, info, watch, health, stop, and \
+             cleanup. Unset cloud.enabled to use the local SQLite backend."
+        ),
     }
 }
 

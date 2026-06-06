@@ -6,7 +6,7 @@ use crate::types::{
     claude_agent_capabilities, AgentCapabilities, AgentSessionId, DispatchRecord, HealthChecks,
     Status, TerminalLocator, CLAUDE_AGENT_PROVIDER,
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
@@ -1998,6 +1998,727 @@ impl DispatchQueue for SqliteRegistry {
         }
 
         Ok((recovered, completed))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgRegistry — minimal Postgres-backed registry for the Cloud ATC slice.
+//
+// Mirrors the SQLite `dispatches` schema and row mapping with Postgres types
+// and `$N` placeholders. Implements the live methods exercised by the cloud
+// hand-run path (insert / status / cost / pr-url / locator / health / queries)
+// plus `set_artifacts` so post-completion finishes cleanly. Work-unit and
+// dispatch-work-unit methods intentionally fall back to the trait's
+// `bail!`/`Ok(None)` defaults — work units are a follow-on. The DispatchQueue
+// trait is not implemented (no cloud queue in the spike).
+// ---------------------------------------------------------------------------
+
+/// Minimal Postgres-backed [`Registry`] for Cloud ATC.
+pub struct PgRegistry {
+    pool: sqlx::PgPool,
+}
+
+const PG_CREATE_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS dispatches (
+  id                        TEXT PRIMARY KEY,
+  task_slug                 TEXT,
+  branch                    TEXT NOT NULL,
+  worktree_path             TEXT NOT NULL,
+  session                   TEXT NOT NULL,
+  log_file                  TEXT NOT NULL,
+  status                    TEXT NOT NULL DEFAULT 'running',
+  directive                 TEXT NOT NULL,
+  retries                   INTEGER NOT NULL DEFAULT 0,
+  resolver                  TEXT NOT NULL,
+  pr_url                    TEXT,
+  pr_urls                   TEXT NOT NULL DEFAULT '[]',
+  no_worktree               INTEGER NOT NULL DEFAULT 0,
+  original_input            TEXT,
+  kb_root                   TEXT,
+  check_agent_exited_clean  INTEGER NOT NULL DEFAULT 0,
+  check_branch_pushed       INTEGER NOT NULL DEFAULT 0,
+  check_pr_created          INTEGER NOT NULL DEFAULT 0,
+  check_ci_passed           INTEGER NOT NULL DEFAULT 0,
+  check_reviews_approved    INTEGER NOT NULL DEFAULT 0,
+  check_threads_resolved    INTEGER NOT NULL DEFAULT 0,
+  cost_usd                  DOUBLE PRECISION,
+  num_turns                 INTEGER,
+  duration_ms               BIGINT,
+  artifacts                 TEXT,
+  work_unit_id              TEXT,
+  agent_provider            TEXT NOT NULL DEFAULT 'claude',
+  agent_session_id          TEXT,
+  agent_transcript_cwd      TEXT,
+  resume_of_dispatch_id     TEXT,
+  agent_capabilities_json   TEXT,
+  terminal_locator_json     TEXT,
+  dispatched_at             TEXT NOT NULL,
+  updated_at                TEXT NOT NULL
+);
+"#;
+
+const PG_CREATE_INDEXES_SQL: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_status ON dispatches(status);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_task_slug ON dispatches(task_slug);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_branch ON dispatches(branch);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_worktree ON dispatches(worktree_path);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_pr_url ON dispatches(pr_url);",
+    "CREATE INDEX IF NOT EXISTS idx_dispatches_updated_at ON dispatches(updated_at);",
+];
+
+impl PgRegistry {
+    /// Connect to Postgres and ensure the `dispatches` table exists.
+    pub async fn connect(url: &str) -> Result<Self> {
+        let pool = sqlx::PgPool::connect(url)
+            .await
+            .with_context(|| "failed to connect to Postgres registry")?;
+        sqlx::query(PG_CREATE_TABLE_SQL).execute(&pool).await?;
+        for idx_sql in PG_CREATE_INDEXES_SQL {
+            sqlx::query(idx_sql).execute(&pool).await?;
+        }
+        Ok(Self { pool })
+    }
+
+    async fn insert_dispatch<'e, E>(
+        executor: E,
+        record: &DispatchRecord,
+    ) -> Result<sqlx::postgres::PgQueryResult>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let pr_urls_json = serde_json::to_string(&record.pr_urls)?;
+        let pr_url_compat = record.pr_urls.first().cloned();
+        let agent_capabilities_json = record
+            .agent_capabilities
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let terminal_locator_json = record
+            .terminal_locator
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let worktree_path = record
+            .worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
+        let log_file = record
+            .log_file
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("log_file must be valid UTF-8"))?;
+        let kb_root = record
+            .kb_root
+            .as_ref()
+            .map(|p| {
+                p.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("kb_root must be valid UTF-8"))
+            })
+            .transpose()?;
+        let agent_session_id = record.agent_session_id.map(|id| id.to_string());
+        let agent_transcript_cwd = record
+            .agent_transcript_cwd
+            .as_ref()
+            .map(|p| {
+                p.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("agent_transcript_cwd must be valid UTF-8"))
+            })
+            .transpose()?;
+
+        let result = sqlx::query(
+            r#"INSERT INTO dispatches (
+                id, task_slug, branch, worktree_path, session, log_file, status, directive, retries,
+                resolver, pr_url, pr_urls, no_worktree, original_input, kb_root,
+                check_agent_exited_clean, check_branch_pushed, check_pr_created,
+                check_ci_passed, check_reviews_approved, check_threads_resolved,
+                cost_usd, num_turns, duration_ms, work_unit_id,
+                agent_provider, agent_session_id, agent_transcript_cwd, resume_of_dispatch_id,
+                agent_capabilities_json, terminal_locator_json, artifacts, dispatched_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34
+            )"#,
+        )
+        .bind(&record.id)
+        .bind(&record.task_slug)
+        .bind(&record.branch)
+        .bind(worktree_path)
+        .bind(&record.session)
+        .bind(log_file)
+        .bind(record.status.as_str())
+        .bind(record.directive.as_str())
+        .bind(i32::try_from(record.retries).map_err(|_| anyhow::anyhow!("retries overflows i32"))?)
+        .bind(&record.resolver)
+        .bind(&pr_url_compat)
+        .bind(&pr_urls_json)
+        .bind(record.no_worktree as i32)
+        .bind(&record.original_input)
+        .bind(kb_root)
+        .bind(record.checks.agent_exited_clean as i32)
+        .bind(record.checks.branch_pushed as i32)
+        .bind(record.checks.pr_created as i32)
+        .bind(record.checks.ci_passed as i32)
+        .bind(record.checks.reviews_approved as i32)
+        .bind(record.checks.threads_resolved as i32)
+        .bind(record.cost_usd)
+        .bind(
+            record
+                .num_turns
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("num_turns overflows i32"))?,
+        )
+        .bind(
+            record
+                .duration_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?,
+        )
+        .bind(&record.work_unit_id)
+        .bind(&record.agent_provider)
+        .bind(agent_session_id)
+        .bind(agent_transcript_cwd)
+        .bind(&record.resume_of_dispatch_id)
+        .bind(&agent_capabilities_json)
+        .bind(&terminal_locator_json)
+        .bind(&record.artifacts)
+        .bind(record.dispatched_at.to_rfc3339())
+        .bind(record.updated_at.to_rfc3339())
+        .execute(executor)
+        .await?;
+
+        Ok(result)
+    }
+
+    fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<DispatchRecord> {
+        use sqlx::Row;
+
+        let status_str: String = row.get("status");
+        let directive_str: String = row.get("directive");
+        let dispatched_at_str: String = row.get("dispatched_at");
+        let updated_at_str: String = row.get("updated_at");
+        let worktree_str: String = row.get("worktree_path");
+        let log_file_str: String = row.get("log_file");
+        let id: String = row.get("id");
+        let display_id = display_text(&id);
+        let agent_session_id = match row
+            .get::<Option<String>, _>("agent_session_id")
+            .as_deref()
+            .map(AgentSessionId::parse_str)
+            .transpose()
+        {
+            Ok(session_id) => session_id,
+            Err(e) => {
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid agent_session_id");
+                None
+            }
+        };
+        let agent_capabilities = match row
+            .get::<Option<String>, _>("agent_capabilities_json")
+            .as_deref()
+            .map(serde_json::from_str::<AgentCapabilities>)
+            .transpose()
+        {
+            Ok(capabilities) => capabilities,
+            Err(e) => {
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid agent_capabilities_json");
+                None
+            }
+        };
+        let terminal_locator = match row
+            .get::<Option<String>, _>("terminal_locator_json")
+            .as_deref()
+            .map(serde_json::from_str::<TerminalLocator>)
+            .transpose()
+        {
+            Ok(locator) => locator,
+            Err(e) => {
+                let display_error = display_metadata_error(e);
+                warn!(dispatch_id = %display_id, error = %display_error, "ignoring invalid terminal_locator_json");
+                None
+            }
+        };
+
+        Ok(DispatchRecord {
+            id,
+            task_slug: row.get("task_slug"),
+            branch: row.get("branch"),
+            worktree_path: PathBuf::from(worktree_str),
+            session: row.get("session"),
+            log_file: PathBuf::from(log_file_str),
+            status: status_str.parse()?,
+            directive: directive_str.parse()?,
+            retries: u32::try_from(row.get::<i32, _>("retries"))
+                .map_err(|_| anyhow::anyhow!("invalid retries value in database"))?,
+            resolver: row.get("resolver"),
+            pr_urls: {
+                let json_str: String = row.get("pr_urls");
+                serde_json::from_str(&json_str).unwrap_or_default()
+            },
+            no_worktree: row.get::<i32, _>("no_worktree") != 0,
+            original_input: row.get("original_input"),
+            checks: HealthChecks {
+                agent_exited_clean: row.get::<i32, _>("check_agent_exited_clean") != 0,
+                branch_pushed: row.get::<i32, _>("check_branch_pushed") != 0,
+                pr_created: row.get::<i32, _>("check_pr_created") != 0,
+                ci_passed: row.get::<i32, _>("check_ci_passed") != 0,
+                reviews_approved: row.get::<i32, _>("check_reviews_approved") != 0,
+                threads_resolved: row.get::<i32, _>("check_threads_resolved") != 0,
+            },
+            kb_root: row.get::<Option<String>, _>("kb_root").map(PathBuf::from),
+            cost_usd: row.get("cost_usd"),
+            num_turns: row
+                .get::<Option<i32>, _>("num_turns")
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("invalid num_turns value in database"))?,
+            duration_ms: row
+                .get::<Option<i64>, _>("duration_ms")
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("invalid duration_ms value in database"))?,
+            artifacts: row.get("artifacts"),
+            work_unit_id: row.get("work_unit_id"),
+            agent_provider: row.get("agent_provider"),
+            agent_session_id,
+            agent_transcript_cwd: row
+                .get::<Option<String>, _>("agent_transcript_cwd")
+                .map(PathBuf::from),
+            resume_of_dispatch_id: row.get("resume_of_dispatch_id"),
+            agent_capabilities,
+            terminal_locator,
+            dispatched_at: DateTime::parse_from_rfc3339(&dispatched_at_str)?.with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
+        })
+    }
+}
+
+#[async_trait]
+impl Registry for PgRegistry {
+    async fn insert(&self, record: &DispatchRecord) -> Result<()> {
+        Self::insert_dispatch(&self.pool, record).await?;
+        Ok(())
+    }
+
+    async fn insert_resume_reservation(&self, record: &DispatchRecord, force: bool) -> Result<()> {
+        anyhow::ensure!(
+            record.resume_of_dispatch_id.is_some(),
+            "resume reservations require resume_of_dispatch_id"
+        );
+        let Some(session_id) = record.agent_session_id else {
+            anyhow::bail!("resume reservations require agent_session_id");
+        };
+        anyhow::ensure!(
+            record.status == Status::Running,
+            "resume reservations must be inserted with running status, got {}",
+            record.status
+        );
+        if force {
+            return self.insert(record).await;
+        }
+
+        let session_id = session_id.to_string();
+        let mut tx = self.pool.begin().await?;
+        let conflict: Option<(String, String)> = sqlx::query_as(
+            "SELECT id, status FROM dispatches \
+             WHERE agent_provider = $1 AND agent_session_id = $2 \
+               AND status IN ('running', 'retrying') \
+             ORDER BY dispatched_at DESC, id DESC LIMIT 1",
+        )
+        .bind(&record.agent_provider)
+        .bind(&session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((id, status)) = conflict {
+            anyhow::bail!(
+                "provider session {} is already active in dispatch {} (status {})",
+                display_text(&session_id),
+                display_text(&id),
+                display_text(&status)
+            );
+        }
+        Self::insert_dispatch(&mut *tx, record).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn update_status(&self, id: &str, status: Status) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE dispatches SET status = $1, updated_at = $2 WHERE id = $3")
+                .bind(status.as_str())
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn update_session_locator(
+        &self,
+        id: &str,
+        session: &str,
+        terminal_locator: Option<&TerminalLocator>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let terminal_locator_json = terminal_locator.map(serde_json::to_string).transpose()?;
+        let result = sqlx::query(
+            "UPDATE dispatches SET session = $1, terminal_locator_json = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(session)
+        .bind(&terminal_locator_json)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn update_cost(&self, id: &str, cost: f64, turns: u32, duration_ms: u64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE dispatches SET cost_usd = $1, num_turns = $2, duration_ms = $3, updated_at = $4 WHERE id = $5",
+        )
+        .bind(cost)
+        .bind(i32::try_from(turns).map_err(|_| anyhow::anyhow!("turns overflows i32"))?)
+        .bind(i64::try_from(duration_ms).map_err(|_| anyhow::anyhow!("duration_ms overflows i64"))?)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<DispatchRecord>> {
+        let row = sqlx::query("SELECT * FROM dispatches WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_record(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
+        let rows = match &filter {
+            StatusFilter::All => {
+                sqlx::query("SELECT * FROM dispatches ORDER BY dispatched_at DESC, id DESC")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            StatusFilter::One(status) => sqlx::query(
+                "SELECT * FROM dispatches WHERE status = $1 ORDER BY dispatched_at DESC, id DESC",
+            )
+            .bind(status.as_str())
+            .fetch_all(&self.pool)
+            .await?,
+            StatusFilter::Any(statuses) => {
+                if statuses.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let placeholders: Vec<String> =
+                    (1..=statuses.len()).map(|i| format!("${i}")).collect();
+                let sql = format!(
+                    "SELECT * FROM dispatches WHERE status IN ({}) ORDER BY dispatched_at DESC, id DESC",
+                    placeholders.join(", ")
+                );
+                let mut query = sqlx::query(&sql);
+                for s in statuses {
+                    query = query.bind(s.as_str());
+                }
+                query.fetch_all(&self.pool).await?
+            }
+            StatusFilter::AnyOrUpdatedSince {
+                statuses,
+                updated_since,
+            } => {
+                let updated_since = updated_since.to_rfc3339();
+                if statuses.is_empty() {
+                    sqlx::query(
+                        "SELECT * FROM dispatches WHERE updated_at >= $1 ORDER BY dispatched_at DESC, id DESC",
+                    )
+                    .bind(updated_since)
+                    .fetch_all(&self.pool)
+                    .await?
+                } else {
+                    let placeholders: Vec<String> =
+                        (1..=statuses.len()).map(|i| format!("${i}")).collect();
+                    let updated_param = statuses.len() + 1;
+                    let sql = format!(
+                        "SELECT * FROM dispatches \
+                         WHERE status IN ({}) OR updated_at >= ${} \
+                         ORDER BY dispatched_at DESC, id DESC",
+                        placeholders.join(", "),
+                        updated_param
+                    );
+                    let mut query = sqlx::query(&sql);
+                    for s in statuses {
+                        query = query.bind(s.as_str());
+                    }
+                    query.bind(updated_since).fetch_all(&self.pool).await?
+                }
+            }
+        };
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn update_health(
+        &self,
+        id: &str,
+        checks: &HealthChecks,
+        status: Status,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            r#"UPDATE dispatches SET
+                check_agent_exited_clean = $1,
+                check_branch_pushed = $2,
+                check_pr_created = $3,
+                check_ci_passed = $4,
+                check_reviews_approved = $5,
+                check_threads_resolved = $6,
+                status = $7,
+                updated_at = $8
+            WHERE id = $9"#,
+        )
+        .bind(checks.agent_exited_clean as i32)
+        .bind(checks.branch_pushed as i32)
+        .bind(checks.pr_created as i32)
+        .bind(checks.ci_passed as i32)
+        .bind(checks.reviews_approved as i32)
+        .bind(checks.threads_resolved as i32)
+        .bind(status.as_str())
+        .bind(updated_at.to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn set_pr_url(&self, id: &str, url: &str) -> Result<()> {
+        let pr_urls_json = serde_json::to_string(&vec![url])?;
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE dispatches SET pr_url = $1, pr_urls = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(url)
+        .bind(&pr_urls_json)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn add_pr_url(&self, id: &str, url: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().to_rfc3339();
+        let (current_json,): (String,) =
+            sqlx::query_as("SELECT pr_urls FROM dispatches WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let mut urls: Vec<String> = serde_json::from_str(&current_json)?;
+        if !urls.iter().any(|existing| existing == url) {
+            urls.push(url.to_string());
+        }
+        let pr_url_compat = urls.first().cloned();
+        sqlx::query(
+            "UPDATE dispatches SET pr_url = $1, pr_urls = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(&pr_url_compat)
+        .bind(serde_json::to_string(&urls)?)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn set_artifacts(&self, id: &str, artifacts_json: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let result =
+            sqlx::query("UPDATE dispatches SET artifacts = $1, updated_at = $2 WHERE id = $3")
+                .bind(artifacts_json)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn increment_retries(
+        &self,
+        id: &str,
+        new_session: &str,
+        new_log_file: &Path,
+        new_dispatched_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let terminal_locator_json = match sqlx::query_as::<_, (String,)>(
+            "SELECT worktree_path FROM dispatches WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            Some((worktree_path,)) if !new_session.trim().is_empty() => {
+                let locator = TerminalLocator::atc_tmux(
+                    new_session,
+                    Some(PathBuf::from(worktree_path)),
+                    new_dispatched_at,
+                );
+                Some(serde_json::to_string(&locator)?)
+            }
+            _ => None,
+        };
+        let result = sqlx::query(
+            r#"UPDATE dispatches SET
+                retries = retries + 1,
+                session = $1,
+                log_file = $2,
+                status = 'running',
+                dispatched_at = $3,
+                updated_at = $4,
+                check_agent_exited_clean = 0,
+                check_branch_pushed = 0,
+                check_pr_created = 0,
+                check_ci_passed = 0,
+                check_reviews_approved = 0,
+                check_threads_resolved = 0,
+                pr_url = NULL,
+                pr_urls = '[]',
+                cost_usd = NULL,
+                num_turns = NULL,
+                duration_ms = NULL,
+                terminal_locator_json = $5
+            WHERE id = $6"#,
+        )
+        .bind(new_session)
+        .bind(
+            new_log_file
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("new_log_file must be valid UTF-8"))?,
+        )
+        .bind(new_dispatched_at.to_rfc3339())
+        .bind(&now)
+        .bind(&terminal_locator_json)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() > 0,
+            "{}",
+            dispatch_not_found_error(id)
+        );
+        Ok(())
+    }
+
+    async fn find_by_branch(&self, branch: &str) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE branch = $1 ORDER BY dispatched_at DESC, id DESC",
+        )
+        .bind(branch)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_by_task_slug(&self, task_slug: &str) -> Result<Vec<DispatchRecord>> {
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE task_slug = $1 ORDER BY dispatched_at DESC, id DESC",
+        )
+        .bind(task_slug)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_by_pr_url(&self, pr_url: &str) -> Result<Vec<DispatchRecord>> {
+        // Search within the pr_urls JSON array using Postgres jsonb expansion.
+        let rows = sqlx::query(
+            "SELECT DISTINCT d.* FROM dispatches d \
+             WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(d.pr_urls::jsonb) v WHERE v = $1) \
+             ORDER BY d.dispatched_at DESC, d.id DESC",
+        )
+        .bind(pr_url)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_by_worktree(&self, worktree_path: &Path) -> Result<Vec<DispatchRecord>> {
+        let path_str = worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE worktree_path = $1 ORDER BY dispatched_at DESC, id DESC",
+        )
+        .bind(path_str)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
+    }
+
+    async fn find_latest_for_task(&self, task_slug: &str) -> Result<Option<DispatchRecord>> {
+        let row = sqlx::query(
+            "SELECT * FROM dispatches WHERE task_slug = $1 ORDER BY dispatched_at DESC, id DESC LIMIT 1",
+        )
+        .bind(task_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(ref r) => Ok(Some(Self::row_to_record(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_running_on_worktree(&self, worktree_path: &Path) -> Result<Vec<DispatchRecord>> {
+        let path_str = worktree_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("worktree_path must be valid UTF-8"))?;
+        let rows = sqlx::query(
+            "SELECT * FROM dispatches WHERE worktree_path = $1 AND status = $2 ORDER BY dispatched_at DESC, id DESC",
+        )
+        .bind(path_str)
+        .bind(Status::Running.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_record).collect()
     }
 }
 
