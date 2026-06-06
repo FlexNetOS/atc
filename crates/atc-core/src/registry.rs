@@ -3275,7 +3275,9 @@ mod tests {
             .terminal_locator
             .as_ref()
             .expect("retry should persist a terminal locator");
-        let TerminalLocator::Tmux(tmux) = locator;
+        let TerminalLocator::Tmux(tmux) = locator else {
+            panic!("expected tmux locator");
+        };
         assert_eq!(tmux.session, "new-session");
         assert_eq!(tmux.cwd.as_deref(), Some(Path::new("/tmp/test-worktree")));
         assert!(!fetched.checks.agent_exited_clean);

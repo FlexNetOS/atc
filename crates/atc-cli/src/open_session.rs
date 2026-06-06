@@ -85,6 +85,12 @@ pub async fn terminal_status_for_locator(locator: Option<&TerminalLocator>) -> T
         TerminalLocator::Tmux(tmux) => crate::tmux::inspect_session(&tmux.session)
             .await
             .terminal_status(),
+        // Cloud workers run remotely; ATC cannot inspect or attach a local
+        // terminal for them. Report the backend without a local liveness probe.
+        TerminalLocator::Cloud(_) => {
+            TerminalStatus::new(TerminalStatusState::Running, Some("cloud"))
+                .with_reason("remote cloud worker; not locally attachable")
+        }
     }
 }
 
@@ -117,6 +123,15 @@ pub fn open_shell_preview(
                 .or_else(|| Some(format!("terminal is {}", status_state_label(status.state)))),
             action: ACTION_OPEN_SESSION.to_string(),
             backend: Some("tmux".to_string()),
+            attach_command: None,
+        },
+        // Cloud workers are not locally openable. `atc logs`/`atc watch` read
+        // the re-materialized stream-json log instead.
+        TerminalLocator::Cloud(_) => OpenSessionPreview {
+            enabled: false,
+            reason: Some("remote cloud worker; use `atc logs` to follow output".to_string()),
+            action: ACTION_OPEN_SESSION.to_string(),
+            backend: Some("cloud".to_string()),
             attach_command: None,
         },
     }
@@ -157,6 +172,9 @@ async fn attach_result(result: &OpenSessionResult) -> Result<()> {
 
     match result.terminal_locator.as_ref() {
         Some(TerminalLocator::Tmux(tmux)) => crate::tmux::attach(&tmux.session).await,
+        Some(TerminalLocator::Cloud(_)) => {
+            bail!("cannot attach to a remote cloud worker; use `atc logs` to follow output")
+        }
         None => bail!("no terminal locator"),
     }
 }

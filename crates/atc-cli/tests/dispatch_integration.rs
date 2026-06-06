@@ -605,6 +605,7 @@ async fn test_dispatch_non_inline_persists_tmux_terminal_locator() {
             assert_eq!(tmux.source, TerminalLocatorSource::AtcDispatch);
             assert_eq!(tmux.confidence, TerminalLocatorConfidence::Exact);
         }
+        TerminalLocator::Cloud(_) => panic!("local dispatch should not produce a cloud locator"),
     }
 }
 

@@ -532,6 +532,7 @@ fn status_for_effective_locator(
 fn terminal_status_cache_key(locator: &TerminalLocator) -> TerminalStatusCacheKey {
     match locator {
         TerminalLocator::Tmux(tmux) => ("tmux", tmux.session.clone()),
+        TerminalLocator::Cloud(cloud) => ("cloud", cloud.session.clone()),
     }
 }
 
@@ -1863,6 +1864,23 @@ fn locator_detail(row: &SessionRow) -> String {
                 tmux.source.as_str(),
                 tmux.confidence.as_str(),
                 tmux.detected_at.to_rfc3339(),
+                cwd
+            )
+        }
+        Some(TerminalLocator::Cloud(cloud)) => {
+            let cwd = cloud
+                .cwd
+                .as_ref()
+                .map(|path| path.to_string_lossy())
+                .unwrap_or_else(|| "-".into());
+            format!(
+                "cloud worker={} app={} region={} source={} confidence={} detected_at={} cwd={}",
+                cloud.session,
+                cloud.app.as_deref().unwrap_or("-"),
+                cloud.region.as_deref().unwrap_or("-"),
+                cloud.source.as_str(),
+                cloud.confidence.as_str(),
+                cloud.detected_at.to_rfc3339(),
                 cwd
             )
         }
