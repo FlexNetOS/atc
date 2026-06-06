@@ -49,6 +49,9 @@ pub struct AtcConfig {
     /// Pager configuration for human-facing CLI output.
     #[serde(default)]
     pub pager: PagerConfig,
+    /// Cloud ATC configuration (remote Fly worker executor + Postgres registry).
+    #[serde(default)]
+    pub cloud: CloudConfig,
 }
 
 /// `[pager]` section — controls pager program for long human-facing output.
@@ -611,6 +614,129 @@ impl Default for HealthConfig {
             auto_review: false,
             cost_warning_threshold: default_cost_warning_threshold(),
         }
+    }
+}
+
+/// `[cloud]` section — configures the Cloud ATC vertical slice: the remote
+/// Fly-Machine executor, NATS output routing, and the Postgres registry.
+///
+/// When `enabled` is true, `atc run` selects `RemoteExecutor` + `PgRegistry`
+/// instead of the local `ClaudeExecutor` + `SqliteRegistry`. All fields fall
+/// back to environment variables so secrets need not live in the config file.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudConfig {
+    /// Master switch. When false, the cloud path is never selected.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Fly app the ephemeral worker Machines are created under.
+    #[serde(default)]
+    pub fly_app: Option<String>,
+    /// Container image the worker Machine boots (e.g. `registry.fly.io/atc-worker:latest`).
+    #[serde(default)]
+    pub fly_image: Option<String>,
+    /// Fly region for the worker Machine (e.g. `iad`). None lets Fly choose.
+    #[serde(default)]
+    pub fly_region: Option<String>,
+    /// Path to the `fly`/`flyctl` binary. Default: `fly` (found via $PATH).
+    #[serde(default)]
+    pub fly_bin: Option<PathBuf>,
+    /// Name of the warm volume holding the bare mirror of the target repo.
+    /// The worker Machine forks this volume at create time.
+    #[serde(default)]
+    pub worker_volume: Option<String>,
+    /// NATS server URL the worker streams stream-json events to and the control
+    /// plane consumes from. Falls back to `$NATS_URL`, then `nats://127.0.0.1:4222`.
+    #[serde(default)]
+    pub nats_url: Option<String>,
+    /// Path to the `nats` CLI binary. Default: `nats` (found via $PATH).
+    #[serde(default)]
+    pub nats_bin: Option<PathBuf>,
+    /// Subject prefix for per-dispatch event streams. Default: `atc.dispatch`.
+    /// The full subject is `<prefix>.<dispatch_id>.events`.
+    #[serde(default)]
+    pub nats_subject_prefix: Option<String>,
+    /// Postgres connection URL for the registry. Falls back to `$DATABASE_URL`.
+    #[serde(default)]
+    pub database_url: Option<String>,
+    /// Git remote (e.g. `https://github.com/gitkb/atc.git`) the worker mirrors
+    /// and opens a PR against.
+    #[serde(default)]
+    pub repo_remote: Option<String>,
+    /// Cloud liveness TTL (seconds) for health Signal 1: a cloud dispatch whose
+    /// re-materialized log has not advanced within this window is treated as
+    /// exited. Default: 120.
+    #[serde(default = "default_cloud_liveness_ttl_secs")]
+    pub liveness_ttl_secs: u64,
+}
+
+fn default_cloud_liveness_ttl_secs() -> u64 {
+    120
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fly_app: None,
+            fly_image: None,
+            fly_region: None,
+            fly_bin: None,
+            worker_volume: None,
+            nats_url: None,
+            nats_bin: None,
+            nats_subject_prefix: None,
+            database_url: None,
+            repo_remote: None,
+            liveness_ttl_secs: default_cloud_liveness_ttl_secs(),
+        }
+    }
+}
+
+impl CloudConfig {
+    pub fn resolved_fly_bin(&self) -> PathBuf {
+        self.fly_bin
+            .as_ref()
+            .map(|p| expand_tilde(p))
+            .unwrap_or_else(|| PathBuf::from("fly"))
+    }
+
+    pub fn resolved_nats_bin(&self) -> PathBuf {
+        self.nats_bin
+            .as_ref()
+            .map(|p| expand_tilde(p))
+            .unwrap_or_else(|| PathBuf::from("nats"))
+    }
+
+    /// NATS URL: config value, then `$NATS_URL`, then the local default.
+    pub fn resolved_nats_url(&self) -> String {
+        if let Some(ref url) = self.nats_url {
+            return url.clone();
+        }
+        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string())
+    }
+
+    /// Subject prefix for per-dispatch event streams.
+    pub fn resolved_subject_prefix(&self) -> String {
+        self.nats_subject_prefix
+            .clone()
+            .unwrap_or_else(|| "atc.dispatch".to_string())
+    }
+
+    /// Full NATS subject for a dispatch's stream-json events.
+    pub fn subject_for(&self, dispatch_id: &str) -> String {
+        format!("{}.{}.events", self.resolved_subject_prefix(), dispatch_id)
+    }
+
+    /// Postgres connection URL: config value, then `$DATABASE_URL`.
+    pub fn resolved_database_url(&self) -> Option<String> {
+        self.database_url
+            .clone()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+    }
+
+    pub fn liveness_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.liveness_ttl_secs)
     }
 }
 
