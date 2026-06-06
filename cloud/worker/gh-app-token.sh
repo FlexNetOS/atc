@@ -39,8 +39,18 @@ signature=$(printf '%s' "$unsigned" \
 jwt="${unsigned}.${signature}"
 
 # Exchange the JWT for an installation token.
-curl -fsS -X POST \
+response=$(curl -fsS -X POST \
   -H "Authorization: Bearer ${jwt}" \
   -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/app/installations/${GH_APP_INSTALLATION_ID}/access_tokens" \
-  | jq -r '.token'
+  "https://api.github.com/app/installations/${GH_APP_INSTALLATION_ID}/access_tokens")
+
+# `.token // empty` yields "" (not the literal "null") when the field is absent —
+# e.g. an error response — so the guard below catches it. Without this, an
+# invalid/empty token would propagate into the git credential helper and only
+# surface as an opaque auth failure mid-dispatch.
+token=$(printf '%s' "$response" | jq -r '.token // empty')
+if [ -z "$token" ]; then
+  echo "gh-app-token: failed to mint installation token; GitHub response: $response" >&2
+  exit 1
+fi
+printf '%s\n' "$token"

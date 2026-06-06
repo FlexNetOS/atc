@@ -93,12 +93,24 @@ claude -p "$USER_PROMPT" \
   < /tmp/stdin.txt \
   | while IFS= read -r line; do
       printf '%s\n' "$line"                                            # Machine console log
-      printf '%s' "$line" | nats pub --server "$ATC_NATS_URL" "$ATC_NATS_SUBJECT" -- &  # control plane
+      # Publish synchronously (no `&`): backgrounding each line races the writes
+      # and can reorder or drop events, corrupting the stream-json sequence the
+      # control plane re-materializes. Abort the stream if a publish fails so the
+      # truncation surfaces rather than silently passing.
+      if ! printf '%s' "$line" | nats pub --server "$ATC_NATS_URL" "$ATC_NATS_SUBJECT" --; then
+        log "NATS publish failed; aborting stream"
+        exit 86
+      fi
     done
 CLAUDE_RC=${PIPESTATUS[0]}
-wait
+NATS_RC=${PIPESTATUS[1]:-0}
 set -e
-log "claude exited rc=$CLAUDE_RC"
+# A publish failure is fatal even when claude itself finished cleanly — a partial
+# stream on the control plane is an incomplete dispatch.
+if [ "$CLAUDE_RC" -eq 0 ] && [ "$NATS_RC" -ne 0 ]; then
+  CLAUDE_RC="$NATS_RC"
+fi
+log "claude exited rc=$CLAUDE_RC (nats rc=$NATS_RC)"
 
 # --- 5. Self-destruct: tear down this Machine + its forked volume ---
 exec /usr/local/bin/self-destruct.sh "$CLAUDE_RC"

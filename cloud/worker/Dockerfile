@@ -8,6 +8,10 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Use bash with pipefail so a failing command in a `curl … | bash` pipe aborts
+# the build instead of being masked by the pipe's last-command exit status.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl jq git openssl bash xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -20,9 +24,13 @@ RUN curl -fsSL "https://github.com/nats-io/natscli/releases/download/v${NATS_CLI
     && rm -rf /tmp/nats*
 
 # Claude Code headless CLI. Installed from the official channel; the worker runs
-# `claude --output-format stream-json` exactly like a local ATC dispatch.
-RUN curl -fsSL https://claude.ai/install.sh | bash || true
+# `claude --output-format stream-json` exactly like a local ATC dispatch. PATH is
+# set before the install so the post-install check resolves the freshly-installed
+# binary. The build fails fast if the CLI is missing (entrypoint.sh needs it at
+# runtime), rather than masking the failure with `|| true`.
 ENV PATH="/root/.local/bin:${PATH}"
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && command -v claude >/dev/null
 
 COPY entrypoint.sh gh-app-token.sh self-destruct.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint.sh \

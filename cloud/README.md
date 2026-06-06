@@ -11,7 +11,7 @@ pipeline refactor** — and seeds the net-new critical-path code.
 
 ## How it fits the existing ATC code
 
-```
+```text
                           control plane (atc)                         worker (Fly Machine)
   atc run  ──► run_cloud ──► DispatchPipeline ──► RemoteExecutor::spawn ─┐
                                   │                       │              │  entrypoint.sh:
@@ -76,13 +76,16 @@ All secret-bearing values fall back to env vars (`NATS_URL`, `DATABASE_URL`).
    `GH_APP_PRIVATE_KEY`.
 4. **Fly** — `fly apps create atc-workers`; create the warm volume and seed it
    with a bare mirror:
+
    ```bash
    fly volumes create atc_mirror -a atc-workers -r iad -s 10
    # seed the mirror once (bare clone of the target repo into /workspace/repo.git)
    ```
+
    Build/push the image: `fly deploy --build-only --push -a atc-workers` (image
    only — there is no long-running service).
 5. **Worker secrets** (never in the image):
+
    ```bash
    fly secrets set -a atc-workers \
      GH_APP_ID=… GH_APP_INSTALLATION_ID=… GH_APP_PRIVATE_KEY="$(cat key.pem)" \
