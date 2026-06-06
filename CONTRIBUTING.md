@@ -12,6 +12,6 @@ pushing to avoid the format check round-trip.
 
 ## CI for maintainers
 
-Internal PRs (from branches in the gitkb/atc repo) run on our self-hosted Mac Studio
+Internal PRs (from branches in the FlexNetOS/atc repo) run on our self-hosted Mac Studio
 runners. This is the same environment used for `main` builds and release tags, so
 "passes CI" means "passes on the same hardware that builds the release."

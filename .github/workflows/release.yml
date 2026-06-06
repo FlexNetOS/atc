@@ -193,8 +193,8 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg title "ATC $TAG Released" \
             --arg desc "A new version of ATC, the headless agent orchestrator, is available." \
-            --arg install_brew 'brew install gitkb/tap/atc' \
-            --arg url "https://github.com/gitkb/atc/releases/tag/$TAG" \
+            --arg install_brew 'brew install FlexNetOS/tap/atc' \
+            --arg url "https://github.com/FlexNetOS/atc/releases/tag/$TAG" \
             '{
               embeds: [{
                 title: $title,
@@ -281,7 +281,7 @@ jobs:
         run: |
           gh auth setup-git --hostname github.com
 
-          gh repo clone gitkb/homebrew-tap tap
+          gh repo clone FlexNetOS/homebrew-tap tap
           cd tap
 
           VERSION="${{ steps.version.outputs.version }}"
