@@ -1343,10 +1343,15 @@ impl<'a> DispatchPipeline<'a> {
                 warn!(
                     id = %display_text(&resolved.dispatch_id),
                     error = %display_text(&e.to_string()),
-                    "registry insert failed; killing orphan session"
+                    backend = self.executor.backend(),
+                    "registry insert failed; terminating orphan session"
                 );
-                let session_killed = crate::kb::kill_tmux_session(&handle.session).await;
-                if session_killed {
+                // Backend-aware termination: tmux for local, Fly Machine destroy
+                // for cloud. A hardcoded tmux kill would silently "succeed"
+                // against a nonexistent local session for a cloud dispatch and
+                // leak the running worker.
+                let session_terminated = self.executor.terminate(&handle.session).await;
+                if session_terminated {
                     resolver
                         .on_cleanup(&record, self.config, Some(self.registry))
                         .await;
@@ -1354,7 +1359,8 @@ impl<'a> DispatchPipeline<'a> {
                     warn!(
                         id = %display_text(&resolved.dispatch_id),
                         session = %display_text(&handle.session),
-                        "tmux kill inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
+                        backend = self.executor.backend(),
+                        "session termination inconclusive after registry insert failure; skipping on_cleanup to avoid orphaned agent"
                     );
                 }
                 return Err(e);

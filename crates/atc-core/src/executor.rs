@@ -19,6 +19,49 @@ pub trait AgentExecutor: Send + Sync {
     fn backend(&self) -> &'static str {
         "tmux"
     }
+
+    /// Terminate a spawned session so a failed post-spawn step (e.g. the registry
+    /// insert) doesn't leak the agent. The dispatch pipeline calls this from its
+    /// rollback path and only proceeds with locator/resolver cleanup when it
+    /// reports success.
+    ///
+    /// Returns `true` when the session is confirmed gone (or already absent),
+    /// `false` when the outcome is inconclusive. The default kills the local tmux
+    /// session — mirroring the standalone `kill_tmux_session` used by the
+    /// `cleanup`/`stop`/`close` handlers (which don't hold an executor); remote
+    /// backends override this to tear down the worker instead.
+    async fn terminate(&self, session: &str) -> bool {
+        kill_tmux_session_local(session).await
+    }
+}
+
+/// Best-effort tmux session kill backing the default [`AgentExecutor::terminate`].
+/// Returns `true` if the session was killed or was already absent, `false` if the
+/// outcome is inconclusive (timeout / exec failure) so the caller avoids
+/// orphaning state. Kept in `atc-core` so the trait default has no `atc-cli`
+/// dependency; the CLI's `kill_tmux_session` is the same logic for callers that
+/// operate without an executor handle.
+async fn kill_tmux_session_local(session: &str) -> bool {
+    let kill = tokio::process::Command::new("tmux")
+        .args(["kill-session", "-t", session])
+        .stderr(std::process::Stdio::null())
+        .status();
+    match tokio::time::timeout(Duration::from_secs(30), kill).await {
+        // Non-zero exit typically means the session was already gone.
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
+            warn!(
+                session = %display_text(session),
+                error = %display_text(&e.to_string()),
+                "tmux kill-session failed"
+            );
+            false
+        }
+        Err(_) => {
+            warn!(session = %display_text(session), "tmux kill-session timed out");
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -817,10 +860,14 @@ impl RemoteExecutor {
                 }
             })
             .collect();
-        if sanitized.trim_matches('-').is_empty() {
+        // Git rejects refnames that begin with '-' or '.', so strip any leading
+        // run of those. The cloud path's session name is dispatch_id-derived and
+        // won't hit this, but the slug fallback can, so harden it defensively.
+        let branch = sanitized.trim_start_matches(['-', '.']);
+        if branch.is_empty() {
             format!("atc/{}", opts.dispatch_id)
         } else {
-            sanitized
+            branch.to_string()
         }
     }
 
@@ -972,9 +1019,24 @@ impl RemoteExecutor {
             .ok_or_else(|| anyhow::anyhow!("nats sub produced no stdout pipe"))?;
         spawn_stream_to_log(stdout, writer);
         // Detach the child; it streams until the subject closes or the host
-        // process exits.
+        // process exits. Surface an unexpected exit (NATS disconnect, crash) so a
+        // silently-dead consumer — which would leave the log_file truncated — is
+        // diagnosable rather than invisible.
+        let subject_owned = subject.to_string();
         tokio::spawn(async move {
-            let _ = child.wait().await;
+            match child.wait().await {
+                Ok(status) if !status.success() => warn!(
+                    subject = %display_text(&subject_owned),
+                    exit_code = ?status.code(),
+                    "NATS log re-materializer exited unexpectedly"
+                ),
+                Err(e) => warn!(
+                    subject = %display_text(&subject_owned),
+                    error = %display_text(&e.to_string()),
+                    "NATS log re-materializer wait failed"
+                ),
+                _ => {}
+            }
         });
         info!(subject = %display_text(subject), "started NATS log re-materializer");
         Ok(())
@@ -1043,6 +1105,54 @@ impl AgentExecutor for RemoteExecutor {
 
     fn backend(&self) -> &'static str {
         "cloud"
+    }
+
+    /// Tear down the remote worker Machine (`session` is its Fly Machine id).
+    /// Used by the dispatch pipeline's rollback path: a tmux kill would silently
+    /// "succeed" against a nonexistent local session and leak the running worker.
+    async fn terminate(&self, session: &str) -> bool {
+        let fly_bin = self.cloud.resolved_fly_bin();
+        let mut args = vec![
+            "machine".to_string(),
+            "destroy".to_string(),
+            session.to_string(),
+            "--force".to_string(),
+        ];
+        if let Some(app) = self.cloud.fly_app.as_deref() {
+            args.push("--app".to_string());
+            args.push(app.to_string());
+        }
+        let destroy = tokio::process::Command::new(&fly_bin)
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match tokio::time::timeout(Duration::from_secs(30), destroy).await {
+            Ok(Ok(status)) if status.success() => true,
+            Ok(Ok(status)) => {
+                warn!(
+                    machine_id = %display_text(session),
+                    exit_code = ?status.code(),
+                    "fly machine destroy reported failure during rollback"
+                );
+                false
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    machine_id = %display_text(session),
+                    error = %display_text(&e.to_string()),
+                    "fly machine destroy failed during rollback"
+                );
+                false
+            }
+            Err(_) => {
+                warn!(
+                    machine_id = %display_text(session),
+                    "fly machine destroy timed out during rollback"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -1797,6 +1907,19 @@ exit 0
         blank.session_name = "  ".to_string();
         blank.slug = "tasks/harmony-844".to_string();
         assert_eq!(RemoteExecutor::worker_branch(&blank), "tasks/harmony-844");
+
+        // Leading '-'/'.' are stripped (git rejects such refnames).
+        let mut leading = remote_opts();
+        leading.session_name = "-.foo".to_string();
+        assert_eq!(RemoteExecutor::worker_branch(&leading), "foo");
+
+        // Only leading junk -> fall back to the dispatch-id form.
+        let mut junk = remote_opts();
+        junk.session_name = "@@@".to_string();
+        assert_eq!(
+            RemoteExecutor::worker_branch(&junk),
+            format!("atc/{}", junk.dispatch_id)
+        );
     }
 
     #[test]
