@@ -1024,6 +1024,36 @@ pub async fn run(
 /// (`status`/`logs`/`info`/`watch`/`health`) — all of which need only
 /// `&dyn Registry`. Queue/daemon and other commands require the SQLite backend
 /// and are intentionally unsupported here (follow-on work).
+/// Error message shown when a command is invoked with `[cloud]` enabled but is
+/// not wired to the Postgres/remote backend. Shared by [`cloud_command_supported`]
+/// callers (`main`) and [`run_cloud`]'s fallback arm so the two stay in sync.
+pub const CLOUD_UNSUPPORTED_COMMAND_MSG: &str =
+    "this command is not supported with [cloud] enabled; the Cloud ATC slice \
+     supports run, post-complete, status, logs, info, watch, health, stop, and \
+     cleanup. Unset cloud.enabled to use the local SQLite backend.";
+
+/// Whether `command` is supported when the `[cloud]` backend is enabled.
+///
+/// The Cloud ATC slice only wires a subset of commands to the Postgres/remote
+/// backend (see [`run_cloud`]). `main` consults this *before* resolving the
+/// Postgres URL or connecting, so an unsupported command fails with a clear
+/// message instead of an opaque DB/credential error. Keep this list in sync
+/// with the explicit arms of [`run_cloud`].
+pub fn cloud_command_supported(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Run { .. }
+            | Commands::PostComplete { .. }
+            | Commands::StatusCmd { .. }
+            | Commands::Logs { .. }
+            | Commands::Info { .. }
+            | Commands::Watch { .. }
+            | Commands::Health { .. }
+            | Commands::Stop { .. }
+            | Commands::Cleanup { .. }
+    )
+}
+
 pub async fn run_cloud(
     args: &Args,
     config: &AtcConfig,
@@ -1092,17 +1122,13 @@ pub async fn run_cloud(
         Commands::Cleanup { id, done } => {
             cleanup::run_cleanup(config, registry.as_ref(), id.as_deref(), *done).await
         }
-        _ => anyhow::bail!(
-            "this command is not supported with [cloud] enabled; the Cloud ATC slice \
-             supports run, post-complete, status, logs, info, watch, health, stop, and \
-             cleanup. Unset cloud.enabled to use the local SQLite backend."
-        ),
+        _ => anyhow::bail!(CLOUD_UNSUPPORTED_COMMAND_MSG),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_params, Args, Commands};
+    use super::{cloud_command_supported, parse_params, Args, Commands};
     use clap::Parser;
     use std::path::Path;
 
@@ -1116,6 +1142,18 @@ mod tests {
             }
             _ => panic!("expected sessions command"),
         }
+    }
+
+    #[test]
+    fn cloud_command_support_gate_matches_run_cloud_arms() {
+        // Supported in the cloud slice -> must be gated true so main proceeds.
+        let supported = Args::try_parse_from(["atc", "status"]).unwrap();
+        assert!(cloud_command_supported(&supported.command));
+
+        // Not wired to the cloud backend -> gated false so main bails before
+        // resolving Postgres (the unsupported-command message, not a DB error).
+        let unsupported = Args::try_parse_from(["atc", "init"]).unwrap();
+        assert!(!cloud_command_supported(&unsupported.command));
     }
 
     #[test]

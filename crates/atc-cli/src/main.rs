@@ -42,6 +42,11 @@ async fn main() -> anyhow::Result<()> {
     // Cloud ATC slice: select the remote Fly-worker executor + Postgres
     // registry when [cloud] is enabled, otherwise the local tmux/SQLite path.
     if config.cloud.enabled {
+        // Gate command support before touching Postgres so an unsupported command
+        // fails with a clear message rather than an opaque DB/credential error.
+        if !atc_cli::cloud_command_supported(&cli.command) {
+            anyhow::bail!(atc_cli::CLOUD_UNSUPPORTED_COMMAND_MSG);
+        }
         let database_url = config.cloud.resolved_database_url().ok_or_else(|| {
             anyhow::anyhow!(
                 "cloud.enabled is true but no Postgres URL is set (cloud.database_url or DATABASE_URL)"
