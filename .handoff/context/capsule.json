@@ -1,0 +1,10 @@
+{
+  "schema": "handoff.context_capsule.v1",
+  "project_name": "atc",
+  "role": "Headless orchestrator for AI coding agents: dispatches agents into isolated git worktrees (direct `atc run` or `atc enqueue` + daemon), monitors lifecycle via a 6-signal health system with retry and tmux session handling, and tracks everything in a SQLite registry. Code matches the claim: pipeline/dispatch/daemon/sessions/watch in atc-cli, executor/registry/queue/worktree/prompt_engine in atc-core, plus kb.rs wiring tasks to git-kb.",
+  "plane": "continuity-orchestration",
+  "tier": "C",
+  "northstar": "NO HUMAN IN THE LOOP: witnessed work-orders, leases, fail-closed native auto-merge; Git > ledger > cards.",
+  "next_command": "Seam decision vs handoff/weave dispatch; fix action_required gating (NEEDS-HUMAN #7)",
+  "source": "ARCHITECTURE-TRUTH.md census 2026-06-12"
+}
