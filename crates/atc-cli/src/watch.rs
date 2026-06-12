@@ -1124,10 +1124,21 @@ mod tests {
         let socket_path = tempdir.path().join("watch.sock");
         let first_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         let first_identity = socket_identity(&socket_path).unwrap();
-        drop(first_listener);
+        // Unlink the name but keep the listener's fd open across the
+        // replacement bind: the first socket's inode stays allocated, so the
+        // kernel cannot recycle it for the replacement. (On Linux tmpfs,
+        // dropping first made inode reuse common — the replacement then got
+        // the SAME (dev, ino) identity and cleanup correctly removed it,
+        // failing this test for the wrong reason.)
         std::fs::remove_file(&socket_path).unwrap();
 
         let _replacement_listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let replacement_identity = socket_identity(&socket_path).unwrap();
+        drop(first_listener);
+        assert_ne!(
+            first_identity, replacement_identity,
+            "test setup must produce distinct socket identities"
+        );
 
         cleanup_socket_path(&socket_path, first_identity);
 
