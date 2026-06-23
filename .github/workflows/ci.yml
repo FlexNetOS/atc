@@ -28,11 +28,12 @@ jobs:
     # indefinitely. 45m comfortably covers a cold cache build + full test
     # suite; healthy runs land well under it.
     timeout-minutes: 45
-    # Trust-boundary routing: fork PRs land on ubuntu-latest (free, public-repo
-    # standard runners). Internal PRs, main pushes, and any other event run on
-    # our self-hosted Mac Studio. The self-hosted runner is never *requested*
-    # for fork code — not just guarded against. See [[tasks/harmony-467]].
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "macOS", "ARM64"]') }}
+    # FlexNetOS fork: no self-hosted macOS ARM64 runner is registered in this
+    # org, so the upstream trust-boundary routing (fork PRs → ubuntu, internal →
+    # self-hosted Mac Studio; see [[tasks/harmony-467]]) left same-repo PRs
+    # queued forever. Everything runs on GitHub-hosted ubuntu here; the job's
+    # Linux paths (tmux install etc.) already exist.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
