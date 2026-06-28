@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.9](https://github.com/FlexNetOS/atc/compare/v0.1.8...v0.1.9) (2026-06-27)
+
+
+### Bug Fixes
+
+* **ci:** run PR workflows on ubuntu-latest (no self-hosted macOS runner) ([#3](https://github.com/FlexNetOS/atc/issues/3)) ([5d652d7](https://github.com/FlexNetOS/atc/commit/5d652d7d3f8cf4eddbbfcb98a842801085595d39))
+* re-point org refs gitkb/harmony-labs -&gt; FlexNetOS after migration ([310a1f9](https://github.com/FlexNetOS/atc/commit/310a1f9a9596f7fbd0b1b86766cc2a22b0cf38b7))
+
+
+### Miscellaneous
+
+* apply handoff fleet deployment sync ([#5](https://github.com/FlexNetOS/atc/issues/5)) ([8434941](https://github.com/FlexNetOS/atc/commit/84349418e7807461f03e0257b72d1ab68d19aaa2))
+* deploy rusty-idd thin-adapter control plane (fleet) ([#4](https://github.com/FlexNetOS/atc/issues/4)) ([909ad8c](https://github.com/FlexNetOS/atc/commit/909ad8c9f298abddb305271b958089ffc633988e))
+* seed .handoff continuity layer (P7) ([#2](https://github.com/FlexNetOS/atc/issues/2)) ([970ee9e](https://github.com/FlexNetOS/atc/commit/970ee9e3b80f465764a99f24f1213507b9368ae2))
+* update Cargo.lock ([831d594](https://github.com/FlexNetOS/atc/commit/831d5943b0690f77b6306d99c6d09919f5a06a88))
+
 ## [0.1.8](https://github.com/gitkb/atc/compare/v0.1.7...v0.1.8) (2026-06-05)
 
 
