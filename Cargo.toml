@@ -9,7 +9,7 @@ members = [
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/FlexNetOS/atc"
-version = "0.1.10"
+version = "0.1.11"
 
 [workspace.dependencies]
 # Async

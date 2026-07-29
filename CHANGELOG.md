@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/FlexNetOS/atc/compare/v0.1.10...v0.1.11) (2026-07-29)
+
+
+### Miscellaneous
+
+* sync Cargo.lock with the 0.1.10 release version bump ([e062b41](https://github.com/FlexNetOS/atc/commit/e062b417a6552dc96d9fa8822cc780dc904b5c1c))
+
 ## [0.1.10](https://github.com/FlexNetOS/atc/compare/v0.1.9...v0.1.10) (2026-07-29)
 
 
