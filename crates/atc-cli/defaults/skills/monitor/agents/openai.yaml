@@ -1,0 +1,7 @@
+interface:
+  display_name: "ATC Monitor"
+  short_description: "Monitor and assess ATC dispatches"
+  default_prompt: "Use $atc-monitor to inspect this ATC dispatch, summarize progress, and suggest next actions."
+
+policy:
+  allow_implicit_invocation: true

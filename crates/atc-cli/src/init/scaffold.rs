@@ -130,9 +130,9 @@ const DEFAULT_PARTIALS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Embedded default agent skill files — markdown documents teaching coding agents
-/// how to dispatch and monitor ATC. Written to `.atc/skills/<name>.md` and exposed
-/// to specific agents via `atc init <agent>` (symlink or copy).
+/// Embedded default agent skill files and shared references. Written under
+/// `.atc/skills/` and exposed to specific agents via `atc init <agent>`
+/// (symlink or copy).
 pub(crate) const DEFAULT_SKILLS: &[(&str, &str)] = &[
     (
         "atc-reference.md",
@@ -145,6 +145,22 @@ pub(crate) const DEFAULT_SKILLS: &[(&str, &str)] = &[
     (
         "monitor.md",
         include_str!("../../defaults/skills/monitor.md"),
+    ),
+    (
+        "dispatch/SKILL.md",
+        include_str!("../../defaults/skills/dispatch/SKILL.md"),
+    ),
+    (
+        "dispatch/agents/openai.yaml",
+        include_str!("../../defaults/skills/dispatch/agents/openai.yaml"),
+    ),
+    (
+        "monitor/SKILL.md",
+        include_str!("../../defaults/skills/monitor/SKILL.md"),
+    ),
+    (
+        "monitor/agents/openai.yaml",
+        include_str!("../../defaults/skills/monitor/agents/openai.yaml"),
     ),
 ];
 
@@ -164,7 +180,7 @@ pub(crate) fn base_dir(config: &AtcConfig) -> &Path {
 /// - `.atc/components/<name>.md` — default component files embedded in the binary
 /// - `.atc/templates/<name>.md` — default template files embedded in the binary
 /// - `.atc/partials/<name>.md` — default partial files (shared template fragments)
-/// - `.atc/skills/<name>.md` — default agent skill files (atc-reference, dispatch, monitor)
+/// - `.atc/skills/` — shared ATC references plus Codex skill folders
 ///
 /// **Re-init behavior:**
 /// - Without `--force`: create files that don't exist, skip files that do.
@@ -268,6 +284,10 @@ fn write_file(path: &Path, content: &str, label: &str, force: bool) -> Result<()
     if path.exists() && !force {
         println!("  Skipped (exists): {label}");
         return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
     std::fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
     println!("  Created {label}");
@@ -635,6 +655,10 @@ mod tests {
         assert!(names.contains(&"atc-reference.md"));
         assert!(names.contains(&"dispatch.md"));
         assert!(names.contains(&"monitor.md"));
+        assert!(names.contains(&"dispatch/SKILL.md"));
+        assert!(names.contains(&"dispatch/agents/openai.yaml"));
+        assert!(names.contains(&"monitor/SKILL.md"));
+        assert!(names.contains(&"monitor/agents/openai.yaml"));
     }
 
     #[tokio::test]
@@ -741,7 +765,7 @@ mod tests {
         run_init(&cfg, false).await.unwrap();
 
         // Customize a skill file
-        let skill_path = dir.path().join(".atc/skills/atc-reference.md");
+        let skill_path = dir.path().join(".atc/skills/dispatch/SKILL.md");
         std::fs::write(&skill_path, "# customized").unwrap();
 
         // Re-init without force preserves it
