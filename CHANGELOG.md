@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10](https://github.com/FlexNetOS/atc/compare/v0.1.9...v0.1.10) (2026-07-29)
+
+
+### Miscellaneous
+
+* **atc:** land outstanding working-tree work ([2a923a6](https://github.com/FlexNetOS/atc/commit/2a923a6abc89872993face96f86ef0a0850fd688))
+* sync handoff harness assets ([#6](https://github.com/FlexNetOS/atc/issues/6)) ([f5a0168](https://github.com/FlexNetOS/atc/commit/f5a01681be582980e52a940e6a515158e695a015))
+
 ## [0.1.9](https://github.com/FlexNetOS/atc/compare/v0.1.8...v0.1.9) (2026-06-27)
 
 
