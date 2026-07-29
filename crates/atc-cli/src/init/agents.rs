@@ -463,21 +463,16 @@ fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
     })?;
 
     let mut copied: HashSet<String> = HashSet::new();
-
-    let rd = std::fs::read_dir(skills_src)
-        .with_context(|| format!("failed to read {}", skills_src.display()))?;
-    for entry in rd {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
+    for rel in collect_skill_files(skills_src)? {
+        let src = skills_src.join(&rel);
+        let dst = target.join(&rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
         }
-        let src = entry.path();
-        let dst = target.join(entry.file_name());
         std::fs::copy(&src, &dst)
             .with_context(|| format!("failed to copy {} -> {}", src.display(), dst.display()))?;
-        if let Ok(name) = entry.file_name().into_string() {
-            copied.insert(name);
-        }
+        copied.insert(rel);
     }
 
     // Backstop: any embedded skill missing from disk gets restored from the bundle.
@@ -485,8 +480,13 @@ fn copy_skills(skills_src: &Path, target: &Path) -> Result<()> {
         if copied.contains(*name) {
             continue;
         }
-        std::fs::write(target.join(name), content.as_bytes())
-            .with_context(|| format!("failed to write {}", target.join(name).display()))?;
+        let path = target.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+        std::fs::write(&path, content.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
     }
 
     write_marker(target)?;
@@ -505,27 +505,16 @@ fn mirror_skills(skills_src: &Path, target: &Path) -> Result<()> {
     // read failure on a single source file must not silently turn into "file
     // missing" — that path would let the cleanup loop below delete the matching
     // target file as if it had been removed upstream.
-    let mut src_names: HashSet<String> = HashSet::new();
-    for entry in std::fs::read_dir(skills_src)
-        .with_context(|| format!("failed to read {}", skills_src.display()))?
-    {
-        let entry = entry?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("failed to stat {}", entry.path().display()))?
-            .is_file()
-        {
-            continue;
-        }
-        if let Ok(name) = entry.file_name().into_string() {
-            src_names.insert(name);
-        }
-    }
+    let src_names: HashSet<String> = collect_skill_files(skills_src)?.into_iter().collect();
 
     // Write every source file into the target.
     for name in &src_names {
         let src = skills_src.join(name);
         let dst = target.join(name);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
         std::fs::copy(&src, &dst)
             .with_context(|| format!("failed to copy {} -> {}", src.display(), dst.display()))?;
     }
@@ -533,25 +522,68 @@ fn mirror_skills(skills_src: &Path, target: &Path) -> Result<()> {
     // Remove ATC-named files in target that no longer exist in source. Errors
     // here must surface — silently swallowing them hides cleanup failures and
     // can leave the mirror inconsistent.
-    for entry in
-        std::fs::read_dir(target).with_context(|| format!("failed to read {}", target.display()))?
-    {
-        let entry = entry?;
-        let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else {
+    for rel in collect_skill_files(target)? {
+        if !known_names.contains(rel.as_str()) || src_names.contains(&rel) {
             continue;
-        };
-        if !known_names.contains(name) {
-            continue; // user file — leave alone
         }
-        if !src_names.contains(name) {
-            std::fs::remove_file(entry.path())
-                .with_context(|| format!("failed to remove {}", entry.path().display()))?;
-        }
+        let path = target.join(&rel);
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        remove_empty_parents(target, &path)?;
     }
 
     write_marker(target)?;
 
+    Ok(())
+}
+
+fn collect_skill_files(root: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    collect_skill_files_inner(root, root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_skill_files_inner(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let ty = entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if ty.is_dir() {
+            collect_skill_files_inner(root, &path, files)?;
+            continue;
+        }
+        if !ty.is_file() {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .with_context(|| format!("failed to relativize {}", path.display()))?;
+        files.push(rel.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(())
+}
+
+fn remove_empty_parents(root: &Path, removed_path: &Path) -> Result<()> {
+    let mut current = removed_path.parent();
+    while let Some(dir) = current {
+        if dir == root {
+            break;
+        }
+        if std::fs::read_dir(dir)
+            .with_context(|| format!("failed to read {}", dir.display()))?
+            .next()
+            .is_some()
+        {
+            break;
+        }
+        std::fs::remove_dir(dir).with_context(|| format!("failed to remove {}", dir.display()))?;
+        current = dir.parent();
+    }
     Ok(())
 }
 
@@ -579,7 +611,11 @@ mod tests {
         let s = root.join(".atc/skills");
         std::fs::create_dir_all(&s).unwrap();
         for (name, content) in DEFAULT_SKILLS {
-            std::fs::write(s.join(name), content).unwrap();
+            let path = s.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
         }
     }
 
@@ -631,9 +667,9 @@ mod tests {
         assert_eq!(link, PathBuf::from("../../.atc/skills"));
 
         // Through the symlink, we can read the embedded skill files.
-        let through = target.join("atc-reference.md");
+        let through = target.join("dispatch/SKILL.md");
         let s = std::fs::read_to_string(&through).unwrap();
-        assert!(s.contains("ATC Quick Reference"));
+        assert!(s.contains("name: atc-dispatch"));
     }
 
     #[cfg(unix)]
@@ -798,9 +834,14 @@ mod tests {
         std::fs::write(target.join("custom.md"), "user content").unwrap();
 
         // Modify a source skill file and remove one to simulate ATC version drift.
-        std::fs::write(base.join(".atc/skills/dispatch.md"), "# updated dispatch\n").unwrap();
-        // Simulate "removed in source" by deleting one file from .atc/skills/.
-        std::fs::remove_file(base.join(".atc/skills/monitor.md")).unwrap();
+        std::fs::write(
+            base.join(".atc/skills/dispatch/SKILL.md"),
+            "# updated dispatch\n",
+        )
+        .unwrap();
+        // Simulate "removed in source" by deleting one embedded skill subtree
+        // from .atc/skills/.
+        std::fs::remove_dir_all(base.join(".atc/skills/monitor")).unwrap();
 
         // Re-run mirrors source into target.
         let outcome = run_init_agent(
@@ -815,11 +856,12 @@ mod tests {
         assert_eq!(outcome, WireOutcome::Mirrored);
 
         // Updated file reflects new content.
-        let updated = std::fs::read_to_string(target.join("dispatch.md")).unwrap();
+        let updated = std::fs::read_to_string(target.join("dispatch/SKILL.md")).unwrap();
         assert_eq!(updated, "# updated dispatch\n");
 
         // Removed file (matching ATC name) is also removed from target.
-        assert!(!target.join("monitor.md").exists());
+        assert!(!target.join("monitor/SKILL.md").exists());
+        assert!(!target.join("monitor").exists());
 
         // User-added file is preserved.
         assert!(target.join("custom.md").exists());
@@ -903,9 +945,10 @@ mod tests {
     #[test]
     fn user_dir_with_default_skill_filename_is_not_copied() {
         // Regression: is_atc_skills_copy used to return true for any directory
-        // containing a file named after an embedded skill (e.g. `dispatch.md`),
-        // misclassifying user-owned dirs as ATC-managed and putting them at
-        // risk of being mirrored over. The marker file gates that decision.
+        // containing a file named after an embedded skill path (e.g.
+        // `dispatch/SKILL.md`), misclassifying user-owned dirs as ATC-managed and
+        // putting them at risk of being mirrored over. The marker file gates that
+        // decision.
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
         make_skills_dir(base);
@@ -913,9 +956,9 @@ mod tests {
         make_parent(base, entry);
 
         let target = base.join(entry.target_dir);
-        std::fs::create_dir_all(&target).unwrap();
-        // User happens to have a file named like an embedded skill.
-        std::fs::write(target.join("dispatch.md"), "user notes").unwrap();
+        std::fs::create_dir_all(target.join("dispatch")).unwrap();
+        // User happens to have a file named like an embedded skill path.
+        std::fs::write(target.join("dispatch/SKILL.md"), "user notes").unwrap();
 
         assert_eq!(agent_status(base, entry), AgentStatus::UserDir);
     }
@@ -1059,5 +1102,30 @@ mod tests {
             err.to_string().contains("failed to read"),
             "expected read context, got: {err}"
         );
+    }
+
+    #[test]
+    fn copy_mode_preserves_nested_skill_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        make_skills_dir(base);
+        let entry = find_agent("agents").unwrap();
+        make_parent(base, entry);
+
+        run_init_agent(
+            base,
+            "agents",
+            AgentOpts {
+                force: false,
+                copy: true,
+            },
+        )
+        .unwrap();
+
+        let target = base.join(entry.target_dir);
+        assert!(target.join("dispatch/SKILL.md").is_file());
+        assert!(target.join("dispatch/agents/openai.yaml").is_file());
+        assert!(target.join("monitor/SKILL.md").is_file());
+        assert!(target.join("monitor/agents/openai.yaml").is_file());
     }
 }
