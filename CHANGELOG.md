@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/FlexNetOS/atc/compare/v0.1.12...v0.1.13) (2026-07-29)
+
+
+### Bug Fixes
+
+* **ci:** make release-please bump Cargo.lock, and fail the build when it doesn't ([1697e6d](https://github.com/FlexNetOS/atc/commit/1697e6d3aeb96524d851b105e53d071f49f5de27))
+
 ## [0.1.12](https://github.com/FlexNetOS/atc/compare/v0.1.11...v0.1.12) (2026-07-29)
 
 
