@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 use atc_core::config::AtcConfig;
-use atc_core::executor::ClaudeExecutor;
-use atc_core::registry::SqliteRegistry;
+use atc_core::executor::{AgentExecutor, ClaudeExecutor, RemoteExecutor};
+use atc_core::registry::{PgRegistry, Registry, SqliteRegistry};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,6 +38,25 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = AtcConfig::load(cli.config.as_deref())?;
+
+    // Cloud ATC slice: select the remote Fly-worker executor + Postgres
+    // registry when [cloud] is enabled, otherwise the local tmux/SQLite path.
+    if config.cloud.enabled {
+        // Gate command support before touching Postgres so an unsupported command
+        // fails with a clear message rather than an opaque DB/credential error.
+        if !atc_cli::cloud_command_supported(&cli.command) {
+            anyhow::bail!(atc_cli::CLOUD_UNSUPPORTED_COMMAND_MSG);
+        }
+        let database_url = config.cloud.resolved_database_url().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cloud.enabled is true but no Postgres URL is set (cloud.database_url or DATABASE_URL)"
+            )
+        })?;
+        let registry: Arc<dyn Registry> = Arc::new(PgRegistry::connect(&database_url).await?);
+        let executor: Arc<dyn AgentExecutor> = Arc::new(RemoteExecutor::new(config.cloud.clone()));
+        return atc_cli::run_cloud(&cli, &config, registry, executor).await;
+    }
+
     let db_path = config.registry.resolved_path();
     let registry = Arc::new(SqliteRegistry::open(&db_path).await?);
     let executor = Arc::new(ClaudeExecutor {

@@ -59,11 +59,16 @@ pub struct DispatchRecord {
 pub const CLAUDE_AGENT_PROVIDER: &str = "claude";
 pub const ATC_SESSION_URI_PREFIX: &str = "atc://session/";
 const TMUX_TERMINAL_LOCATOR_VERSION: u32 = 1;
+const CLOUD_TERMINAL_LOCATOR_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TerminalLocator {
     Tmux(TmuxTerminalLocator),
+    /// A remote agent running on a cloud worker (e.g. a Fly Machine). The
+    /// `session` field carries the worker/Machine id rather than a tmux session
+    /// name. Introduced for Cloud ATC ([[specs/cloud-atc]] P1).
+    Cloud(CloudTerminalLocator),
 }
 
 impl<'de> Deserialize<'de> for TerminalLocator {
@@ -83,6 +88,21 @@ impl<'de> Deserialize<'de> for TerminalLocator {
         struct TmuxTerminalLocatorWire {
             version: u32,
             session: String,
+            #[serde(default)]
+            cwd: Option<PathBuf>,
+            detected_at: DateTime<Utc>,
+            source: TerminalLocatorSource,
+            confidence: TerminalLocatorConfidence,
+        }
+
+        #[derive(Deserialize)]
+        struct CloudTerminalLocatorWire {
+            version: u32,
+            session: String,
+            #[serde(default)]
+            app: Option<String>,
+            #[serde(default)]
+            region: Option<String>,
             #[serde(default)]
             cwd: Option<PathBuf>,
             detected_at: DateTime<Utc>,
@@ -131,6 +151,29 @@ impl<'de> Deserialize<'de> for TerminalLocator {
                     confidence: tmux.confidence,
                 }))
             }
+            "cloud" => {
+                let cloud =
+                    CloudTerminalLocatorWire::deserialize(value).map_err(de::Error::custom)?;
+                if cloud.version != CLOUD_TERMINAL_LOCATOR_VERSION {
+                    return Err(de::Error::custom(format!(
+                        "unsupported cloud terminal locator version: {}",
+                        cloud.version
+                    )));
+                }
+                if cloud.session.trim().is_empty() {
+                    return Err(de::Error::custom("cloud terminal locator session is empty"));
+                }
+                Ok(Self::Cloud(CloudTerminalLocator {
+                    version: cloud.version,
+                    session: cloud.session,
+                    app: cloud.app,
+                    region: cloud.region,
+                    cwd: cloud.cwd,
+                    detected_at: cloud.detected_at,
+                    source: cloud.source,
+                    confidence: cloud.confidence,
+                }))
+            }
             other => Err(de::Error::custom(format!(
                 "unsupported terminal locator kind: {}",
                 crate::terminal_text::display_text(other)
@@ -170,15 +213,46 @@ impl TerminalLocator {
         })
     }
 
+    /// Build a locator for a remote agent running on a cloud worker. `session`
+    /// carries the worker/Machine id. Used by the remote executor path.
+    pub fn atc_cloud(
+        session: impl Into<String>,
+        app: Option<String>,
+        region: Option<String>,
+        cwd: Option<PathBuf>,
+        detected_at: DateTime<Utc>,
+    ) -> Self {
+        Self::Cloud(CloudTerminalLocator {
+            version: CLOUD_TERMINAL_LOCATOR_VERSION,
+            session: session.into(),
+            app,
+            region,
+            cwd,
+            detected_at,
+            source: TerminalLocatorSource::AtcDispatch,
+            confidence: TerminalLocatorConfidence::Exact,
+        })
+    }
+
     pub fn backend(&self) -> &'static str {
         match self {
             Self::Tmux(_) => "tmux",
+            Self::Cloud(_) => "cloud",
         }
     }
 
     pub fn tmux_session(&self) -> Option<&str> {
         match self {
             Self::Tmux(locator) => Some(locator.session.as_str()),
+            Self::Cloud(_) => None,
+        }
+    }
+
+    /// The worker/Machine id for a cloud locator, if any.
+    pub fn cloud_worker_id(&self) -> Option<&str> {
+        match self {
+            Self::Cloud(locator) => Some(locator.session.as_str()),
+            Self::Tmux(_) => None,
         }
     }
 }
@@ -187,6 +261,25 @@ impl TerminalLocator {
 pub struct TmuxTerminalLocator {
     pub version: u32,
     pub session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    pub detected_at: DateTime<Utc>,
+    pub source: TerminalLocatorSource,
+    pub confidence: TerminalLocatorConfidence,
+}
+
+/// Locator for a remote agent running on a cloud worker (Fly Machine). The
+/// `session` field holds the worker/Machine id. `app`/`region` identify the
+/// Fly app and region the Machine ran in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudTerminalLocator {
+    pub version: u32,
+    /// Worker/Machine id (analogous to a tmux session name for local dispatch).
+    pub session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     pub detected_at: DateTime<Utc>,
@@ -1108,9 +1201,55 @@ mod tests {
         });
 
         let locator: TerminalLocator = serde_json::from_value(legacy_json).unwrap();
-        let TerminalLocator::Tmux(tmux) = locator;
+        let TerminalLocator::Tmux(tmux) = locator else {
+            panic!("expected tmux locator");
+        };
         assert_eq!(tmux.session, "legacy-session");
         assert_eq!(tmux.cwd, Some(PathBuf::from("/tmp/worktree")));
+    }
+
+    #[test]
+    fn test_cloud_terminal_locator_round_trip() {
+        let detected_at = DateTime::parse_from_rfc3339("2026-06-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let locator = TerminalLocator::atc_cloud(
+            "machine-0123456789",
+            Some("atc-workers".to_string()),
+            Some("iad".to_string()),
+            Some(PathBuf::from("/workspace/atc")),
+            detected_at,
+        );
+        assert_eq!(locator.backend(), "cloud");
+        assert_eq!(locator.cloud_worker_id(), Some("machine-0123456789"));
+        assert_eq!(locator.tmux_session(), None);
+
+        let json = serde_json::to_value(&locator).unwrap();
+        assert_eq!(json["kind"], "cloud");
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["session"], "machine-0123456789");
+        assert_eq!(json["app"], "atc-workers");
+        assert_eq!(json["region"], "iad");
+
+        let round_trip: TerminalLocator = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, locator);
+    }
+
+    #[test]
+    fn test_cloud_terminal_locator_rejects_unsupported_version() {
+        let json = serde_json::json!({
+            "kind": "cloud",
+            "version": 2,
+            "session": "machine-1",
+            "detected_at": "2026-06-05T00:00:00Z",
+            "source": "atc-dispatch",
+            "confidence": "exact"
+        });
+
+        let error = serde_json::from_value::<TerminalLocator>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported cloud terminal locator version: 2"));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use crate::config::AtcConfig;
 use crate::registry::{Registry, StatusFilter};
 use crate::terminal_text::display_text;
-use crate::types::{DispatchRecord, HealthChecks, Status};
+use crate::types::{DispatchRecord, HealthChecks, Status, TerminalLocator};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -214,8 +215,47 @@ impl HealthChecker {
         Ok(HealthResult { record, changed })
     }
 
-    /// Signal 1: Check if tmux session still exists.
+    /// Signal 1: agent_exited_clean. For local (tmux) dispatches this probes
+    /// the tmux session; for cloud dispatches it uses a heartbeat TTL derived
+    /// from the re-materialized stream-json log (network-free liveness).
     async fn eval_signal_1(&self, record: &DispatchRecord) -> SignalResult {
+        match record.terminal_locator.as_ref() {
+            Some(TerminalLocator::Cloud(_)) => self.eval_signal_1_cloud(record).await,
+            _ => self.eval_signal_1_tmux(record).await,
+        }
+    }
+
+    /// Cloud liveness: a cloud dispatch is considered still-running while its
+    /// re-materialized log keeps advancing. If neither the log nor the dispatch
+    /// start time has been touched within `cloud.liveness_ttl`, the worker
+    /// Machine has exited (or self-destructed) and the agent is done.
+    ///
+    /// `dispatched_at` acts as a floor so the worker's startup window (volume
+    /// fork + worktree + claude boot, before the first event streams) is not
+    /// misread as an early exit.
+    async fn eval_signal_1_cloud(&self, record: &DispatchRecord) -> SignalResult {
+        let log_mtime = match tokio::fs::metadata(&record.log_file).await {
+            Ok(meta) => meta.modified().ok().map(DateTime::<Utc>::from),
+            Err(_) => None,
+        };
+        let signal = cloud_liveness_signal(
+            record.dispatched_at,
+            log_mtime,
+            Utc::now(),
+            self.config.cloud.liveness_ttl(),
+        );
+        match signal {
+            SignalResult::True => {
+                debug!(id = %display_text(&record.id), "signal 1: cloud worker idle past TTL, agent exited")
+            }
+            _ => {
+                debug!(id = %display_text(&record.id), "signal 1: cloud worker streaming, agent running")
+            }
+        }
+        signal
+    }
+
+    async fn eval_signal_1_tmux(&self, record: &DispatchRecord) -> SignalResult {
         let timeout = Duration::from_secs(self.config.health.signal_timeout_secs);
         let mut cmd = tokio::process::Command::new(&self.tmux_bin);
         cmd.kill_on_drop(true)
@@ -785,6 +825,32 @@ impl HealthChecker {
     }
 }
 
+/// Pure liveness decision for a cloud dispatch. Returns `True` (agent exited)
+/// when the most recent activity — the later of `dispatched_at` and the log
+/// file's last-modified time — is older than `ttl`; otherwise `False` (still
+/// running). Extracted as a free function so it can be unit-tested without
+/// constructing a full `HealthChecker`.
+fn cloud_liveness_signal(
+    dispatched_at: DateTime<Utc>,
+    log_mtime: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    ttl: Duration,
+) -> SignalResult {
+    let last_activity = match log_mtime {
+        Some(mtime) if mtime > dispatched_at => mtime,
+        _ => dispatched_at,
+    };
+    let idle = now
+        .signed_duration_since(last_activity)
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    if idle > ttl {
+        SignalResult::True
+    } else {
+        SignalResult::False
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +859,58 @@ mod tests {
     fn test_apply_transition_agent_still_running() {
         let checks = HealthChecks::default(); // all false
         assert_eq!(HealthChecker::apply_transition(&checks), Status::Running);
+    }
+
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(secs, 0).unwrap()
+    }
+
+    #[test]
+    fn test_cloud_liveness_running_within_startup_window() {
+        // Just dispatched, no log yet — still booting, not exited.
+        let now = ts(1_000);
+        let dispatched_at = ts(990);
+        let signal = cloud_liveness_signal(dispatched_at, None, now, Duration::from_secs(120));
+        assert_eq!(signal, SignalResult::False);
+    }
+
+    #[test]
+    fn test_cloud_liveness_running_while_streaming() {
+        // Log advanced recently — worker is still streaming events.
+        let now = ts(2_000);
+        let dispatched_at = ts(1_000);
+        let log_mtime = ts(1_990);
+        let signal = cloud_liveness_signal(
+            dispatched_at,
+            Some(log_mtime),
+            now,
+            Duration::from_secs(120),
+        );
+        assert_eq!(signal, SignalResult::False);
+    }
+
+    #[test]
+    fn test_cloud_liveness_exited_when_idle_past_ttl() {
+        // Neither dispatch time nor log touched within the TTL — worker gone.
+        let now = ts(2_000);
+        let dispatched_at = ts(1_000);
+        let log_mtime = ts(1_800); // 200s idle > 120s TTL
+        let signal = cloud_liveness_signal(
+            dispatched_at,
+            Some(log_mtime),
+            now,
+            Duration::from_secs(120),
+        );
+        assert_eq!(signal, SignalResult::True);
+    }
+
+    #[test]
+    fn test_cloud_liveness_exited_when_no_log_past_ttl() {
+        // No log ever arrived and the dispatch is older than the TTL — exited.
+        let now = ts(2_000);
+        let dispatched_at = ts(1_800); // 200s idle > 120s TTL
+        let signal = cloud_liveness_signal(dispatched_at, None, now, Duration::from_secs(120));
+        assert_eq!(signal, SignalResult::True);
     }
 
     #[test]

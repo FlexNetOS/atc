@@ -157,6 +157,26 @@ fn add_terminal_locator_lines(
                 &tmux.detected_at.to_rfc3339(),
             );
         }
+        TerminalLocator::Cloud(cloud) => {
+            add_line(lines, "terminal_backend", "cloud");
+            add_line(lines, "terminal_session", &cloud.session);
+            if let Some(app) = cloud.app.as_ref() {
+                add_line(lines, "terminal_app", app);
+            }
+            if let Some(region) = cloud.region.as_ref() {
+                add_line(lines, "terminal_region", region);
+            }
+            if let Some(cwd) = cloud.cwd.as_ref() {
+                add_line(lines, "terminal_cwd", &cwd.to_string_lossy());
+            }
+            add_line(lines, "terminal_source", cloud.source.as_str());
+            add_line(lines, "terminal_confidence", cloud.confidence.as_str());
+            add_line(
+                lines,
+                "terminal_detected_at",
+                &cloud.detected_at.to_rfc3339(),
+            );
+        }
     }
 }
 
