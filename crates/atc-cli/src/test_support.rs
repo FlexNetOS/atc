@@ -54,7 +54,7 @@ impl MockRegistry {
     }
 
     fn with_record_mut<T>(&self, id: &str, f: impl FnOnce(&mut DispatchRecord) -> T) -> Result<T> {
-        let mut records = self.records.lock().unwrap();
+        let mut records = self.records.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let record = records
             .iter_mut()
             .find(|record| record.id == id)
@@ -66,7 +66,7 @@ impl MockRegistry {
 #[async_trait]
 impl Registry for MockRegistry {
     async fn insert(&self, record: &DispatchRecord) -> Result<()> {
-        self.records.lock().unwrap().push(record.clone());
+        self.records.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(record.clone());
         Ok(())
     }
 
@@ -114,14 +114,14 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|record| record.id == id)
             .cloned())
     }
 
     async fn list(&self, filter: StatusFilter) -> Result<Vec<DispatchRecord>> {
-        let records = self.records.lock().unwrap();
+        let records = self.records.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut records = match filter {
             StatusFilter::All => records.clone(),
             StatusFilter::One(status) => records
@@ -226,7 +226,7 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|record| record.branch == branch)
             .cloned()
@@ -237,7 +237,7 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|record| record.task_slug.as_deref() == Some(task_slug))
             .cloned()
@@ -248,7 +248,7 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|record| record.pr_urls.iter().any(|url| url == pr_url))
             .cloned()
@@ -259,7 +259,7 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|record| record.worktree_path == worktree_path)
             .cloned()
@@ -270,7 +270,7 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|record| record.task_slug.as_deref() == Some(task_slug))
             .max_by_key(|record| record.dispatched_at)
@@ -281,7 +281,7 @@ impl Registry for MockRegistry {
         Ok(self
             .records
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|record| {
                 record.worktree_path == worktree_path && record.status == Status::Running
