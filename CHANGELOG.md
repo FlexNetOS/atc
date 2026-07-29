@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/FlexNetOS/atc/compare/v0.1.13...v0.1.14) (2026-07-29)
+
+
+### Bug Fixes
+
+* **atc:** reconcile the landed purged branches into a building workspace ([f433d40](https://github.com/FlexNetOS/atc/commit/f433d40c5aff8a2c42153923ec507689bc68d7bc))
+
 ## [0.1.13](https://github.com/FlexNetOS/atc/compare/v0.1.12...v0.1.13) (2026-07-29)
 
 
