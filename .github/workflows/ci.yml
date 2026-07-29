@@ -86,14 +86,40 @@ jobs:
 
       # Identical check sequence on both runners — drift surface is only the
       # install/cache prelude above. Same step list, same job topology.
+
+      # release-please can only bump the Cargo.lock entries it is told about by
+      # name, so a newly added workspace member is invisible to it until an
+      # extra-files entry exists. --locked below would eventually catch that, but
+      # only on the next release PR and with a confusing "lock file needs update"
+      # message. This says the actual thing to do, at the point the crate is added.
+      - name: Release config covers every workspace member
+        run: |
+          missing=0
+          for manifest in crates/*/Cargo.toml; do
+            name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)
+            [ -n "$name" ] || continue
+            if ! grep -qF "@.name.value=='${name}'" release-please-config.json; then
+              echo "::error file=release-please-config.json::Workspace member '${name}' has no Cargo.lock version updater, so a release would bump Cargo.toml and leave '${name}' stale in Cargo.lock. Add to extra-files: {\"type\": \"toml\", \"path\": \"Cargo.lock\", \"jsonpath\": \"\$.package[?(@.name.value=='${name}')].version\"}"
+              missing=1
+            fi
+          done
+          exit $missing
+
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --locked
 
+      # --locked is what makes a stale Cargo.lock a red build instead of a
+      # silent one. release-please bumps Cargo.toml's workspace version, so the
+      # lock's own entries for the workspace members have to move with it (see
+      # release-please-config.json's Cargo.lock extra-files). Without --locked,
+      # cargo just rewrites the lock in place and nobody notices — that is how
+      # 0.1.10, 0.1.11 and 0.1.12 each shipped with the lock still recording the
+      # previous version.
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --locked
 
       - name: Install nextest
         uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
