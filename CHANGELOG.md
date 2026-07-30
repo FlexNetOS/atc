@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/FlexNetOS/atc/compare/v0.1.14...v0.1.15) (2026-07-29)
+
+
+### Documentation
+
+* **skills:** add a verify skill capturing the atc CLI verification recipe ([988b77f](https://github.com/FlexNetOS/atc/commit/988b77faacbb62c4426f12a8f99457c50277f9ad))
+
 ## [0.1.14](https://github.com/FlexNetOS/atc/compare/v0.1.13...v0.1.14) (2026-07-29)
 
 
