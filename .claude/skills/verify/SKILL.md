@@ -8,19 +8,18 @@ description: Build the atc CLI and drive it at its real surface to verify a chan
 atc is a CLI. The surface is a terminal: build the binary, run it in a
 throwaway directory, read what it prints and what it writes to disk.
 
-## Build
+## Select the owned binary
 
 ```bash
 cd /home/flexnetos/meta/src/atc
-rtk proxy -- cargo build --bin atc
-ATC=/run/user/1001/yazelix/volatile/cargo-target/debug/atc
+ATC=/home/flexnetos/.nix-profile/bin/atc
+rtk stat "$ATC"
 ```
 
-`rtk proxy --` is required — a bare `cargo` is denied by the hook. The
-shared target dir lives on a 50G tmpfs; a full workspace build can fill
-it, and once it is full the harness loses command output entirely with
-ENOSPC. Clear `/run/user/1001/yazelix/volatile/cargo-target/debug` if
-that happens — it is a regenerable cache.
+The Yazelix profile is the sole binary owner. Source changes are tested with
+`rtk cargo test`; they reach the real CLI surface only after the ATC release is
+repinned and rebuilt by Yazelix. Never select a workspace target binary as a
+runtime frontdoor.
 
 ## Drive
 
@@ -28,9 +27,9 @@ Always work in a fresh temp dir. `atc init` writes into `./.atc`, so
 running it in the repo scribbles on the source tree.
 
 ```bash
-D=$(mktemp -d); cd $D
-$ATC init                    # scaffolds .atc/{components,partials,skills}
-find .atc/skills -type f     # nested Codex skills must appear
+D=$(rtk mktemp -d); cd $D
+rtk proxy -- "$ATC" init                    # scaffolds .atc/{components,partials,skills}
+rtk find .atc/skills -type f                # nested Codex skills must appear
 ```
 
 The scaffold must produce both flat and nested skills:
@@ -50,10 +49,10 @@ Agent wiring is a positional argument, not a flag, and the parent dir
 must already exist:
 
 ```bash
-mkdir -p .claude
-$ATC init claude --copy      # mirror; symlink is the default
-$ATC init --list-agents      # registry + wire status
-find .claude -type f
+rtk mkdir -p .claude
+rtk proxy -- "$ATC" init claude --copy      # mirror; symlink is the default
+rtk proxy -- "$ATC" init --list-agents      # registry + wire status
+rtk find .claude -type f
 ```
 
 Copy mode drops a `.atc-skills-managed` marker — `is_atc_skills_copy`
